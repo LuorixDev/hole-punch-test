@@ -65,7 +65,19 @@
 2. 对每个预测候选 (对端地址, 预测端口)：发 `P2POBS1`+hello（HMAC）；
 3. 只接受**来自该候选地址端口**且能通过 `Auth.receive` 的回包；来源不符、非 `P2POBS1`、JSON 畸形、证明不符（伪造）一律丢弃并记 `REPLIES_REJECTED`，绝不当作命中；
 4. 命中即停，终态 `hit`；无回包 → `no_response`（`NO_AUTHENTICATED_REPLY`）；到总时长 → `DEADLINE_REACHED`；
-5. 命中只是"该预测端口上存在通过同一 HMAC 认证的对端映射"的**提示**：要真正用于数据，仍需走与其它候选完全相同的候选认证流程，由 `p2pchat/native/adapter.py` 处理（本任务不改 adapter）。
+5. 命中只表示"该预测端口上存在通过同一 HMAC 认证的对端映射"。命中后该路径以 `predicted-port` 标注（`stats().remoteCandidateType`），**不是** STUN 观测到的候选，也不伪装成 `srflx`；证书 pinning 仍用信令阶段拿到的指纹。
+
+## 5.1 接入真实连接流程（t21）
+
+上面 §5 描述的是库自身的探测。t21 把它接进了真实尝试（`p2pchat/native/adapter.py`），现在有生产调用点：
+
+1. **只有 t10 判定为地址+端口相关（对称型）才会启用**。尝试启动后先在用户显式配置的观测点上采样；结论不是对称型（含"无法判定"）→ 状态 `not-symmetric`，**零额外探测包**，`prediction.observedMapping` 如实记录观测到的映射行为。
+2. **双向样本交换**：本端把观测到的端口分配序列（只含序号、本地端口、观测点地址端口、对外端口；**不含**自己的公网映射地址）用房间密钥 HMAC 签名（域分隔串 `p2pobs-v1-samples`）后作为信令消息 `{"type":"nat-samples"}` 发出；对端回传同样签名。nonce 一次性（每个尝试有界保存 ≤64 个），重复即 `SAMPLES_REPLAY`；证明不符即 `SAMPLES_PROOF_MISMATCH`；形状/长度/地址非法即 `INVALID_SAMPLES`/`SAMPLES_LIMIT`。密钥永远不上信令链路。
+3. **服务端只做白名单校验与转发**：`nat-samples` 在 `p2pchat/server.py::Hub.bind_samples` 里逐字段校验（v/type/to/connectionId/attemptId/mechanism/profile/nonce/proof/samples；未知字段、>64 条、非法/组播/链路本地/未指定地址、非法端口一律拒绝），要求该尝试已存在且绑定匹配（否则 `ATTEMPT_CONFLICT`），每尝试每个 peer 限 8 条（`LIMIT_EXCEEDED`）。服务端**没有房间密钥**，看不到样本内容，也不存储样本，只转发；`signal` 消息的 schema 依旧封闭，样本不能塞进普通信号帧（有测试）。
+4. **同时探测**：两端都用**自己尝试的同一个 UDP socket**（也就是信令过的本地候选）向**已信令的对端地址** + 预测端口发 `P2POBS1` hello。因此对端看到的来源就是它已经认识的候选，回包才能落在它的映射上；每目标最多 `PREDICTION_PROBE_BUDGET = 2` 次，沿用 §3 的候选数/窗口/速率/总时长上限，绝不扫描第三方地址或大范围端口。
+5. **预测目标不是候选**：预测端口只进 `predicted_targets`，地址必须等于已信令对端地址，且仍用同一套 `validate_candidate` 规则校验（把信令候选的元数据配上预测端口）；`kind=predicted` 仍被拒绝。命中后才把该路径标为 `predicted-port`。
+6. **默认关闭 + 显式同意**：`NativeAdapter(prediction={"enabled": True, "points": [...]})` 才启用；桌面端在设置面板「需要你单独同意的三件事」里由用户点按同意后调用 `engine.prediction_enable(consent=True)`，`prediction_disable()` 可随时关闭。`capabilities()['prediction']` 如实报告 `disabled` / `unavailable(OBSERVATION_POINTS_REQUIRED)` / `available`。
+7. **终态明确**：`hit` / `no-hit`（`NO_AUTHENTICATED_REPLY`、`REPLIES_REJECTED`、`DEADLINE_REACHED`、`SEND_FAILED`）/ `unpredictable`（`ALLOCATION_NOT_EXTRAPOLABLE`…）/ `not-symmetric` / `not-applicable`（IPv6）/ `timeout`（`PEER_SAMPLES_TIMEOUT`）/ `unavailable`，都有界、无无限重试。
 
 ## 6. 为什么失败很常见（如实解释）
 
@@ -80,17 +92,29 @@
 
 ```text
 .venv/bin/python -m pytest p2pchat/tests/native/test_port_prediction.py -q
-22 passed in 1.75s    exit 0
+22 passed                                  # t18 库本身
 
-.venv/bin/python -m pytest p2pchat/tests/native -q
-137 passed in 24.77s  exit 0
+.venv/bin/python -m pytest p2pchat/tests/native/test_prediction_integration.py \
+    p2pchat/tests/backend/test_prediction_signal.py -q
+15 passed in 1.70s    exit 0               # t21 接入（含样本交换/同时探测/命中与负例）
+
+.venv/bin/python -m pytest p2pchat/tests -q
+450 passed in 2:06    exit 0
 ```
 
-变更文件 sha256：
+t21 变更文件 sha256（engine.py/ui.py 与 t26 并发共用，哈希为本次运行时刻）：
 
 ```text
-6cd89ad9b202cbf0e348cef1c325702736bc1bc936c11c27078d659dd4db17a3  p2pchat/native/port_prediction.py
-444dd820b333b62b68a93693e559665f7f1f566940c54b181a115799091f3aa9  p2pchat/tests/native/test_port_prediction.py
+70fac9dc36be17f6b1e99500b77c75671bd198bfcca78508369c86a65c3b4285  p2pchat/native/adapter.py
+09c9678497f1b307394ef29dc34467eafe353c0540fff0674a9f2289a1128cfa  p2pchat/server.py
+553caa755fce17bac5ea254142cb7403317050b2d866a329db1e1e4eba64e579  p2pchat/peer.py
+f0c860a7edca7090cfbf3797fc04af46b043732a0b8e89d151df75b05f03f79e  p2pchat/python_desktop/engine.py
+5161440630c57844c63c72ff82f90ca6fccbdb3aa55d19ccf37fdf23cd5e0e10  p2pchat/python_desktop/ui.py
+32222ed0811a85a09c0b7c5dd38984ba69c003a05ccb55b09f7814d8fd701bfb  p2pchat/python_desktop/native_session.py
+a98c4ef18d73c3c0bffbfe2d2a51f4d224355b68aa6af11aaac15df6b0efc95e  p2pchat/python_desktop/signal_session.py
+a7e1e8b6c9202e44af278c6ea54d583c9f8c598b3baabd4d08db58e26f67ef44  p2pchat/tests/native/test_prediction_integration.py
+a4bddf9b02f7306afdf62b2e1cb390007d655976fca7a3a8c27898c7bfbe79d0  p2pchat/tests/backend/test_prediction_signal.py
+0508db7a57bae53e9240f24c898c7f5d368de2d9bbcc97e31ea5a0a7ed68a714  p2pchat/tests/backend/test_benchmark_ack.py
 ```
 
 测试用受控 loopback 端点：脚本化 STUN 观测点构造四种端口分配规律（递增/分块/哈希/随机）与 APDM 分类，脚本化对端构造命中、伪造证明、畸形响应、静默（黑洞）等场景；负例覆盖样本不足、规律冲突、对端地址未信令、候选超限、越窗、总超时。**这些都不是真实家宽对称 NAT 证据**：真实家宽对称 NAT 仍为 **NOT_RUN**，需要用户在自己的网络上用 t10 的 CLI（见 [NAT-BEHAVIOR](NAT-BEHAVIOR.md) 第 6 节）先得到分类，再结合实际打洞观察，才能给出真实成功率。

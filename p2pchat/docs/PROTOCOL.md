@@ -4,6 +4,8 @@
 
 勘误（t10）：仅校正 t2/t3 目录所有权、实验能力验收语义和已授权的中央诊断收集边界；既定 v1 消息与 adapter/native bridge 接口不变。
 
+勘误（t16）：§2 的 join 改为**加入证明 v2**（§2.1），新增迁移矩阵（§2.2）与 `--allow-plaintext`（§2.3）；控制面其余帧、数据面 v1 hello/ACK、adapter/native bridge 接口与既有语义不变。变更文件与 sha256 见 §7。
+
 ## 1. 范围、所有权与安全边界
 
 测试型聊天室，最多 12 人的小房间 mesh；各对端独立直连，不做好友/社交系统、离线消息服务、实时音视频或语音识别。录音是录制结束后的文件。控制面只做认证、发现、候选交换、诊断；STUN 只返回地址。Python Echo 是有明确 peerId 的真正接收终端，不是转发节点。TURN、HTTP/WebSocket 聊天/文件中继永久禁用；TLS/WSS 443 不是 TCP 打洞或数据回退路径。
@@ -24,12 +26,64 @@
 ## 2. 身份和认证
 
 - `v:1` 必填于新协议。`clientSessionId` 为本地随机 UUID，会话日志队列跨重连保持不变；`peerId` 由中心为本次加入随机生成。显示名不是身份。
-- `join {v,type,room,secret,name,clientSessionId,capabilities}`；房间 ID ≤64、名称 ≤48、secret 8–256 字符（UI 推荐随机 ≥128 bit）。秘密只可通过 loopback WS 或 WSS，不能进入日志。服务器保存带随机 salt 的验证值，不把秘密下发给另一方。
+- `join` **v2**（默认，t16 起）：不再发送房间密钥。房间 ID ≤64、名称 ≤48、secret 8–256 字符（UI 推荐随机 ≥128 bit）。加入前先向服务器要一次性 nonce，再提交 HMAC 证明；服务器只保存/比较**派生值**，拿不到也还原不出原始 secret。详见 §2.1。
 - `welcome {v,type,id,strictP2P:true,iceServers,profiles,limits}`；`roster {v,type,peers:[{id,name,capabilities}]}`。服务器覆盖 `from`，不接受客户端自报来源；只向同房间在线目标转发。
 - `connectionId` 是一对 peer 的逻辑连接 UUID，由 peerId 字典序较小者生成并通过首个 offer 宣告。所有并行机制同一 connectionId；每机制/策略/重试各自新 `attemptId` UUID。尝试必须绑定 `(connectionId,attemptId,from,to,mechanism,profile)`，不得中途更换；两个发起者冲突时以字典序较小者为主并明确拒绝另一个 attempt。
 - 新数据通道首先交换 `hello {v,kind,peer,connectionId,attemptId,nonce,proof}`。`proof` 是 HMAC-SHA256：UTF-8 JSON 紧凑数组 `["p2pobs-v1",room,connectionId,attemptId,senderPeerId,receiverPeerId,nonce]`，key 为 UTF-8 房间 secret，nonce 为新 32 字节随机数的 hex，proof为64小写hex。紧凑JSON不转义非ASCII、无空格，所有字段均字符串。返回 `hello-ack {v,kind,peer,connectionId,attemptId,nonce,echoNonce,proof}`：nonce为发送方自己的hello nonce，echoNonce为收到的对方hello nonce；proof覆盖数组 `["p2pobs-v1-ack",room,connectionId,attemptId,senderPeerId,receiverPeerId,nonce,echoNonce]`。收/发双方 proof、nonce、attempt 一致且双向 ACK 后才允许应用消息；每 attempt 的 nonce 只接受一次。常量时间比较，禁止把 proof/key/nonce 原文写日志。
-- 这提供“知道房间共享密钥且来自已信任 WSS 信令所指对端”的配对，不提供恶意同房间成员之间的独立身份认证；共享密钥成员可冒充，服务端可见 join secret。UI 不得宣称独立公钥身份或零信任服务器。WebRTC SDP DTLS 指纹必须由已认证信令绑定；QUIC/TCP TLS 指纹也须绑定同一 attempt，禁止无条件忽略证书。
+- 这提供“知道房间共享密钥且来自已信任 WSS 信令所指对端”的配对，不提供恶意同房间成员之间的独立身份认证；共享密钥成员可冒充。**服务器不再接触原始房间密钥**（t16 起，见 §2.1）：它只保存由 secret 派生的加入验证值，无法用它伪造数据面配对证明。UI 不得宣称独立公钥身份或零信任服务器。WebRTC SDP DTLS 指纹必须由已认证信令绑定；QUIC/TCP TLS 指纹也须绑定同一 attempt，禁止无条件忽略证书。
 - 路径 `direct` 判定：身份握手完成、双向挑战应答完成、实际端点非 relay；WebRTC 还要检查 selected pair。仅 ICE connected、socket connected、hello 字符串、探测包收到或中心可达都不算验证通过。
+
+### 2.1 加入证明 v2：信令链路不再传输房间密钥（t16）
+
+**问题**：旧 `join` 把房间 secret 原文交给服务器（`{"type":"join","secret":"..."}`）。该 secret 同时是端到端配对 HMAC 的密钥，所以（a）服务器本身能看到用户密钥，（b）任何明文/无 TLS 链路（HTTP 或 WS）上的观察者都能拿到**可复用**凭据。
+
+**现在**：客户端用由 secret 派生的密钥，对服务器下发的随机数做 HMAC 证明。
+
+```
+客户端                                                        服务器
+  |-- {v:1,type:"join_challenge",room,clientSessionId} ------>|  生成一次性 nonce(48 hex, TTL 30s)
+  |<- {v:1,type:"join_challenge",nonce,expiresInMs, ----------|  绑定 room+clientSessionId
+  |    proof:"hkdf-sha256-hmac-v2",roomEstablished:<bool>}    |
+  |
+  |  joinKey = HKDF-SHA256(ikm=secret, salt=room, info="p2pchat/join-key/v2")   (=32B hex)
+  |  proof   = HMAC-SHA256(key=joinKey, msg=UTF8(room \0 nonce \0 clientSessionId))
+  |
+  |-- {v:1,type:"join",joinVersion:2,room,name,clientSessionId,capabilities,
+  |    nonce,proof, verifier:joinKey(仅当 roomEstablished=false)} --------->| 常量时间比较校验 proof
+  |<- welcome / error{AUTH_FAILED|UNSUPPORTED_VERSION|SCHEMA_INVALID|LIMIT_EXCEEDED} -------|
+```
+
+约束与不变量：
+
+* **链路上没有房间密钥**：只有 HKDF 派生值（`verifier`，且只在房间还没有密钥时出现一次）与 nonce 绑定的证明。派生值不是数据面密钥，也无法反推 secret；拿到它最多能加入该房间的**信令**，不能伪造端到端配对证明。
+* **服务器不接收、不存储原始 secret**：内存里只保留 `HMAC(salt, 'v2' \0 room \0 joinKey)` 形式的房间校验值与 `roomVerifierScope`；数据目录（`server.jsonl`、`events.sqlite3`）里既没有 secret，也没有 `verifier`/joinKey 原文（有测试断言）。
+* **nonce 一次性且有时效**：取用即作废（重放同一 nonce 必然 `AUTH_FAILED`）；默认 30 秒过期；绑定 `(room, clientSessionId)`，换房间或换会话都失败；未决 nonce 总量与每来源下发速率都有上限。
+* **校验失败语义不变**：仍是 `AUTH_FAILED`；缺字段/格式不对是 `SCHEMA_INVALID`。
+* **HTTP/SSE 通道**同样先 `POST /signal/join/challenge` 取 nonce，再 `POST /signal/join` 提交证明；两条通道共用同一套校验代码。
+
+**房间密钥只能在同一种协议内建立**：v1 房间（旧协议建立）与 v2 房间不能混用，跨协议加入一律 `AUTH_FAILED`（两者校验值含义不同，混用等于静默降级）。房间空掉时密钥随之释放（与既有行为一致）。
+
+### 2.2 迁移与兼容矩阵（旧客户端 / 旧服务器）
+
+| 客户端 | 新服务器（t16，v2 默认） | 旧服务器（只认 v1） |
+|---|---|---|
+| 新客户端：`peer.py`、`web/core.js` 的 `joinMessage()`（v2） | 正常加入 | `join_challenge` 不被识别 → 明确失败，**不会**退回明文密钥 |
+| 旧客户端：仍发 `{"type":"join","secret":...}`（t16 时 `web/app.js` 与 `python_desktop` 尚未接线） | **本机来源（loopback）**：接受并记 WARNING；**其他来源**：`UNSUPPORTED_VERSION` + `hint:"JOIN_PROOF_V2_REQUIRED"` + 人话 `detail`；操作者可用 `--allow-legacy-join` 显式放开（临时逃生门，默认关） | 正常加入（旧行为） |
+
+* **没有静默降级路径**：客户端只在拿到服务器 nonce 后才构造 v2 加入；nonce 缺失/不合法就报错，不会改用 v1 的明文密钥。
+* **待接线**：`web/app.js` 的 `connect()` 与桌面端（`python_desktop`，后续任务）仍需改为「先 `joinChallengeMessage()` 再 `joinMessage()`」；`core.js` 已导出 `JOIN`/`joinKey`/`joinProof`/`joinChallengeMessage`/`joinMessage` 供接线。接线前这些客户端只能从服务器本机来源加入。
+* **反向代理的坑**：旧协议兼容只看“来源是不是本机”——如果服务器前面有同机反向代理，远端旧客户端会看起来像 loopback。此时请用 `--deny-legacy-join`（对所有来源一律拒绝旧协议，含本机），不要让兼容判定替你决定。
+* **回滚**：回到旧行为需要旧客户端 + 服务器侧 `--allow-legacy-join`；不推荐长期这样跑。
+
+### 2.3 明文监听开关（`--allow-plaintext`）
+
+* 默认行为不变：只要有非回环 `--host`，就必须同时提供 `--cert/--key` 与 `--origin`，否则拒绝启动。
+* 只有操作者显式加 `--allow-plaintext` 才允许非回环明文监听；启动时必须打印醒目警告：
+
+  > 警告：--allow-plaintext 已启用，信令未加密，链路可被观察/干扰；房间密钥不再在链路上传输。任何能看到这条链路的人都可以观察或干扰信令，请只在你有意为之的隔离网络里这样用。
+
+* `--allow-plaintext` 不能替代 `--origin`（allowlist 仍必须配置），也不与 STUN/网关相关开关合并——它是独立开关，默认关闭，不存在隐式放开。
+* 即使开了明文，房间密钥仍不上链路（§2.1 的不变量与链路上是否加密无关）。
 
 ## 3. 控制面帧
 
@@ -83,7 +137,7 @@ UDP 精确 tuple 双向探测本身 `canMessage:false`，必须用 HMAC+nonce、
 - 二进制 v1 块：`u16be id字节数 | UTF8 id | u32be sequence | payload`；id≤100字节，payload≤16384字节，sequence从0递增。接收必须拒绝跳号、重号、未知ID、越界，不把 v0 缺失序号帧解释为 v1。
 - `file-ready {id,ok,reason?}` 后才发块；每16块或250ms发 `file-progress {id,nextSequence,receivedBytes}`，仅显示进度，不等于完成。`file-end {id}` 后校验实际大小和 SHA-256，`file-ack {id,ok,bytes,sha256,elapsedMs}`。发送方检查 ACK 归属 attempt、ID、大小、hash 才报告成功。块内重传不是当前保证；断路取消并用新ID重发，不能 silently resume。
 - 单进程最多8个活动接收、所有活动接收预留总额64MiB（不能8×32MiB不受控）；发送并发每peer2、全局4。超过限额先拒绝。buffer高水位512KiB、低水位128KiB；等待不能忙循环且关闭可立即中断。file-ready/最终ack超时60秒、无进展30秒，取消释放接收缓存、计时器、对象 URL 和 ACK map。
-- benchmark 专用 `bench-start/chunk/end/ack`，上限每轮32MiB或10秒，默认5秒、一条测速任务；不能沿用 file 的免 hash 标记绕过文件完整性。统计有效接收 ACK bytes / 单调 elapsed，注明 application goodput，不冒充线路带宽。probe RTT 用本地单调 nonce 往返，不用两个设备墙钟相减。发现与测速分别按钮，默认聊天可用才自动选首路，但不取消其余发现；切换路径不能把正在传文件移到另一个 attempt。
+- benchmark 专用 `bench-start/chunk/end/ack`，上限每轮32MiB；时长不再用固定硬窗口，改为**进度型空闲窗口**：空闲 20 秒即超时，发起方可协商 `drainMs`（≤60 秒，窗口取 max(20, drain+5)），另设 300 秒硬顶兜底；桌面端当前宣告 drainMs=10000，因此 12–15 秒的长轮次也能正常拿到 bench-ack。失败必须发 `bench-error{code}` 与 `task.error` 诊断事件、不得静默关通道；对端沉默仍报 ACK_TIMEOUT 且不伪造速率。默认一条测速任务；不能沿用 file 的免 hash 标记绕过文件完整性。统计有效接收 ACK bytes / 单调 elapsed，注明 application goodput，不冒充线路带宽。probe RTT 用本地单调 nonce 往返，不用两个设备墙钟相减。发现与测速分别按钮，默认聊天可用才自动选首路，但不取消其余发现；切换路径不能把正在传文件移到另一个 attempt。
 - Echo 只在自己的 direct channel 上回复来源 peer，不向房间广播、不替 A 转发 B。echoOf 缺失且 payload 完整验证才回声一次，回复新 id+原 id 为 echoOf；带 echoOf 的帧不再回声，benchmark/hello/ACK 不回声。至少两只 echo bot 相连也不能形成循环。
 
 ## 6. 可关联诊断与持久化
@@ -101,3 +155,24 @@ UDP 精确 tuple 双向探测本身 `canMessage:false`，必须用 HMAC+nonce、
 浏览器 IndexedDB；Python/sidecar SQLite；Electron用应用私有数据目录；Android使用 WebView持久化（清理/卸载会丢失，UI注明）。本地日志总额20MiB/7天，待传上限2000条；中心默认100MiB/7天并有数据库/WAL与JSONL轮转策略。超额淘汰最旧诊断并记录 droppedCount，不删除聊天内容因为日志从不存聊天。时间/磁盘/批量计数都有测试；日志自身故障不能造成消息改走服务器。用户本地导出是单独操作，不等于允许向GitHub等外部目的地上传；不影响已获授权的本产品脱敏诊断自动集中收集。
 
 可观测性：WebRTC 只声称 getStats 暴露的 selected pair/字节/RTT；浏览器通常看不到 IP头、TCP flags、原始 STUN事务/重传包、真实外网线路 MTU，字段使用 `null` + `unavailableReason`。aiortc 缺 selected-pair API 时不得编造。pcap 如额外获授权仅本地保存、人工脱敏、不进 GitHub；未抓到的包不补造。
+
+## 7. 本次变更（t16）：加入证明 v2 与显式明文开关
+
+| 文件 | 说明 | sha256 |
+|---|---|---|
+| `p2pchat/server.py` | 新增 join_challenge + v2 加入校验（HKDF 派生值 + nonce HMAC、一次性/有时效/绑定房间与会话）、房间密钥按协议版本区分、旧协议来源策略（本机兼容 / `--allow-legacy-join` / `--deny-legacy-join`）、`--allow-plaintext` 与醒目警告、错误帧新增 `hint`/`detail` | `16e2d88c05089330cec03ebaf1a8824aa526a5a9c688846c78ccc8f153383204` |
+| `p2pchat/peer.py` | Python peer 改用 v2 加入（`derive_join_key`/`join_proof`/`join_v2`），不再发送房间密钥 | `f7ab45c0626f7260b33c80eff2ca334421e0f951fc54a26e0f67729355b2f74c` |
+| `p2pchat/web/core.js` | 导出 `JOIN`/`joinKey`/`joinProof`/`joinChallengeMessage`/`joinMessage`（WebCrypto HKDF+HMAC，与 Python 实现同值，有 node 测试交叉核对） | `602b9f5230746cf5f9d9d30c37d67e4b1761dec9981fd4d722c8f8fae960733a` |
+| `p2pchat/tests/backend/test_join_proof.py` | 19 项：正例/错密钥/重放/过期/缺失/伪造/绑定/服务器不含原始密钥/旧协议策略/无静默降级/明文开关 | `4ddfca7970e1facb424758d3ff7021865b174b5976cfaea67ea73f385801e8a1` |
+| `p2pchat/tests/client/joinproof.test.cjs` | 5 项：派生值与独立 HKDF 实现一致、报文不含 secret、无 nonce 时不构造证明 | `65f7a7e014ec7eef7f2678792b4911f81d8a9137d7c394968fd43e0dc4397cba` |
+| `p2pchat/docs/PROTOCOL.md` | 本文档（§2 加入报文、§2.1/2.2/2.3 安全与迁移说明、本节） | 见交付报告（自引用会使哈希失效） |
+
+复现命令：
+
+```bash
+.venv/bin/python -m pytest p2pchat/tests/backend/test_join_proof.py -q   # 19 passed
+.venv/bin/python -m pytest p2pchat/tests/backend -q                      # 183 passed
+node --test p2pchat/tests/client                                         # 47 passed
+```
+
+尚未接线的客户端：`web/app.js`（`connect()` 仍发旧 join）与 `python_desktop`（后续任务）。接线前它们只能从服务器本机来源加入——这是有意的明确失败，不是静默降级。

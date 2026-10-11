@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
+    name: Clients (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
@@ -22,8 +23,6 @@ jobs:
             target: android
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
@@ -43,10 +42,6 @@ jobs:
       - name: Install locked npm dependencies (no unreviewed lifecycle scripts)
         working-directory: p2pchat
         run: npm ci --ignore-scripts
-      - name: Install explicitly approved Electron runtime
-        if: matrix.target != 'android'
-        working-directory: p2pchat
-        run: node node_modules/electron/install.js
       - name: Python dependencies and bundler
         run: python -m pip install -r p2pchat/requirements.txt -r p2pchat/platform/build-requirements.txt -c p2pchat/platform/constraints.txt
       - name: Platform and client gates
@@ -69,19 +64,30 @@ jobs:
             python -u p2pchat/ci/watchdog.py --timeout 90 -- python -u p2pchat/ci/windows-analysis/diagnostic_runner.py p2pchat/tests/backend/test_data_limits.py -vv -s --tb=short -o faulthandler_timeout=60 2>&1 | tee p2pchat/releases/windows-peer-diagnostic.log
           fi
           python -u p2pchat/ci/watchdog.py --timeout 600 -- python -u -m pytest p2pchat/tests -vv -s -o faulthandler_timeout=120 --durations=20 2>&1 | tee p2pchat/releases/python-tests.log
-      - name: Build desktop native sidecar and client
+      - name: Build desktop client with PyInstaller (one-folder bundle)
         if: matrix.target != 'android'
-        working-directory: p2pchat
         shell: bash
         run: |
           set -o pipefail
-          npm run dist:${{ matrix.target }} 2>&1 | tee releases/build.log
+          mkdir -p p2pchat/releases
+          python -m PyInstaller --noconfirm --clean p2pchat/tools/desktop.spec 2>&1 | tee p2pchat/releases/desktop-build.log
+          test -d dist/p2p-desktop
+      - name: Run the packaged desktop self-test (headless, real handshake)
+        if: matrix.target != 'android'
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -o pipefail
+          BIN=dist/p2p-desktop/p2p-desktop
+          [ -f "$BIN" ] || BIN=dist/p2p-desktop/p2p-desktop.exe
+          test -f "$BIN"
+          "$BIN" --self-test 2>&1 | tee p2pchat/releases/desktop-selftest.log
       - uses: actions/setup-java@v5
         if: matrix.target == 'android'
         with:
           distribution: temurin
           java-version: '21.0.10'
-      - name: Build Android using preinstalled runner SDK (no license acceptance)
+      - name: Build Capacitor Android APK using preinstalled runner SDK (no license acceptance)
         if: matrix.target == 'android'
         working-directory: p2pchat
         shell: bash
@@ -92,28 +98,127 @@ jobs:
           npm run android:sync
           bash android/gradlew -p android --no-daemon -Pandroid.builder.sdkDownload=false assembleDebug 2>&1 | tee releases/build.log
           cp android/app/build/outputs/apk/debug/*.apk releases/
-      - name: Record hashes, source manifest, and dependency audit
-        if: always()
+      - name: Package desktop bundle (explicit name; no installer, no signing)
+        if: matrix.target != 'android'
         working-directory: p2pchat
         shell: bash
         run: |
+          set -o pipefail
           mkdir -p releases
-          npm audit --json > releases/npm-audit.json || true
-          python tools/artifact-manifest.py
-          if [ -d releases/linux-unpacked ]; then tar -czf releases/p2p-observatory-linux-x64.tar.gz -C releases linux-unpacked; fi
-          python tools/artifact-manifest.py
+          tar -czf "releases/p2p-desktop-${{ matrix.target }}-x64.tar.gz" -C .. dist/p2p-desktop
+          ls -l releases
+      - name: Record artifact sha256 and dependency audit (no release, no deploy)
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p p2pchat/releases
+          (cd p2pchat && npm audit --json) > p2pchat/releases/npm-audit.json 2>/dev/null || true
+          cd p2pchat/releases
+          : > SHA256SUMS.txt
+          for f in $(ls -1 2>/dev/null | grep -v '^SHA256SUMS.txt$'); do
+            [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt || echo "NO_ARTIFACTS_RECORDED"
       - name: Upload private build output and failure evidence (no release)
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: p2p-observatory-${{ matrix.target }}-${{ github.sha }}
           path: |
-            p2pchat/releases/*.exe
             p2pchat/releases/*.tar.gz
             p2pchat/releases/*.apk
             p2pchat/releases/*.json
             p2pchat/releases/*.log
+            p2pchat/releases/*.txt
             p2pchat/android/**/build/reports/**
-            p2pchat/platform/work/p2p-native/warn-*.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  android-native:
+    name: Android native spike (WebRTC AAR)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21.0.10'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Assert the runner SDK is present (no download, no license acceptance)
+        shell: bash
+        run: |
+          mkdir -p p2pchat/releases
+          {
+            echo "date: $(date -u +%FT%TZ)"
+            echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+            test -d "${ANDROID_HOME:-/nonexistent}/platforms/android-36" && echo "PLATFORM_android-36_PRESENT" || echo "PLATFORM_android-36_MISSING"
+            test -d "${ANDROID_HOME:-/nonexistent}/build-tools/36.0.0" && echo "BUILD_TOOLS_36.0.0_PRESENT" || echo "BUILD_TOOLS_36.0.0_MISSING"
+          } | tee p2pchat/releases/android-native-probes.log
+          test -n "${ANDROID_HOME:-}"
+          test -d "${ANDROID_HOME}/platforms/android-36"
+          test -d "${ANDROID_HOME}/build-tools/36.0.0"
+      - name: Read-only environment probes (system image, emulator, KVM)
+        shell: bash
+        run: |
+          {
+            echo "== sdkmanager --list_installed =="
+            sdkmanager --list_installed 2>&1 || echo "SDKMANAGER_UNAVAILABLE"
+            echo "== preinstalled system images =="
+            ls "${ANDROID_HOME:-/nonexistent}/system-images" 2>/dev/null || echo "NO_PREINSTALLED_SYSTEM_IMAGES"
+            echo "== emulator binary =="
+            command -v emulator || echo "NO_EMULATOR_BINARY"
+            echo "== /dev/kvm =="
+            test -e /dev/kvm && echo "KVM_PRESENT" || echo "KVM_ABSENT"
+            echo "== emulator -accel-check =="
+            emulator -accel-check 2>&1 || echo "ACCEL_CHECK_UNAVAILABLE"
+          } | tee -a p2pchat/releases/android-native-probes.log
+      - name: Build the native spike APK (preinstalled SDK, no license acceptance)
+        shell: bash
+        run: |
+          set -o pipefail
+          bash p2pchat/android-native/gradlew -p p2pchat/android-native --no-daemon --console=plain \
+            -Pandroid.builder.sdkDownload=false assembleRtcDebug 2>&1 | tee p2pchat/releases/android-native-build.log
+      - name: Verify the resolved WebRTC artifact contents and record APK sha256
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p p2pchat/releases
+          AAR=$(find "$HOME/.gradle/caches/modules-2/files-2.1/io.github.webrtc-sdk/android" -name 'android-*.aar' 2>/dev/null | sort | head -1)
+          if [ -z "$AAR" ]; then
+            echo "WEBRTC_AAR_NOT_RESOLVED: Gradle 未在缓存中留下 AAR，无法做内容级校验" | tee p2pchat/releases/webrtc-aar-probe.log
+            exit 1
+          fi
+          python p2pchat/android-native/tools/probe_webrtc_aar.py "$AAR" --abis arm64-v8a,x86_64 --remote \
+            --json p2pchat/releases/webrtc-aar-probe.json | tee p2pchat/releases/webrtc-aar-probe.log
+          sha256sum p2pchat/android-native/app/build/outputs/apk/rtc/debug/*.apk 2>/dev/null | tee p2pchat/releases/android-native-apk.sha256 \
+            || echo "NO_APK_PRODUCED" | tee p2pchat/releases/android-native-apk.sha256
+      - name: Data channel runtime verification status (never fabricated)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "DATA_CHANNEL_RUNTIME_TEST: NOT_RUN"
+            echo "原因1：p2pchat/android-native 目前只有构建脚手架与 AndroidManifest，没有任何 Kotlin 源码或 instrumentation 用例，没有可执行的 DataChannel 路径（可行性报告 G3）。"
+            echo "原因2：模拟器验证要求“预装系统镜像 + emulator + KVM 加速”三者同时具备；本 job 只做只读探测，不下载系统镜像、不做许可交互接受。"
+            echo "结论：本 job 提供依赖解析、产物内容校验、APK 构建三类证据；构建成功不等于应用可用。"
+          } | tee p2pchat/releases/android-native-emulator-status.txt
+      - name: Upload private android-native evidence (no release)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: p2p-observatory-android-native-${{ github.sha }}
+          path: |
+            p2pchat/releases/android-native-*.log
+            p2pchat/releases/android-native-*.txt
+            p2pchat/releases/android-native-*.sha256
+            p2pchat/releases/webrtc-aar-probe.*
+            p2pchat/releases/*.apk
+            p2pchat/android-native/app/build/outputs/apk/**/*.apk
+            p2pchat/android-native/**/build/reports/**
           if-no-files-found: error
           retention-days: 14

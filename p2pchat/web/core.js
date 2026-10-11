@@ -14,6 +14,29 @@ const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join(
 const sha=async b=>hex(await crypto.subtle.digest('SHA-256',b));
 async function proof(secret,fields){const key=await crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);return hex(await crypto.subtle.sign('HMAC',key,enc.encode(JSON.stringify(fields))));}
 function equal(a,b){if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let d=0;for(let i=0;i<a.length;i++)d|=a.charCodeAt(i)^b.charCodeAt(i);return d===0;}
+/* 加入证明 v2：链路上不再出现房间密钥本身。
+   joinKey = HKDF-SHA256(secret, salt=room, info='p2pchat/join-key/v2')
+   proof   = HMAC-SHA256(joinKey, room \0 nonce \0 clientSessionId)
+   服务器只保存/比较 joinKey（派生值），拿不到也还原不出原始 secret。
+   这里没有回退到明文密钥的分支：服务器说 nonce 不可用就明确失败。 */
+const JOIN={version:2,info:enc.encode('p2pchat/join-key/v2'),proof:'hkdf-sha256-hmac-v2'};
+async function joinKeyBytes(secret,room){
+ const material=await crypto.subtle.importKey('raw',enc.encode(secret),'HKDF',false,['deriveBits']);
+ return crypto.subtle.deriveBits({name:'HKDF',hash:'SHA-256',salt:enc.encode(room),info:JOIN.info},material,256);
+}
+async function joinKey(secret,room){return hex(await joinKeyBytes(secret,room));}
+async function joinProof(joinKeyHex,room,nonce,clientSessionId){
+ const key=await crypto.subtle.importKey('raw',new Uint8Array((joinKeyHex.match(/../g)||[]).map(x=>parseInt(x,16))),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+ return hex(await crypto.subtle.sign('HMAC',key,enc.encode(`${room}\u0000${nonce}\u0000${clientSessionId}`)));
+}
+const joinChallengeMessage=(room,clientSessionId)=>({v:1,type:'join_challenge',room,clientSessionId});
+async function joinMessage({room,secret,name,clientSessionId,capabilities,nonce,roomEstablished=false}){
+ const key=await joinKey(secret,room);
+ const message={v:1,type:'join',joinVersion:JOIN.version,room,name,clientSessionId,capabilities,
+  nonce,proof:await joinProof(key,room,nonce,clientSessionId)};
+ if(!roomEstablished)message.verifier=key;   // 只有房间里还没有密钥时才需要交派生值
+ return message;
+}
 class Handshake{
  constructor(config){Object.assign(this,config);this.nonce=hex(crypto.getRandomValues(new Uint8Array(32)));this.remoteNonce=null;this.gotAck=false;this.sentAck=false;}
  fields(ack,sender,receiver,nonce,echo){const a=[ack?'p2pobs-v1-ack':'p2pobs-v1',this.room,this.connectionId,this.attemptId,sender,receiver,nonce];if(ack)a.push(echo);return a;}
@@ -42,5 +65,5 @@ class NativeAdapter{
  async close(p){const old=this.attempts.get(p.attemptId);for(const cancel of old?.backpressureWaits||[])cancel();this.attempts.delete(p.attemptId);return this.bridge?.invoke('close',p);}
  destroy(){this.unsubscribe?.();}
 }
-const api={enc,dec,LIMIT,uuid,family,candidateInfo,permitted,filterSdp,encodeFrame,decodeFrame,sha,Handshake,Receiver,Dedup,NativeAdapter};root.P2PCore=api;if(typeof module!=='undefined')module.exports=api;
+const api={enc,dec,LIMIT,uuid,family,candidateInfo,permitted,filterSdp,encodeFrame,decodeFrame,sha,JOIN,joinKey,joinProof,joinChallengeMessage,joinMessage,Handshake,Receiver,Dedup,NativeAdapter};root.P2PCore=api;if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

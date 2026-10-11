@@ -5,8 +5,13 @@ import json
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 CI_ALLOWLIST=('ci/windows-analysis/diagnostic_runner.py',)
-ROOT_FILES={'README.md','PLATFORMS.md','__init__.py','server.py','peer.py','requirements.txt','requirements-lock.txt','package.json','package-lock.json','capacitor.config.json','electron-builder.yml'}
-SOURCE_DIRS={'web','backend','native','desktop','tools','tests','docs'}
+# electron-builder.yml was deleted with the Electron shell: it must never be
+# required again (see the guard below), and the desktop source now lives in
+# python_desktop/ so the frozen manifest actually covers it.
+ROOT_FILES={'README.md','PLATFORMS.md','__init__.py','server.py','peer.py','requirements.txt','requirements-lock.txt','package.json','package-lock.json','capacitor.config.json'}
+SOURCE_DIRS={'web','backend','native','python_desktop','tools','tests','docs'}
+# The removed shell must stay removed; assert absence instead of requiring it.
+REMOVED_WITH_ELECTRON_SHELL=('desktop/main.cjs','desktop/preload.cjs','desktop/bridge.cjs','electron-builder.yml')
 SKIP={'__pycache__','.pytest_cache','.gradle','build','node_modules'}
 def allowed(p):
     r=p.relative_to(ROOT);parts=r.parts
@@ -20,9 +25,14 @@ def allowed(p):
         return p.suffix in {'.gradle','.properties','.java','.kt','.xml','.png','.jar','.bat','.pro'} or r.name in {'gradlew','.gitignore'}
     return False
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def assert_shell_removed():
+    """The Electron shell is gone; assert that instead of listing it as source."""
+    present=[name for name in REMOVED_WITH_ELECTRON_SHELL if (ROOT/name).exists()]
+    assert not present,'ELECTRON_SHELL_REAPPEARED: '+', '.join(present)
 def snapshot():return {str(p.relative_to(ROOT)):sha(p) for p in sorted(ROOT.rglob('*')) if allowed(p)}
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--verify',action='store_true');args=parser.parse_args()
+    assert_shell_removed()
     target=ROOT/'docs/SOURCE-MANIFEST.json'
     if args.verify:
         saved=json.loads(target.read_text());current=snapshot();assert current==saved['sourceHashes'],'SOURCE_FREEZE_CHANGED';print('SOURCE_FREEZE_VERIFIED',saved['treeSha256'],len(current));return

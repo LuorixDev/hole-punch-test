@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import ipaddress
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -56,6 +58,39 @@ from pathlib import Path
 
 PASS, WARN, FAIL, SKIP = 'PASS', 'WARN', 'FAIL', 'SKIP'
 _TAG = {PASS: '[通过]', WARN: '[提醒]', FAIL: '[阻断]', SKIP: '[跳过]'}
+
+
+# ---------------------------------------------------------------------------
+# 平台能力：没有 POSIX uid／权限位语义的平台（Windows）必须明确"不可判定"，
+# 不能拿 getpass、SID 或伪造的 mode 冒充等价语义。
+# ---------------------------------------------------------------------------
+POSIX_PERMISSIONS = os.name == 'posix' and hasattr(os, 'getuid')
+OWNER_UNKNOWN_NOTE = '不可判定：本平台没有 POSIX uid API（例如 Windows），属主检查不适用'
+# "端口已被占用"的跨平台错误码：POSIX EADDRINUSE(98/48) 与 Windows WSAEADDRINUSE(10048)。
+# 只认这些码，其它绑定失败（权限、地址不可用等）仍然报 BIND_FAILED。
+IN_USE_ERRNOS = frozenset(code for code in (
+    getattr(errno, 'EADDRINUSE', None), getattr(errno, 'WSAEADDRINUSE', None), 98, 48, 10048)
+    if code is not None)
+
+
+def current_uid():
+    """当前用户 uid；没有 POSIX uid API 的平台返回 None（不猜）。"""
+    getuid = getattr(os, 'getuid', None)
+    if getuid is None:
+        return None
+    try:
+        return getuid()
+    except OSError:  # pragma: no cover - 极端环境
+        return None
+
+
+def owner_is_current_user(stat):
+    """True/False；平台没有 POSIX uid 语义时返回 None，表示"不可判定"。"""
+    uid = getattr(stat, 'st_uid', None)
+    mine = current_uid()
+    if uid is None or mine is None:
+        return None
+    return uid == mine
 
 
 class Result:
@@ -79,15 +114,38 @@ class Result:
         return cls(name, status, human, code, facts, paths)
 
 
-def _strip_paths(facts, paths):
-    """把 JSON 明细里的绝对路径替换成基础文件名，避免外泄目录结构。"""
-    if not paths:
-        return facts
-    text = json.dumps(facts, ensure_ascii=False)
-    for path in paths:
-        if path:
-            text = text.replace(str(path), os.path.basename(str(path)) or '<path>')
-    return json.loads(text)
+def _basename_any(path):
+    """取基础文件名；两种分隔符都认，所以在任何平台上都能脱敏另一种风格的路径。"""
+    text = str(path)
+    if '\\' in text and '/' not in text:
+        return ntpath.basename(text) or '<path>'
+    return os.path.basename(text) or '<path>'
+
+
+def _strip_paths(value, paths):
+    """把 JSON 明细里的绝对路径替换成基础文件名，避免外泄目录结构。
+
+    逐字段（按数据结构）替换，而不是在序列化后的文本上做替换：路径里的反斜杠在
+    JSON 文本里是 "\\\\"，直接拿原始路径去匹配会在 Windows 上静默失配，反而把完整
+    目录结构原样输出。人话结论里嵌的路径同样会被替换。
+    """
+    replacements = [(str(path), _basename_any(path)) for path in paths if path]
+    if not replacements:
+        return value
+
+    def scrub(item):
+        if isinstance(item, dict):
+            return {key: scrub(value) for key, value in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [scrub(entry) for entry in item]
+        if isinstance(item, str):
+            for raw, base in replacements:
+                if raw in item:
+                    item = item.replace(raw, base)
+            return item
+        return item
+
+    return scrub(value)
 
 
 def portrait(path):
@@ -570,7 +628,11 @@ def check_data_dir(path, probe=None):
                            % (portrait(target), type(exc).__name__), code='DATA_DIR_STAT_FAILED',
                            facts=facts, paths=(str(target),))
     facts['mode'] = oct(stat.st_mode & 0o777)
-    facts['ownerMine'] = stat.st_uid == os.getuid()
+    facts['permissionsMeaningful'] = POSIX_PERMISSIONS
+    owner = owner_is_current_user(stat)
+    facts['ownerMine'] = owner
+    if owner is None:
+        facts['ownerMineNote'] = OWNER_UNKNOWN_NOTE
     if probe is not None:
         writable = bool(probe(target))
     else:
@@ -581,11 +643,20 @@ def check_data_dir(path, probe=None):
                            '数据目录 %s 当前用户写不进去（权限 %s）。请把 --data 指向一个本用户可写的目录，'
                            '或用 systemd 的运行用户建好它。' % (portrait(target), facts['mode']),
                            code='DATA_DIR_NOT_WRITABLE', facts=facts, paths=(str(target),))
-    if stat.st_mode & 0o007:
+    if POSIX_PERMISSIONS and stat.st_mode & 0o007:
         return Result.make('数据目录', WARN,
                            '数据目录 %s 可写，但权限是 %s：其他用户也能读中心日志。建议 chmod 700。'
                            % (portrait(target), facts['mode']),
                            code='DATA_DIR_WORLD_ACCESSIBLE', facts=facts, paths=(str(target),))
+    if owner is None:
+        return Result.make('数据目录', PASS,
+                           '数据目录 %s 可写；但本平台没有 POSIX 权限位（例如 Windows），'
+                           '属主与权限检查不适用、不做判断。' % portrait(target),
+                           facts=facts, paths=(str(target),))
+    if not owner:
+        return Result.make('数据目录', PASS,
+                           '数据目录 %s 可写，但属主不是当前用户（权限 %s）；请确认服务端将来以哪个用户运行。'
+                           % (portrait(target), facts['mode']), facts=facts, paths=(str(target),))
     return Result.make('数据目录', PASS,
                        '数据目录 %s 可写（权限 %s，属主是本用户）。'
                        % (portrait(target), facts['mode']), facts=facts, paths=(str(target),))
@@ -623,9 +694,11 @@ def check_tcp_port(host, port, probe=None, name='信令端口'):
     facts['bindable'] = bound
     if not bound:
         if code == 'IN_USE':
+            extra = ('（Windows 上刚关闭的连接可能处在 TIME_WAIT，这里也会报占用；'
+                     '如果确认没有进程在听，以实际启动结果为准）' if os.name == 'nt' else '')
             return Result.make(name, FAIL,
-                               '%s:%s 已经被占用，服务端会启动失败。请先停掉占用它的进程（或改 --port）。'
-                               % (host, port), code='PORT_IN_USE', facts=facts)
+                               '%s:%s 已经被占用，服务端会启动失败。请先停掉占用它的进程（或改 --port）。%s'
+                               % (host, port, extra), code='PORT_IN_USE', facts=facts)
         return Result.make(name, FAIL,
                            '%s:%s 绑定失败（%s）。低于 1024 的端口通常需要额外权限。'
                            % (host, port, code), code='PORT_BIND_FAILED', facts=facts)
@@ -961,6 +1034,13 @@ def _is_loopback_literal(host):
         return host == 'localhost'
 
 
+def is_addr_in_use(exc):
+    """这个绑定失败是不是"地址/端口已被占用"？按错误码判断，不看平台。"""
+    if exc.errno is not None and exc.errno in IN_USE_ERRNOS:
+        return True
+    return getattr(exc, 'winerror', None) in IN_USE_ERRNOS
+
+
 def _try_bind(family, kind, host, port):
     """用一次性套接字试绑：绑完立刻关，不改宿主的任何状态。
 
@@ -969,14 +1049,22 @@ def _try_bind(family, kind, host, port):
     """
     try:
         with socket.socket(family, kind) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                # Windows：SO_REUSEADDR 允许抢占别人已经绑定的端口（连 UDP 也一样），
+                # 会把"已被占用"报成可以绑定；SO_EXCLUSIVEADDRUSE 才是等价语义。
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                # POSIX：只放开 TIME_WAIT 残留，不会掩盖"已经有进程在监听"。
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if family == socket.AF_INET6:
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             sock.bind((host, port))
         return True, None
     except OSError as exc:
-        if exc.errno == 98:  # EADDRINUSE
+        if is_addr_in_use(exc):
             return False, 'IN_USE'
+        if getattr(exc, 'winerror', None) is not None:
+            return False, '%s(errno=%s,winerror=%s)' % (type(exc).__name__, exc.errno, exc.winerror)
         return False, '%s(errno=%s)' % (type(exc).__name__, exc.errno)
 
 

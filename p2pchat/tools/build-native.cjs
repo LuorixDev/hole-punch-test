@@ -1,4 +1,17 @@
 'use strict';
+/**
+ * 废弃（DEPRECATED）：仅用于单独构建原生 CLI 二进制，与桌面端无关。
+ *
+ * 理由：Electron 桌面壳已删除，桌面端改为纯 Python + Tkinter（Qt 迁移见 t24），
+ * 直接进程内调用 `p2pchat/native/*`。因此不再需要 stdio sidecar 二进制、也不需要
+ * 把它塞进 asar 或随 Electron 分发——`npm run build:native` 不再是任何构建/CI 步骤
+ * 的一部分（CI 已无 build-native/native_entry 调用点）。
+ *
+ * 保留它的唯一用途：给原生 CLI 单独打一个 onedir 包，用于 native↔native 的
+ * QUIC/TCP 互通试验。**不要**把它重新接回桌面构建，也不要再引入 sidecar/asar。
+ * 若要删除本文件，请同时删除 package.json 里的 build:native 脚本。
+ */
+console.error('[deprecated] tools/build-native.cjs 只用于单独构建原生 CLI；桌面端不使用 stdio sidecar。');
 const path = require('node:path');
 const fs = require('node:fs');
 const {spawnSync} = require('node:child_process');

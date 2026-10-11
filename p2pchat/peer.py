@@ -16,6 +16,8 @@ import secrets
 import struct
 import time
 import uuid
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from aiohttp import ClientSession, ClientError, WSMsgType
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.sdp import candidate_from_sdp
@@ -24,6 +26,16 @@ from p2pchat.backend.telemetry import LocalQueue
 from p2pchat.backend.rtc_shutdown import close_rtc
 
 MAX_FILE=32*1024*1024
+# Benchmark rounds are bounded by progress, not by a fixed total: the sender may
+# spend a long drain before bench-end. BENCH_IDLE_TIMEOUT is silence after the
+# last accepted frame; a sender may announce its drain budget (drainMs) and the
+# receiver adds BENCH_DRAIN_MARGIN. BENCH_HARD_CEILING still bounds resources.
+BENCH_IDLE_TIMEOUT=20.0
+BENCH_HARD_CEILING=300.0
+BENCH_DRAIN_MARGIN=5.0
+
+class BenchError(ValueError):
+    """Benchmark handler failure carrying a bounded, reportable code."""
 
 def measured_elapsed(start_ns):
     """Performance interval only; deadlines continue using monotonic seconds.
@@ -54,6 +66,30 @@ def unframe(data):
     if not 1<=size<=100 or size+6>len(data) or len(data)-size-6>16384:raise ValueError('SCHEMA_INVALID')
     return data[2:2+size].decode(),struct.unpack('!I',data[2+size:6+size])[0],data[6+size:]
 
+JOIN_KEY_INFO=b'p2pchat/join-key/v2'
+JOIN_VERSION=2
+def derive_join_key(secret,room):
+    """joinKey = HKDF-SHA256(secret, salt=room, info='p2pchat/join-key/v2')，hex。
+
+    这是交给服务器的**派生值**，不等于数据面 HMAC 用的房间密钥；服务器因此既
+    拿不到原始 secret，也无法用它去伪造端到端配对证明。
+    """
+    return HKDF(algorithm=hashes.SHA256(),length=32,salt=room.encode(),info=JOIN_KEY_INFO).derive(secret.encode()).hex()
+def join_proof(join_key_hex,room,nonce,client_session_id):
+    """proof = HMAC-SHA256(join_key, room \0 nonce \0 clientSessionId)，hex（与服务器/core.js 一致）。"""
+    return hmac.new(bytes.fromhex(join_key_hex),(room+'\0'+nonce+'\0'+client_session_id).encode(),hashlib.sha256).hexdigest()
+async def join_v2(ws,room,secret,name,client_session_id,capabilities=('webrtc',)):
+    """先向服务器要一次性 nonce，再提交加入证明；**没有**回退到明文密钥的路径。"""
+    await ws.send_json({'v':1,'type':'join_challenge','room':room,'clientSessionId':client_session_id})
+    challenge=await ws.receive_json()
+    if not isinstance(challenge,dict) or challenge.get('type')!='join_challenge' or not challenge.get('nonce'):
+        raise ValueError('AUTH_FAILED')
+    key=derive_join_key(secret,room)
+    message={'v':1,'type':'join','joinVersion':JOIN_VERSION,'room':room,'name':name,
+             'clientSessionId':client_session_id,'capabilities':list(capabilities),
+             'nonce':challenge['nonce'],'proof':join_proof(key,room,challenge['nonce'],client_session_id)}
+    if not challenge.get('roomEstablished'):message['verifier']=key
+    await ws.send_json(message)
 def proof(secret,room,cid,aid,sender,receiver,nonce,echo=None):
     parts=['p2pobs-v1' if echo is None else 'p2pobs-v1-ack',room,cid,aid,sender,receiver,nonce]
     if echo is not None:parts.append(echo)
@@ -172,34 +208,73 @@ class Peer:
         if path['closing'] or not path['hello'] or not dc or dc.readyState!='open':
             raise RuntimeError('BENCHMARK_CHANNEL_NOT_OPEN')
         return dc
+    def bench_budget(self,announced_ms=None):
+        """Idle window for one round: progress-based, with an announced drain allowance."""
+        idle=BENCH_IDLE_TIMEOUT
+        if type(announced_ms) is int and 0<announced_ms<=60000:idle=max(idle,announced_ms/1000+BENCH_DRAIN_MARGIN)
+        return idle
+    def bench_expired(self,bench,now):
+        return now-bench['progress']>bench['idle'] or now-bench['start']>BENCH_HARD_CEILING
+    def bench_fail(self,path,dc,code,bench_id=None):
+        """Fail a round loudly: explicit failure frame to the sender plus a diagnostic event."""
+        try:
+            if dc is not None and dc.readyState=='open':
+                dc.send(json.dumps({'v':1,'kind':'bench-error','id':bench_id,'code':code}))
+        except Exception:pass
+        # Bounded diagnostic event; the exact code travels in the failure frame above.
+        # telemetry's allowlist only accepts enum reason/state values.
+        reason={'BENCH_TIMEOUT':'TIMEOUT','AUTH_REQUIRED':'AUTH_FAILED','LIMIT_EXCEEDED':'LIMIT_EXCEEDED'}.get(code,'SCHEMA_INVALID')
+        self.event('task.error',{'reason':reason,'state':'failed'},path)
     def install_benchmark(self,path,dc):
         def opened():path['benchmark_ready'].set()
         dc.on('open',opened)
         dc.on('close',lambda:path['benchmark_ready'].set())
         if dc.readyState=='open':opened()
         # Separate channel and bounded independent state; never echo benchmark bytes.
-        path['bench']=None
+        path['bench']=None;path['bench_failure']=None
         @dc.on('message')
         def receive(data):
+            now=time.monotonic()
             try:
-                if not path['hello']:raise ValueError()
+                if not path['hello']:raise BenchError('AUTH_REQUIRED')
                 if isinstance(data,bytes):
                     fid,seq,payload=unframe(data);b=path['bench']
-                    if not b or fid!=b['id'] or seq!=b['seq'] or b['bytes']+len(payload)>MAX_FILE or time.monotonic()-b['start']>10:raise ValueError()
-                    b['seq']+=1;b['bytes']+=len(payload)
+                    if not b:raise BenchError('BENCH_NOT_STARTED')
+                    if fid!=b['id'] or seq!=b['seq'] or b['bytes']+len(payload)>MAX_FILE:raise BenchError('SCHEMA_INVALID')
+                    if self.bench_expired(b,now):raise BenchError('BENCH_TIMEOUT')
+                    b['seq']+=1;b['bytes']+=len(payload);b['progress']=now
                 else:
-                    if len(data)>65536:raise ValueError()
+                    if len(data)>65536:raise BenchError('LIMIT_EXCEEDED')
                     m=json.loads(data)
-                    if m.get('v')!=1:raise ValueError()
-                    if m['kind']=='bench-start':
-                        if any(p.get('bench') for p in self.paths.values()):raise ValueError()
-                        path['bench']={'id':identifier(m['id']),'seq':0,'bytes':0,'start':time.monotonic(),'measure_start_ns':time.perf_counter_ns()}
-                    elif m['kind']=='bench-end':
+                    if m.get('v')!=1:raise BenchError('SCHEMA_INVALID')
+                    kind=m['kind']
+                    if kind=='bench-start':
+                        if path['bench'] is not None or any(p.get('bench') for p in self.paths.values()):raise BenchError('BENCH_BUSY')
+                        path['bench']={'id':identifier(m['id']),'seq':0,'bytes':0,'start':now,'progress':now,
+                                       'measure_start_ns':time.perf_counter_ns(),
+                                       'idle':self.bench_budget(m.get('drainMs'))}
+                        path['bench_failure']=None
+                    elif kind=='bench-end':
                         b=path['bench']
-                        if not b or m['id']!=b['id'] or time.monotonic()-b['start']>10:raise ValueError()
+                        if not b:
+                            # A round the watchdog already expired keeps its explicit reason.
+                            stale=path.get('bench_failure')
+                            if stale and stale['id']==m.get('id') and now-stale['at']<=BENCH_IDLE_TIMEOUT:raise BenchError(stale['code'])
+                            raise BenchError('BENCH_NOT_STARTED')
+                        if m['id']!=b['id']:raise BenchError('BENCH_ID_MISMATCH')
+                        if self.bench_expired(b,now):raise BenchError('BENCH_TIMEOUT')
                         dc.send(json.dumps({'v':1,'kind':'bench-ack','id':b['id'],'bytes':b['bytes'],**measured_elapsed(b['measure_start_ns'])}));path['bench']=None
-                    else:raise ValueError()
-            except (ValueError,KeyError,TypeError):path['bench']=None;dc.close()
+                    elif kind in {'bench-ack','bench-error'}:
+                        # Sender-side reply for a round this Peer started. It is a valid
+                        # frame: hand it to the application (no ack is ever fabricated).
+                        self.deliver(path,m)
+                    else:raise BenchError('SCHEMA_INVALID')
+            except BenchError as error:
+                self.bench_fail(path,dc,error.args[0] if error.args else 'BENCH_FAILED',None)
+                path['bench']=None;dc.close()
+            except (ValueError,KeyError,TypeError):
+                self.bench_fail(path,dc,'SCHEMA_INVALID',None)
+                path['bench']=None;dc.close()
     def duplicate(self,peer,fid):
         now=time.monotonic()
         self.seen={k:v for k,v in self.seen.items() if now-v<600}
@@ -361,7 +436,11 @@ class Peer:
                 if not path['hello'] and now-path['created']>30:await self.close_path(path)
                 for fid,t in list(path['files'].items()):
                     if now-t['progress']>30:self.release_file(path,fid)
-                if path.get('bench') and now-path['bench']['start']>10:path['bench']=None
+                b=path.get('bench')
+                if b and self.bench_expired(b,now):
+                    # Never clear an in-flight round silently: report it and answer the sender.
+                    path['bench_failure']={'id':b['id'],'code':'BENCH_TIMEOUT','at':now}
+                    self.bench_fail(path,path.get('benchmark'),'BENCH_TIMEOUT',b['id']);path['bench']=None
     async def run(self):
         from urllib.parse import urlparse
         parsed=urlparse(self.url)
@@ -374,7 +453,8 @@ class Peer:
             try:
                 async with ClientSession() as session:
                     self.ws=await session.ws_connect(self.url,heartbeat=20,max_msg_size=131072,origin=self.origin)
-                    await self.ws.send_json({'v':1,'type':'join','room':self.room,'name':self.name,'secret':self.secret,'clientSessionId':self.store.session,'capabilities':['webrtc']})
+                    # v1 只发派生值的加入证明；房间密钥本身不再上链路。
+                    await join_v2(self.ws,self.room,self.secret,self.name,self.store.session)
                     known=set();backoff=1
                     async for msg in self.ws:
                         if msg.type!=WSMsgType.TEXT:continue

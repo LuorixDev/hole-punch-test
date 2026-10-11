@@ -118,6 +118,42 @@ await adapter.signal({... "nativeCandidate": candidate})   # 本地调用，不�
 其中 `test_cross_process_multicast_discovery_and_direct_connection` 真的起了**第二个 OS 进程**：父进程与子进程各自只从组播报文里学到对方的地址与端口，然后各自调用本机适配器完成 UDP 直连（`state == "direct"`，双方一致），全程没有信令服务器、没有打洞、没有中继；子进程退出码 0。
 `test_discovered_candidate_carries_a_message_lane` 用发现出来的候选把 QUIC 通道打通并双向传输 4 KiB 校验一致（证书描述来自本进程本地事件总线，没有服务器）。
 
+## 桌面端接线（t14：让本页能力在纯 Python 桌面端真正可用）
+
+协议层（`native/lan_discovery.py`）一直是默认 `enabled=False`、生产拒绝回环；
+本任务补的是**桌面端的生产调用点**，不改协议层。
+
+| 层 | 生产调用点 |
+| --- | --- |
+| 桌面控制器 | `python_desktop/lan_client.py::LanDirect`（能力文案、同意、审计、候选校验） |
+| 引擎 | `python_desktop/engine.py::lan_enable()` / `lan_disable()` / `lan_capability()` / `lan_diagnostics()` |
+| 界面 | 设置面板：“开启同网段直连发现 / 关闭同网段直连发现”，默认关闭 |
+
+规则（与协议层一致，没有放宽）：
+
+* **默认关闭**：不连接、不启动、不导入 STUN 都不会开始组播；开启要单独点一次并在确认框里点“是”
+  （确认框文案见 `LanDirect.consent_text()`，人话说明“只在本网段、用房间密码派生密钥签名、随时可关”）；
+* **需要一条真实在听的端口**：广告的端口必须来自已经绑定的原生尝试（UDP/QUIC）。
+  还没有可用路径时会明确提示“先在第二条屏幕等到有可用路径”，不会编造一个端口；
+* **接口必须是真实网卡地址**：`primary_ipv4()` 只用 UDP connect（不发包）取默认出口地址，
+  拿不到就报 `NO_LAN_INTERFACE`；回环只在显式 `restricted_local=True`（测试模式）下允许，
+  且这种候选会被标记 `testOnly: true`，**绝不当成局域网证据**；
+* **候选不放宽**：`LanDirect.accept_candidate()` 先调用与信令路径同一个 `validate_candidate()`，
+  再额外拒绝生产路径上的回环地址；伪造字段/非法端口/组播地址一律拒绝；
+* **审计**（`{"kind": "lan-direct", "action": ...}`，不含密钥）：`enable-requested` / `enabled` /
+  `enable-denied`（未同意、平台不支持、没有网卡）/ `enable-failed` / `status`（来自 `lan-status`）/
+  `peer-found` / `peer-rejected`（含具体原因）/ `disabled`（带之前发现的设备数）。
+
+测试（`p2pchat/tests/desktop/test_lan_wiring.py`）：
+
+* 默认关闭 + 未同意时**连发现实例都不创建**（工厂记录器证明）；
+* 生产路径拒绝回环接口与回环候选，非法候选一律 `INVALID_CANDIDATE`；
+* **受控组播“发现→直连”一次**：两个本机实例（`restricted_local=True`）互相发现，
+  然后把数据真正发到发现到的候选端口并由对端监听端口收到，最后关闭并断言不再运行。
+
+**未验证**：真实同网段设备之间的发现与直连（需要用户环境；本机只有回环测试模式），
+以及 Windows/macOS 上的表现。
+
 ## 变更文件与 sha256
 
 | 文件 | 行数 | sha256 |

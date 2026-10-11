@@ -201,7 +201,7 @@ python -m p2pchat.server \
 | `--stun-port 3478` | STUN 的 UDP 端口 | 要在路由器上放行 |
 | `--data` | 数据目录 | 必须让运行用户可写。**所有监听站点共用同一个 Store**，所以不存在跨进程 SQLite 写锁竞争 |
 | `--cert` / `--key` | TLS 证书链和私钥 | **只要有一个 `--host` 不是回环就必须给**，且必须成对 |
-| `--origin` | 允许的浏览器来源，**精确匹配**，可重复 | 必须和你打开网页时的地址栏来源一致：协议 + 主机 + 端口，**不带结尾斜杠**。例如 `https://p2p.example`；走非标端口就写 `https://p2p.example:8443` |
+| `--origin` | 允许的浏览器来源，**精确匹配**，可重复 | 必须和客户端实际来源一致：协议 + 主机 + 端口，**不带结尾斜杠**。浏览器网页版是你地址栏的来源（例如 `https://p2p.example`；走非标端口就写 `https://p2p.example:8443`）；**安卓 APK 的页面来源固定在 `http://localhost`**，所以要让它连你的服务器必须再写一条 `--origin http://localhost`（若你把 `androidScheme` 改回 `https`，则对应 `https://localhost`）。多个客户端就写多条 |
 | `--stun-url` | 可选：下发给客户端的 STUN 地址，例如 `stun:p2p.example:3478` | **只接受 `stun:` 前缀**。写 `turn:` 会被拒绝（本产品禁止中继）。不写这一项，客户端就把"STUN 映射观测"显示为不可用 |
 
 > **实测记录（本仓库 Linux 开发机上验证，供你参照）**：`--host 0.0.0.0 --host ::` 时
@@ -433,6 +433,22 @@ python -c "import socket,struct;print('发送 20 字节绑定请求并读回复'
 * 两端都在家宽同运营商、或都在同一台机器上测 → **只能算本机事件，不能当外网证据**；
 * 结果要记录：域名、时间、客户端类型、用的哪种方式、是否成功、失败原因。
 
+### 9.5 安卓 APK 连你的服务器（来源与明文）
+
+安卓 APK 不是浏览器：Capacitor 把网页装进 App 内部，页面来源固定为 `http://localhost`
+（`p2pchat/capacitor.config.json` 里 `server.androidScheme: http`），所以：
+
+* **必须在服务端加 `--origin http://localhost`**，否则 APK 的 WebSocket 升级会被 403 拒绝；
+  这个来源与你的域名无关，手机连的是"你自己的服务器地址"，但 Origin 头永远是 `http://localhost`。
+* 明文 `ws://`：APK 已经放行明文（`android/app/src/main/res/xml/network_security_config.xml`），
+  你可以让手机用 `ws://<你的IP或域名>:8088/ws` 连；但**明文信令会被同一路径上的人读取和篡改**
+  （房间密钥、SDP/ICE 候选都在里面），能配证书就配证书用 `wss://`。
+* **限制**：网页客户端目前仍只允许 `ws://` 指向 loopback（`web/app.js`），
+  所以在它放宽之前，手机在 APK 里填 `ws://` 到你的服务器地址会被前端拦下；
+  用 `wss://` 则不受影响。详见 `p2pchat/docs/ANDROID-CLEARTEXT.md`。
+* 录音依赖安全上下文：`http://localhost` 本身就是安全上下文（和 `https://localhost` 一样），
+  所以改 scheme 不影响麦克风；但**真机录音、锁屏/后台行为在仓库里是 NOT_RUN，需要你自己实测**。
+
 ---
 
 ## 10. 查看中心日志与诊断
@@ -502,6 +518,8 @@ sudo rm -rf /srv/p2p-data
 | 服务起不来，日志说 `public signaling requires TLS and --origin allowlist` | 绑了公网地址但少了 `--cert/--key` 或 `--origin` | 这是**故意的**安全限制，补齐参数即可 |
 | 服务起不来，说读不到证书/私钥 | 运行用户没权限读 `/etc/letsencrypt` | 按第 4 节把用户加进 `letsencrypt` 组；体检工具会直接报 `KEY_UNREADABLE` |
 | 浏览器打开就 `403` | `--origin` 和地址栏来源不一致（端口/协议/斜杠） | 用体检工具的 `--origin` 项核对；`curl` 的 `Origin` 头要一模一样 |
+| 安卓 APK 连不上或 `403` | 少了 `--origin http://localhost`（APK 的页面来源永远是 `http://localhost`，和你的域名无关） | 启动参数里补上这一条；用 `-H "Origin: http://localhost"` 复现；见第 9.5 节 |
+| 手机填 `ws://` 到你的服务器被前端拒绝 | 网页客户端目前只允许 `ws://` 指向 loopback（`web/app.js`） | 先改用 `wss://`；或按 `docs/ANDROID-CLEARTEXT.md` 第 8 节处理该策略 |
 | 网页能开，但手机流量下连不上 | 端口映射没做 / 光猫还有一层 NAT / CGNAT | 手机热点上 `curl https://p2p.example:8088/health` |
 | IPv6 能连、IPv4 客户端连不上 | 只传了一个 `--host`（例如只写了 `--host ::`） | 加上 `--host 0.0.0.0 --host ::`（同一端口，单进程双栈）；`ss -lntp` 要同时看到 `0.0.0.0:8088` 与 `[::]:8088` |
 | 客户端说 STUN 不可用 | `--stun-url` 没配，或 STUN 只绑了回环 | `ss -lnup \| grep 3478`；体检工具的 STUN 项会直接报出来 |

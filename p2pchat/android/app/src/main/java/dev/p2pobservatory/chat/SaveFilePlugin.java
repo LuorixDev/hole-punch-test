@@ -18,7 +18,7 @@ public class SaveFilePlugin extends Plugin {
     private byte[] pending;
     @PluginMethod public synchronized void saveFile(PluginCall call) {
         String url = getBridge().getWebView().getUrl();
-        if (url == null || !url.startsWith("https://localhost/")) { call.reject("ORIGIN_DENIED"); return; }
+        if (!LocalOrigin.isLocalPageUrl(url)) { call.reject("ORIGIN_DENIED"); return; }
         if (pending != null) { call.reject("SAVE_BUSY"); return; }
         String name = call.getString("name", "download.bin");
         String encoded = call.getString("dataB64", "");

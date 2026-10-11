@@ -69,7 +69,7 @@ test('第2屏：固定顺序、人话名称、四种说明、状态与实测延�
 
 test('文案唯一来源：ux.js 的九条与 docs/METHODS-PLAIN.md 表格逐字一致',()=>{
  const doc=fs.readFileSync(path.join(__dirname,'../../docs/METHODS-PLAIN.md'),'utf8');
- const table=doc.split('\n').map(line=>/^\|\s*(\d+)\s*\|\s*\*\*(.+?)\*\*\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$/.exec(line)).filter(Boolean);
+ const table=doc.split('\n').map(line=>/^\|\s*(\d+)\s*\|\s*\*\*(.+?)\*\*\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|/.exec(line)).filter(Boolean);
  assert.equal(table.length,9,'METHODS-PLAIN.md 必须列出九种方式');
  table.forEach((match,index)=>{
   const [,order,name,what,works,failure]=match;

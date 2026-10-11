@@ -5,6 +5,7 @@
 """
 import datetime
 import ipaddress
+import json
 import os
 import socket
 from pathlib import Path
@@ -52,10 +53,23 @@ def _ok():
     return pre.Result.make('probe', pre.PASS, 'ok')
 
 
+def _all_strings(value):
+    """递归取出 JSON 里的所有字符串（含字典键），用于对**解析后**的字段做断言。"""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _all_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _all_strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
 def _unreadable(path):
+    """把文件设成不可读；返回是否真的做到了（Windows 没有 POSIX 权限位，做不到）。"""
     path.chmod(0o000)
-    if os.access(path, os.R_OK):  # root 会绕过权限位，那就跳过这条断言
-        pytest.skip('当前用户无视文件权限位（例如 root），无法构造不可读文件')
+    return not os.access(path, os.R_OK)
 
 
 # ---------------------------------------------------------------------------
@@ -205,10 +219,19 @@ def test_tls_not_provided_or_half_pair(tmp_path):
 
 def test_unreadable_files_block(tmp_path):
     cert, key = _write_cert(tmp_path)
-    _unreadable(cert)
+    if not pre.POSIX_PERMISSIONS:
+        # Windows：chmod 拦不住读取，工具必须如实报"读得到"，不能假装不可读。
+        cert.chmod(0o000)
+        try:
+            assert pre.check_tls(cert, key, 'p2p.example').status == pre.PASS
+        finally:
+            cert.chmod(0o600)
+        return
+    if not _unreadable(cert):
+        pytest.skip('当前用户无视文件权限位（例如 root），无法构造不可读文件')
     assert pre.check_tls(cert, key, 'p2p.example').code == 'CERT_UNREADABLE'
     cert.chmod(0o600)
-    _unreadable(key)
+    assert _unreadable(key)
     assert pre.check_tls(cert, key, 'p2p.example').code == 'KEY_UNREADABLE'
 
 
@@ -325,6 +348,12 @@ def test_data_dir_not_writable_blocks(tmp_path):
         result = pre.check_data_dir(target)
     finally:
         target.chmod(0o700)
+    if not pre.POSIX_PERMISSIONS:
+        # Windows 没有 POSIX 权限位：chmod 0500 拦不住写入，工具必须如实报可写，不许假装失败。
+        assert result.facts['writable'] is True
+        assert result.status == pre.PASS
+        assert result.facts['permissionsMeaningful'] is False
+        return
     assert result.status == pre.FAIL
     assert result.code == 'DATA_DIR_NOT_WRITABLE'
     assert result.facts['writable'] is False
@@ -348,13 +377,54 @@ def test_data_dir_world_readable_is_warning(tmp_path):
         result = pre.check_data_dir(target)
     finally:
         target.chmod(0o700)
+    if not pre.POSIX_PERMISSIONS:
+        # 没有 POSIX 权限位时，mode 位没有意义：不许用"其他用户能读/chmod 700"这类结论吓人。
+        assert result.status == pre.PASS
+        assert result.facts['permissionsMeaningful'] is False
+        assert '建议 chmod' not in result.human        # 不许给 POSIX-only 的建议
+        return
     assert result.status == pre.WARN and result.code == 'DATA_DIR_WORLD_ACCESSIBLE'
+
+
+def test_data_dir_owner_and_mode_semantics_are_honest(tmp_path):
+    """有 POSIX uid 就给结论；没有的平台必须明确"不可判定/不适用"，不许用 SID 或 getpass 猜。"""
+    target = tmp_path / 'data'
+    target.mkdir()
+    result = pre.check_data_dir(target)
+    if pre.POSIX_PERMISSIONS:
+        assert result.facts['permissionsMeaningful'] is True
+        assert result.facts['ownerMine'] in (True, False)
+        assert 'ownerMineNote' not in result.facts
+        assert '不可判定' not in result.human
+    else:
+        assert result.facts['permissionsMeaningful'] is False
+        assert result.facts['ownerMine'] is None          # 明确的三态：None = 不可判定
+        assert '不可判定' in result.facts['ownerMineNote']
+        assert '不适用' in result.human
 
 
 def test_data_dir_file_instead_of_directory_blocks(tmp_path):
     target = tmp_path / 'data'
     target.write_text('x')
     assert pre.check_data_dir(target).code == 'DATA_DIR_NOT_DIRECTORY'
+
+
+def test_data_dir_degrades_honestly_without_posix_uid(monkeypatch, tmp_path):
+    """模拟没有 POSIX uid API 的平台（Windows 的失败模式）：不许 AttributeError，也不许猜。"""
+    monkeypatch.setattr(pre, 'POSIX_PERMISSIONS', False)
+    monkeypatch.delattr(os, 'getuid', raising=False)
+    target = tmp_path / 'data'
+    target.mkdir()
+    target.chmod(0o707)
+    try:
+        result = pre.check_data_dir(target)
+    finally:
+        target.chmod(0o700)
+    assert result.status == pre.PASS                      # 不能崩，也不能拿 mode 位吓人
+    assert result.facts['ownerMine'] is None               # 明确三态：None = 不可判定
+    assert '不可判定' in result.facts['ownerMineNote']
+    assert result.facts['permissionsMeaningful'] is False
+    assert '不适用' in result.human and '建议 chmod' not in result.human
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +440,31 @@ def test_free_port_is_bindable_and_occupied_port_is_not():
         assert busy.status == pre.FAIL and busy.code == 'PORT_IN_USE'
     free = pre.check_tcp_port('127.0.0.1', port)
     assert free.status == pre.PASS
+
+
+@pytest.mark.parametrize('errno_value,winerror,expected', [
+    (98, None, True),        # POSIX EADDRINUSE
+    (10048, None, True),     # Windows WSAEADDRINUSE（socket 层报的 errno）
+    (10048, 10048, True),    # Windows 同时带 winerror
+    (48, None, True),        # 部分 BSD 的 EADDRINUSE
+    (13, None, False),       # 权限不足：仍是 BIND_FAILED
+    (49, None, False),       # 地址不可用：仍是 BIND_FAILED
+    (99, None, False),       # 其它网络错误：仍是 BIND_FAILED
+    (13, 5, False),          # winerror=ACCESS_DENIED 不是占用
+])
+def test_addr_in_use_mapping_is_errno_based(errno_value, winerror, expected):
+    """占用判定只看错误码：不能让所有绑定失败都变成 PORT_IN_USE。"""
+    error = OSError(errno_value, 'bind failed')
+    if winerror is not None:
+        error.winerror = winerror
+    assert pre.is_addr_in_use(error) is expected
+
+
+def test_bind_failure_still_reports_bind_failed_for_other_errors():
+    """权限/地址不可用等失败必须继续报 BIND_FAILED，不能被占用判定吞掉。"""
+    for errno_value in (13, 49, 99):
+        result = pre.check_tcp_port('0.0.0.0', 80, probe=lambda h, p, e=errno_value: (False, 'PermissionError(errno=%d)' % e))
+        assert result.status == pre.FAIL and result.code == 'PORT_BIND_FAILED'
 
 
 def test_udp_port_bindability_uses_real_socket_when_not_injected():
@@ -607,6 +702,58 @@ def test_udp_port_in_use_blocks():
     assert result.status == pre.FAIL and result.code == 'UDP_PORT_IN_USE'
 
 
+class _RecordingSocket:
+    """记录 setsockopt 的假套接字：用来断言"用哪一种绑定语义"。"""
+
+    def __init__(self, *args, **kwargs):
+        self.options = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def setsockopt(self, level, option, value):
+        self.options.append(option)
+
+    def bind(self, address):
+        self.address = address
+
+
+def test_bind_probe_uses_exclusive_semantics_where_reuse_would_hide_a_live_binding(monkeypatch):
+    """有 SO_EXCLUSIVEADDRUSE 的平台（Windows）：必须用它，否则"已被占用"会被报成可绑定。"""
+    monkeypatch.setattr(pre.socket, 'socket', _RecordingSocket)
+    monkeypatch.setattr(pre.socket, 'SO_EXCLUSIVEADDRUSE', 0x8888, raising=False)
+    created = []
+    real_init = _RecordingSocket.__init__
+
+    def capture(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(_RecordingSocket, '__init__', capture)
+    assert pre._try_bind(pre.socket.AF_INET, pre.socket.SOCK_STREAM, '127.0.0.1', 8088) == (True, None)
+    assert pre.socket.SO_EXCLUSIVEADDRUSE in created[0].options
+    assert pre.socket.SO_REUSEADDR not in created[0].options
+
+
+def test_bind_probe_keeps_posix_time_wait_semantics_without_exclusive_option(monkeypatch):
+    """没有该选项的平台（POSIX）：仍然用 SO_REUSEADDR，只放开 TIME_WAIT 残留。"""
+    monkeypatch.setattr(pre.socket, 'socket', _RecordingSocket)
+    monkeypatch.delattr(pre.socket, 'SO_EXCLUSIVEADDRUSE', raising=False)
+    created = []
+    real_init = _RecordingSocket.__init__
+
+    def capture(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(_RecordingSocket, '__init__', capture)
+    assert pre._try_bind(pre.socket.AF_INET, pre.socket.SOCK_STREAM, '127.0.0.1', 8088) == (True, None)
+    assert pre.socket.SO_REUSEADDR in created[0].options
+
+
 def test_port_probe_injection_and_low_port_hint():
     blocked = pre.check_tcp_port('0.0.0.0', 80, probe=lambda h, p: (False, 'PermissionError(errno=13)'))
     assert blocked.status == pre.FAIL and blocked.code == 'PORT_BIND_FAILED'
@@ -704,20 +851,54 @@ def test_run_checks_covers_every_required_area(tmp_path, monkeypatch):
 
 
 def test_cli_json_output_redacts_paths_and_exits_nonzero_on_block(tmp_path, capsys):
+    """默认 --json 只留文件名，--json-paths 才给完整路径；阻塞时退出码必须非零。
+
+    断言必须对**解析后的 JSON 字段**做（Windows 的路径反斜杠在 JSON 文本里是 "\\\\"，
+    拿原始路径去和序列化文本比子串会得出错误结论）。
+    """
     cert, key = _write_cert(tmp_path, not_before=NOW - datetime.timedelta(days=30),
                             not_after=NOW - datetime.timedelta(days=1))
     base = ['--host', '0.0.0.0', '--cert', str(cert), '--key', str(key),
             '--domain', 'p2p.example', '--origin', 'https://p2p.example',
             '--data', str(tmp_path / 'data'), '--json']
     code = pre.main(base)
-    payload = capsys.readouterr().out
-    assert code == 1
-    assert 'CERT_EXPIRED' in payload
-    assert str(tmp_path) not in payload          # 默认不输出完整路径（含人话结论）
-    assert 'BEGIN' not in payload                # 不输出任何密钥/证书正文
-    assert 'disclaimer' in payload
+    text = capsys.readouterr().out
+    assert code == 1                                    # exit 非零 on block
+    assert 'BEGIN' not in text                          # 不输出任何密钥/证书正文
+    payload = json.loads(text)
+    assert payload['disclaimer']
+    assert any(check['code'] == 'CERT_EXPIRED' for check in payload['checks'])
+    fields = list(_all_strings(payload))
+    assert not [item for item in fields if str(tmp_path) in item]     # 默认不输出完整路径
+    assert any(os.path.basename(str(cert)) in item for item in fields)  # 但保留文件名
     assert pre.main(base + ['--json-paths']) == 1
-    assert str(tmp_path) in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    assert any(str(tmp_path) in item for item in _all_strings(payload))
+
+
+def test_cli_runs_to_completion_without_posix_uid_api(monkeypatch, tmp_path, capsys):
+    """模拟 Windows：整轮 CLI 必须跑完并给出结论（原 CI 是 os.getuid AttributeError 直接炸掉整轮）。"""
+    monkeypatch.setattr(pre, 'POSIX_PERMISSIONS', False)
+    monkeypatch.delattr(os, 'getuid', raising=False)
+    code = pre.main(['--host', '127.0.0.1', '--port', '18088', '--stun-port', '13478',
+                     '--data', str(tmp_path), '--json'])
+    payload = json.loads(capsys.readouterr().out)
+    assert code in (0, 1)                      # 有结论（可能因为端口/证书等原因阻塞），但不是抛异常
+    data_check = [check for check in payload['checks'] if check['check'] == '数据目录'][0]
+    assert data_check['facts']['ownerMine'] is None
+    assert data_check['facts']['permissionsMeaningful'] is False
+    assert '不可判定' in data_check['facts']['ownerMineNote']
+
+
+def test_json_redaction_replaces_paths_inside_human_text_too():
+    """脱敏是逐字段的（不是对 JSON 文本做替换），人话结论里嵌的路径也要变成文件名。"""
+    for path in (os.path.join(os.sep, 'var', 'lib', 'p2p-data'),
+                 'C:\\Users\\runner\\p2p-data'):
+        stripped = pre._strip_paths({'conclusion': '数据目录 %s 不存在' % path,
+                                     'facts': {'path': path, 'nested': [{'root': path}]}}, [path])
+        assert path not in stripped['conclusion'] and 'p2p-data' in stripped['conclusion']
+        assert stripped['facts']['path'] == 'p2p-data'
+        assert stripped['facts']['nested'][0]['root'] == 'p2p-data'
 
 
 def test_cli_text_output_is_human_readable(tmp_path, capsys):

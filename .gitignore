@@ -32,3 +32,7 @@ p2pchat/android/app/src/main/assets/capacitor.config.json
 p2pchat/android/app/src/main/assets/capacitor.plugins.json
 p2pchat/android/capacitor-cordova-android-plugins/
 .DS_Store
+# PyInstaller output at repo root: regenerable, never commit (181 MB in the
+# first desktop build). Anchored so it cannot shadow p2pchat/platform/build.
+/dist/
+/build/
