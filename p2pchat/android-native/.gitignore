@@ -1,0 +1,9 @@
+.gradle/
+**/build/
+local.properties
+# 49 MB AAR and extracted jars stay local; the small probe report is kept as evidence.
+# (Ignore the directory *contents*, not the directory, or git never descends to un-ignore.)
+evidence/*
+!evidence/probe-*.json
+*.iml
+.idea/

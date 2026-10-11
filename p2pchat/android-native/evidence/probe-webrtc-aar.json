@@ -1,0 +1,138 @@
+{
+  "aar_entries": [
+    "AndroidManifest.xml",
+    "classes.jar",
+    "jni/arm64-v8a/libjingle_peerconnection_so.so",
+    "jni/armeabi-v7a/libjingle_peerconnection_so.so",
+    "jni/x86/libjingle_peerconnection_so.so",
+    "jni/x86_64/libjingle_peerconnection_so.so"
+  ],
+  "abis": [
+    {
+      "abi": "arm64-v8a",
+      "all_loads_16k": true,
+      "elf_abi": "aarch64",
+      "load_align": [
+        "0x4000"
+      ],
+      "name": "libjingle_peerconnection_so.so",
+      "needed": [
+        "libEGL.so",
+        "libdl.so",
+        "libm.so",
+        "liblog.so",
+        "libc.so"
+      ],
+      "sha256": "7b299113fcd743de7dc5559686b21fc2681b2c8598347d8dc0743d2e004995ca",
+      "size": 12287312
+    },
+    {
+      "abi": "armeabi-v7a",
+      "all_loads_16k": false,
+      "elf_abi": "arm",
+      "load_align": [
+        "0x1000"
+      ],
+      "name": "libjingle_peerconnection_so.so",
+      "needed": [
+        "libEGL.so",
+        "libdl.so",
+        "libm.so",
+        "liblog.so",
+        "libc.so"
+      ],
+      "sha256": "762f3d5e1c4c69c3f02f2383540f40e1142cb631e9d99e86bdb1602f4c277559",
+      "size": 6809404
+    },
+    {
+      "abi": "x86",
+      "all_loads_16k": false,
+      "elf_abi": "i386",
+      "load_align": [
+        "0x1000"
+      ],
+      "name": "libjingle_peerconnection_so.so",
+      "needed": [
+        "libEGL.so",
+        "libdl.so",
+        "libm.so",
+        "liblog.so",
+        "libc.so"
+      ],
+      "sha256": "80e7b1b7e07bb5a53841a8cacabf942a6f3eb8ee9759a1731741dd912f367f19",
+      "size": 12818648
+    },
+    {
+      "abi": "x86_64",
+      "all_loads_16k": true,
+      "elf_abi": "x86-64",
+      "load_align": [
+        "0x4000"
+      ],
+      "name": "libjingle_peerconnection_so.so",
+      "needed": [
+        "libEGL.so",
+        "libdl.so",
+        "libm.so",
+        "liblog.so",
+        "libc.so"
+      ],
+      "sha256": "0717afcc43da0c1aabd904f9ef0653efc8f3d37b5750f39a123697e7910b623a",
+      "size": 16166352
+    }
+  ],
+  "archive": {
+    "expect_recorded_for": "io.github.webrtc-sdk:android:150.7871.01",
+    "expected": {
+      "sha1": "b9ae2a17fa38f16ce071f029cf8684fb9166a1c7",
+      "sha256": "0a1627b1a48c2bc17d9a40d62fc47bd45166f44a311e95917f147c402de379b0",
+      "size": 49147033
+    },
+    "local_match": true,
+    "path": "/home/Luorix/DATA/Project/ipv6打洞/p2pchat/android-native/evidence/webrtc-inspect.aar",
+    "problems": [],
+    "remote": {
+      "checks": {
+        "content-length": "49147033",
+        "x-checksum-md5": "c3cd7ed857f7ba00cafadfb65def64e9",
+        "x-checksum-sha1": "b9ae2a17fa38f16ce071f029cf8684fb9166a1c7"
+      },
+      "http_status": 200,
+      "sha1_matches_local": true,
+      "url": "https://repo1.maven.org/maven2/io/github/webrtc-sdk/android/150.7871.01/android-150.7871.01.aar"
+    },
+    "sha1": "b9ae2a17fa38f16ce071f029cf8684fb9166a1c7",
+    "sha256": "0a1627b1a48c2bc17d9a40d62fc47bd45166f44a311e95917f147c402de379b0",
+    "size": 49147033
+  },
+  "checks": {
+    "16kb_missing_in_build_abis": [],
+    "16kb_not_ready_all_abis": [
+      "armeabi-v7a",
+      "x86"
+    ],
+    "abis_16kb_ready": [
+      "arm64-v8a",
+      "x86_64"
+    ],
+    "build_abis": [
+      "arm64-v8a",
+      "x86_64"
+    ],
+    "consumer_proguard_rules": [],
+    "missing_classes": [],
+    "needed_outside_platform": []
+  },
+  "classes_jar": {
+    "bytecode_java": 17,
+    "bytecode_major": 61,
+    "required_present": 18,
+    "required_total": 18,
+    "sha256": "2789e444c63f5b9b5f9f1ba227d12fbc03dfe617d6b83c0192b426730b3d8989",
+    "size": 1063812
+  },
+  "coordinate": "io.github.webrtc-sdk:android:150.7871.01",
+  "scope_note": "content-level verification only: no APK build, no emulator, no device run",
+  "tool": "probe_webrtc_aar",
+  "verdict": "PASS"
+}

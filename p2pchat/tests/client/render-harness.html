@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>三屏渲染检查（模拟数据）</title>
+<link rel="stylesheet" href="../../web/style.css">
+<style>#harness-banner{position:fixed;bottom:0;left:0;right:0;z-index:99;background:#7a2d2d;color:#fff;padding:8px 14px;font:12px/1.6 system-ui,sans-serif}</style>
+</head>
+<body>
+<div id="harness-banner">模拟数据 · 只用于人工检查界面渲染：这里的连接状态、可用性和延迟都是本页脚本注入的假值，不证明任何真实网络或真实家宽可用。phase=1 第一屏 / phase=2 第二屏 / phase=3 第三屏 / phase=4 第三屏+设置。</div>
+<div id="stage"></div>
+<script>
+/* 手工检查页：把真实的 index.html 结构、真实的 style.css、真实的 ux.js / app.js 装进同一个文档，
+   然后用注入的状态驱动三屏；不含任何真实连接。app.js 的顶层 let/const 在同一文档的脚本间可以按名字访问。 */
+(async()=>{
+const SCRIPTS=['core.js','diagnostics.js','rtc.js','transfer.js','ux.js','app.js'];
+const phase=Number(new URLSearchParams(location.search).get('phase')||'1');
+const doc=new DOMParser().parseFromString(await (await fetch('../../web/index.html')).text(),'text/html');
+doc.body.querySelectorAll('script').forEach(node=>node.remove());
+document.getElementById('stage').innerHTML=doc.body.innerHTML;
+for(const name of SCRIPTS)await new Promise((done,fail)=>{const s=document.createElement('script');s.src='../../web/'+name;s.onload=done;s.onerror=fail;document.head.append(s);});
+await new Promise(done=>setTimeout(done,80)); /* 等 app.js 的 discoverNative()/diagnostics 初始化落地，避免覆盖下面注入的状态 */
+if(phase===1)return;
+joined=true;myId='peer-me';auth={server:'wss://example.test/ws',room:'lab',name:'我',secret:'secret123'};
+peers.set('peer-friend',{id:'peer-friend',name:'对方'});
+nativeMethods=[
+ {mechanism:'udp-probe',status:'available',canMessage:false,reason:'PROBE_ONLY',limits:{independentBenchmark:false}},
+ {mechanism:'quic',status:'available',canMessage:true,reason:'EXPERIMENTAL_PLATFORM_UNVERIFIED',limits:{independentBenchmark:true}},
+ {mechanism:'tcp',status:'available',canMessage:true,reason:'EXPERIMENTAL_PLATFORM_UNVERIFIED',limits:{independentBenchmark:false}},
+ {mechanism:'tcp-simopen',status:'available',canMessage:true,reason:'EXPERIMENTAL_PLATFORM_UNVERIFIED',limits:{independentBenchmark:false}},
+ {mechanism:'upnp',status:'unsupported',canMessage:false,reason:'OPT_IN_GATEWAY_API_ONLY'},
+ {mechanism:'pcp',status:'unsupported',canMessage:false,reason:'OPT_IN_GATEWAY_API_ONLY'},
+ {mechanism:'natpmp',status:'unsupported',canMessage:false,reason:'OPT_IN_GATEWAY_API_ONLY'}];
+stunServers=['stun:example.test:3478'];
+const path=(attemptId,profile,state,extra={})=>({peerId:'peer-friend',mechanism:'webrtc',profile,attemptId,connectionId:'c1',state,canMessage:true,...extra});
+paths.set('t1',path('t1','ice-dual','gathering',{gathering:'complete'}));
+paths.set('t2',path('t2','ice-v6','failed',{failureCode:'ICE_FAILED'}));
+paths.set('t3',path('t3','ice-v4','gathering',{rttMs:18.7}));
+paths.set('t4',{peerId:'peer-friend',mechanism:'udp-probe',profile:'direct',attemptId:'t4',connectionId:'c1',state:'direct',canMessage:false});
+paths.set('t5',{peerId:'peer-friend',mechanism:'quic',profile:'direct',attemptId:'t5',connectionId:'c1',state:'failed',failureCode:'PEER_LOST'});
+paths.set('t6',{peerId:'peer-friend',mechanism:'tcp',profile:'direct',attemptId:'t6',connectionId:'c1',state:'gathering'});
+if(phase>=3){
+ const dual=paths.get('t1');dual.state='direct';dual.canMessage=true;dual.rttMs=21.5;
+ active.set('peer-friend','t1');
+}
+selectedPeer='peer-friend';
+renderPeers();renderPaths();
+if(phase>=3){bubble({peerId:'peer-friend'},'你好，这是模拟消息，只用来检查第三屏的排版。');bubble({peerId:'peer-friend'},'收到，直连已经建立。',true);}
+if(phase===4)setSettings(true);
+document.getElementById('status').textContent='模拟数据：已加入 · peer-me';
+window.harnessReady=true;
+})().catch(error=>{document.getElementById('status').textContent='检查页加载失败：'+error.message;window.harnessError=String(error&&error.stack||error);});
+</script>
+</body></html>

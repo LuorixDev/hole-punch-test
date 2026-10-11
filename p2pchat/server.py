@@ -195,32 +195,63 @@ def make_app(data_dir,ice_servers=None,origins=None,**limits):
     async def cleanup(app):store.close()
     app.on_shutdown.append(shutdown);app.on_cleanup.append(cleanup);return app
 
-async def main(args):
-    try:local=ipaddress.ip_address(args.host).is_loopback
-    except ValueError:local=args.host=='localhost'
-    if bool(args.cert)!=bool(args.key):raise ValueError('both --cert and --key required')
-    if not local and (not args.cert or not args.origin):raise ValueError('public signaling requires TLS and --origin allowlist')
-    context=None
-    if args.cert:
-        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2;context.load_cert_chain(args.cert,args.key)
-    app=make_app(args.data,[{'urls':args.stun_url}] if args.stun_url else [],args.origin)
+def requested_hosts(raw):
+    """--host is repeatable (like --stun-host); a plain string still means one host."""
+    if isinstance(raw,str):return [raw] if raw else ['127.0.0.1']
+    hosts=[str(h) for h in raw or () if str(h)]
+    return hosts or ['127.0.0.1']
+def is_loopback_host(host):
+    try:return ipaddress.ip_address(host).is_loopback
+    except ValueError:return host=='localhost'
+def bound_addresses(site):
+    """Actual bound (host,port) pairs of a site; [] if aiohttp internals ever change."""
+    try:return [(str(sock.getsockname()[0]),sock.getsockname()[1]) for sock in site._server.sockets]
+    except (AttributeError,TypeError):return []
+def format_bound(address,port):
+    text=str(address)
+    return '%s:%s'%('['+text+']' if ':' in text else text,port)
+async def serve(app,hosts,port,ssl_context=None,stun_hosts=None,stun_port=3478):
+    """One site per --host sharing one AppRunner/Store: real dual stack, no cross-process lock.
+
+    asyncio forces IPV6_V6ONLY on every listening socket, so one site is always
+    single-family; dual stack means two explicit V6ONLY sites on the same port.
+    Each family still gets its own STUN socket (STUN code sets V6ONLY itself).
+    """
     runner=web.AppRunner(app);await runner.setup();transports=[]
     try:
-        await web.TCPSite(runner,args.host,args.port,ssl_context=context).start()
-        for host in args.stun_host or ['127.0.0.1','::1']:
+        for host in hosts:
+            site=web.TCPSite(runner,host,port,ssl_context=ssl_context)
+            await site.start()
+            bound=bound_addresses(site) or [(host,port)]
+            for address,actual_port in bound:
+                family='IPv6' if ':' in str(address) else 'IPv4'
+                LOG.info('signaling listening on %s (%s, requested --host %s); every site shares one Store/data dir',format_bound(address,actual_port),family,host)
+        for host in stun_hosts or ['127.0.0.1','::1']:
             family=socket.AF_INET6 if ':' in host else socket.AF_INET
             sock=socket.socket(family,socket.SOCK_DGRAM)
             if family==socket.AF_INET6:sock.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,1)
-            sock.bind((host,args.stun_port));sock.setblocking(False)
+            sock.bind((host,stun_port));sock.setblocking(False)
             t,_=await asyncio.get_running_loop().create_datagram_endpoint(lambda:Stun(app['store']),sock=sock);transports.append(t)
         await asyncio.Event().wait()
     finally:
         for t in transports:t.close()
         await runner.cleanup()
 
+async def main(args):
+    hosts=requested_hosts(args.host)
+    loopback=all(is_loopback_host(host) for host in hosts)
+    if bool(args.cert)!=bool(args.key):raise ValueError('both --cert and --key required')
+    if not loopback and (not args.cert or not args.origin):raise ValueError('public signaling requires TLS and --origin allowlist')
+    context=None
+    if args.cert:
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2;context.load_cert_chain(args.cert,args.key)
+    app=make_app(args.data,[{'urls':args.stun_url}] if args.stun_url else [],args.origin)
+    await serve(app,hosts,args.port,context,args.stun_host,args.stun_port)
+
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--host',default='127.0.0.1');p.add_argument('--port',type=int,default=8088)
+    p.add_argument('--host',action='append',help='Repeat for real IPv4+IPv6 (--host 0.0.0.0 --host ::); defaults to 127.0.0.1')
+    p.add_argument('--port',type=int,default=8088)
     p.add_argument('--stun-host',action='append',help='Repeat for IPv4 and IPv6; defaults to both loopbacks')
     p.add_argument('--stun-port',type=int,default=3478);p.add_argument('--stun-url')
     p.add_argument('--data',default=str(BASE/'data'));p.add_argument('--cert');p.add_argument('--key');p.add_argument('--origin',action='append',default=[])

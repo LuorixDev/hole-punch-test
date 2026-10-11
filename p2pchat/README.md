@@ -8,7 +8,7 @@
 
 历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`（129文件）的 VERIFICATION-R2（本地私有证据，不随GitHub交付）（t15）/ROUND3（本地私有证据，不随GitHub交付）（t19）仅对应旧版；[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已终态：Linux/Android成功，Windows90秒诊断exit124未打包。挂起链已定位至Peer.close→RTCPeerConnection.close→ICE.stop→aioice StunProtocol.close；新版本必须重跑原双echo诊断、完整测试与打包门，不能继承旧成功包。差异与边界见 [Windows修复集成](docs/WINDOWS-INTEGRATION.md)。
 
-快速导航：[平台/机制矩阵](docs/CAPABILITIES.md) · [交付状态与产物哈希](docs/DELIVERY.md) · [协议](docs/PROTOCOL.md) · [验收定义](docs/ACCEPTANCE.md)。
+快速导航：[平台/机制矩阵](docs/CAPABILITIES.md) · [交付状态与产物哈希](docs/DELIVERY.md) · [协议](docs/PROTOCOL.md) · [验收定义](docs/ACCEPTANCE.md) · [家宽服务器部署手册](docs/DEPLOY-HOME-SERVER.md)。
 
 ## 1. 安装依赖（仓库根目录）
 
@@ -48,7 +48,7 @@ node p2pchat/node_modules/electron/install.js
 
 ```sh
 .venv/bin/python -m p2pchat.server \
-  --host 0.0.0.0 --port 8443 \
+  --host 0.0.0.0 --host :: --port 8443 \
   --cert /secure/server-fullchain.pem --key /secure/server-key.pem \
   --origin https://signal.example.test:8443 \
   --stun-host 0.0.0.0 --stun-host :: --stun-port 3478 \
@@ -56,6 +56,7 @@ node p2pchat/node_modules/electron/install.js
   --data /private/p2p-central
 ```
 
+- `--host`与`--stun-host`一样可重复：每个值一个独立监听站点（各自`V6ONLY`），所以`--host 0.0.0.0 --host ::`是**单进程真双栈**、同端口、共享同一Store/数据目录（无跨进程SQLite写锁）。只写一个`--host`时另一族会被拒绝（不做隐式双栈）。默认仍是`127.0.0.1`。双栈行为目前**只在Linux实测**，Windows/macOS未实测。
 - 远程使用 `wss://signal.example.test:8443/ws`，证书必须受信任，不跳过验证；端口443代理亦仅控制面，绝不是数据回退路径。
 - Origin必须精确allowlist。Electron本地页面Origin是`null`，仅在**明确允许桌面客户端**时另加`--origin null`；Android是`--origin https://localhost`。Origin不是身份认证，仍需房间secret和数据面HMAC。
 - 仅按需开放控制端口及UDP3478；P2P数据连接仍需端点网络允许。IPv6可路由地址不表示stateful firewall允许入站。STUN不能保证对称NAT/CGNAT/UDP阻断网络成功。
