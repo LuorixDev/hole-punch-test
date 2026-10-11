@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.sax.saxutils import escape
 import aiohttp
-from .stun import canonical_endpoint
+from .stun import canonical_endpoint, socket_address, udp_unreachable, receive_udp_retry
 
 
 @dataclass(frozen=True)
@@ -99,11 +99,15 @@ class Gateway:
         loop = asyncio.get_running_loop()
         try:
             for multiplier in [1, 2, 4]:
-                await loop.sock_sendto(sock, data, remote)
+                try:
+                    await loop.sock_sendto(sock, data, socket_address(remote, family))
+                except OSError as exc:
+                    if not udp_unreachable(exc):
+                        raise
                 deadline = time.monotonic() + min(4, self.policy.timeout * multiplier)
                 while time.monotonic() < deadline:
                     try:
-                        reply, addr = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), deadline - time.monotonic())
+                        reply, addr = await asyncio.wait_for(receive_udp_retry(sock, 2048), deadline - time.monotonic())
                     except asyncio.TimeoutError:
                         break
                     try:

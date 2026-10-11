@@ -42,6 +42,47 @@ def canonical_endpoint(endpoint, family=None):
     return str(address), port
 
 
+def socket_address(endpoint, family):
+    """OS-call form, distinct from the public two-field identity.
+
+    CPython 3.12 Windows overlapped.parse_address dispatches by tuple length:
+    two fields select AF_INET, four select AF_INET6. Always supply four fields
+    for IPv6, also on POSIX so the contract is exercised on every platform.
+    """
+    host, port = canonical_endpoint(endpoint, family)
+    return (host, port, 0, 0) if family == socket.AF_INET6 else (host, port)
+
+
+def udp_unreachable(exc):
+    """An ICMP unreachable is no response, not evidence of a peer or a lease.
+
+    Windows reports a UDP ICMP port-unreachable as WSAECONNRESET (10054), which
+    CPython surfaces as ConnectionResetError. POSIX (Linux/macOS) reports the same
+    condition as ECONNREFUSED / ConnectionRefusedError. Both are swallowed only on
+    the UDP paths that call this predicate: TCP connect errors keep their meaning.
+    Permission, routing and invalid-argument errors still propagate.
+    """
+    return (isinstance(exc, (ConnectionResetError, ConnectionRefusedError))
+            or getattr(exc, "winerror", None) == 10054
+            or getattr(exc, "errno", None) == 10054)
+
+
+async def receive_udp_retry(sock, size):
+    """Caller supplies its existing deadline/cancellation; never extends it.
+
+    Throttle repeated immediately-completed ICMP failures instead of busy-looping.
+    Other OS errors (including WSAEINVAL 10022) remain errors.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            return await loop.sock_recvfrom(sock, size)
+        except OSError as exc:
+            if not udp_unreachable(exc):
+                raise
+            await asyncio.sleep(.01)
+
+
 def parse_binding(data, transaction):
     if len(data) < 20:
         raise ValueError("STUN_TRUNCATED")
@@ -79,11 +120,15 @@ async def binding(sock, server, timeout=2):
         remaining = timeout - (time.monotonic()-start)
         if remaining <= 0:
             break
-        await loop.sock_sendto(sock, request, server)
+        try:
+            await loop.sock_sendto(sock, request, socket_address(server, sock.family))
+        except OSError as exc:
+            if not udp_unreachable(exc):
+                raise
         deadline = time.monotonic() + min(wait, remaining)
         while time.monotonic() < deadline:
             try:
-                packet, remote = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), deadline-time.monotonic())
+                packet, remote = await asyncio.wait_for(receive_udp_retry(sock, 2048), deadline-time.monotonic())
             except asyncio.TimeoutError:
                 break
             try:

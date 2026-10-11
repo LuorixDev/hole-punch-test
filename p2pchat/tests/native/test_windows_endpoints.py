@@ -13,7 +13,7 @@ import sys
 
 import pytest
 from p2pchat.native.adapter import validate_candidate
-from p2pchat.native.stun import canonical_endpoint, binding, COOKIE
+from p2pchat.native.stun import canonical_endpoint, socket_address, binding, COOKIE
 from p2pchat.native.gateway import Gateway, GatewayPolicy
 from .test_transport import pair, wait_states
 
@@ -99,7 +99,7 @@ async def test_actual_loopback_sockaddr_diagnostic():
             sock.setblocking(False)
             sock.bind(("::1", 0))
         target = ("::1", sockets[1].getsockname()[1])
-        await loop.sock_sendto(sockets[0], b"native-ipv6-loopback", target)
+        await loop.sock_sendto(sockets[0], b"native-ipv6-loopback", socket_address(target, socket.AF_INET6))
         data, addr = await asyncio.wait_for(loop.sock_recvfrom(sockets[1], 128), 3)
         assert data == b"native-ipv6-loopback"
         assert canonical_endpoint(addr, socket.AF_INET6) == ("::1", sockets[0].getsockname()[1])

@@ -29,7 +29,7 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import HandshakeCompleted, StreamDataReceived, ConnectionTerminated
 from aioquic.quic.packet import pull_quic_header
 from .auth import Auth, packed
-from .stun import canonical_endpoint
+from .stun import canonical_endpoint, socket_address, udp_unreachable, receive_udp_retry
 
 MAX_FRAME = 65536
 MAX_WIRE = 100000
@@ -385,12 +385,18 @@ class Attempt:
             await self.fail("UDP_IO_FAILED")
 
     async def raw_udp(self, data, target=None):
-        await asyncio.get_running_loop().sock_sendto(self.sock, data, target or self.remote)
+        try:
+            await asyncio.get_running_loop().sock_sendto(
+                self.sock, data, socket_address(target or self.remote, self.sock.family))
+        except OSError as exc:
+            self.record_socket_error(exc)
+            if not udp_unreachable(exc):
+                raise
 
     async def receive_udp(self):
         try:
             while self.state not in TERMINAL:
-                data, addr = await asyncio.get_running_loop().sock_recvfrom(self.sock, MAX_WIRE)
+                data, addr = await receive_udp_retry(self.sock, MAX_WIRE)
                 try:
                     source = canonical_endpoint(addr, self.sock.family)
                 except ValueError:
@@ -474,7 +480,7 @@ class Attempt:
             except ValueError:
                 continue
             if target == self.remote:
-                await asyncio.get_running_loop().sock_sendto(self.sock, data, target)
+                await self.raw_udp(data, target)
 
     async def quic_events(self):
         while self.quic:
@@ -542,7 +548,7 @@ class Attempt:
             else:
                 # simultaneous-open: BOTH roles bind+connect, neither listens nor accepts.
                 # A refusal/race is explicitly failed, never disguised with a listening fallback.
-                await asyncio.wait_for(loop.sock_connect(self.sock, self.remote), self.timeout)
+                await asyncio.wait_for(loop.sock_connect(self.sock, socket_address(self.remote, self.sock.family)), self.timeout)
             self.transition("authenticating")
             server_side = self.role == "answerer"
             ctx = self.tls_context(server_side)
