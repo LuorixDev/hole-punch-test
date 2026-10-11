@@ -6,7 +6,7 @@
 
 ## 版本与CI状态
 
-**当前：Windows修复待当前commit CI确认。** t24合并t22+t25且t26审查通过的关闭修复、所有交付文档，重新生成完整 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)/[FREEZE](FREEZE.json) 并重建Linux。最新源码/产物SHA以这两个文件为唯一当前清单，当前commit/run尚待captain推送，不继承任何旧包。
+**当前：高分辨率计时修复待当前commit CI确认，Windows尚未完成。** t29整合t27+t28已审性能测量与JS未知时间显示修复，重新sync/Linux构建及完整 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)/[FREEZE](FREEZE.json)。最新源码/产物SHA以这两个文件为唯一当前清单，当前commit/run尚待captain推送，不继承旧包。最近61b400e Linux/Android成功，Windows4000B收到但elapsedMs=0导致原正耗时断言失败，关闭正常、约4.937秒exit1；**与此前90/600秒关闭挂起不同**。详见 [TIMING-INTEGRATION](TIMING-INTEGRATION.md)。
 
 变化包含新增 [rtc_shutdown.py](../backend/rtc_shutdown.py)、Peer幂等有界关闭、required closer取消失败传播及相关测试；范围与Linux证据见 [WINDOWS-INTEGRATION](WINDOWS-INTEGRATION.md)。新Windows runner必须完成原双echo90秒诊断、完整测试和portable打包门。下面的8687adf数值与哈希表只保留作**历史t15已验证快照**，不是当前版本标识。
 
@@ -23,14 +23,16 @@ Linux packageTreeSha256 = b0c9f7aae146f8ee852a30f2fcf7ebe25e4f16e55748dd9fd046a6
 
 | 版本/来源 | Linux | Android | Windows | 可作何种证据 |
 |---|---|---|---|---|
-| t24当前关闭修复（hash见FREEZE） | 新本地包重建/sandbox检查；新CI待推 | 新CI待推，实机NOT_RUN | 修复待当前commit CI确认，无成功包 | t25 Linux72项+t26独立33项；非Windows IOCP通过 |
+| t29当前计时修复（hash见FREEZE） | 新本地包重建/sandbox检查；新CI待推 | 新CI待推，实机NOT_RUN | 计时修复待当前commit CI确认，无成功包 | t27 Linux77项+t28独立25 Python/17 Node；非Windows成功声明 |
+| 历史61b400e关闭修复 | success | success，无实机 | 4000B ACK已到、elapsedMs=0断言失败；约4.937秒exit1，关闭正常，未打包 | 不把本轮测试失败混为旧挂起/超时124 |
 | 历史8687adf→`a1c6e7e724390440d6422e4bb0b06804c9ba16a7` / run`38124339483` | success | success，无实机 | 90秒diagnostic exit124，未打包 | 挂起链已定位到aioice StunProtocol.close，不作为新关闭修复结果 |
 | `855c19ceed67d6ae23cbf52c61131dd6d637ea8d`，run `38122604055` | success | success/debug构建 | failed，watchdog600秒exit124，未打包 | 旧commit诊断包，不可继承到8687adf |
 | `ec2969a`，run `38121429541` | success | success | 长挂后取消 | 取消不是通过，也非已定位根因 |
 | `eb9316b`，run `38121009114` | 构建门失败 | 构建门失败 | 构建门失败 | Python版本/工作目录历史失败 |
 
-最新已知远端历史commit是`a1c6e7e724390440d6422e4bb0b06804c9ba16a7`，run38124339483已终态，不包含本轮关闭修复。新commit、run及对应产物SHA/下载链接：**PENDING，由captain追加**。t11/t21的workflow/诊断入口不能给未成功的Windows产品背书；不上传windows-analysis中的proposal patch或源码快照，不跳过失败测试门。历史run链接：
+最新已知远端历史commit是`61b400e98ff955120e42caafe05284fcb940b11f` / run`38129731771`，其关闭修复已正常退出但计时断言失败，不包含本轮高分辨率计时修复。更早a1c6e7e/run38124339483的90秒超时保留为独立历史。新commit、run及对应产物SHA/下载链接：**PENDING，由captain追加**。t11/t21的workflow/诊断入口不能给未成功的Windows产品背书；不上传windows-analysis中的proposal patch或源码快照，不跳过失败测试门。历史run链接：
 
+- [61b400e历史构建（计时断言失败，关闭正常）](https://github.com/LuorixDev/hole-punch-test/actions/runs/38129731771)
 - [a1c6e7e历史构建（Windows诊断超时）](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)
 - [855c19c诊断构建](https://github.com/LuorixDev/hole-punch-test/actions/runs/38122604055)
 - [ec2969a历史构建](https://github.com/LuorixDev/hole-punch-test/actions/runs/38121429541)

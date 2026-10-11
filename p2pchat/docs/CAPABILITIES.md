@@ -1,6 +1,6 @@
 # 最终能力矩阵与限制
 
-**当前状态：Windows修复待当前commit CI确认。** 最新完整源码和Linux包哈希见 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)、[FREEZE](FREEZE.json)，已合并t22+t25关闭修复及交付文档。该补丁仅精确win32/Python3.12.10/aiortc1.15.0/aioice0.10.2的本Peer Proactor UDP；Linux模拟/全套72项与 [T26](../review/windows/T26.md) 独立33项通过，不表示Windows IOCP已通过。
+**当前状态：高分辨率计时修复已审，Windows待当前commit CI确认。** 61b400e的Linux/Android成功，Windows收到4000B但elapsedMs=0导致断言失败；关闭正常完成、约4.937秒exit1，不是旧挂起。t27改perf_counter_ns测量及JS未知计时提示，t28独立25 Python+17 Node通过；本轮按新前端字节重建Linux，详见 [TIMING-INTEGRATION](TIMING-INTEGRATION.md)。下面关闭修复描述为此前t24边界，仍保留但不能覆盖本轮计时变更。 最新完整源码和Linux包哈希见 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)、[FREEZE](FREEZE.json)，已合并t22+t25关闭修复及交付文档。该补丁仅精确win32/Python3.12.10/aiortc1.15.0/aioice0.10.2的本Peer Proactor UDP；Linux模拟/全套72项与 [T26](../review/windows/T26.md) 独立33项通过，不表示Windows IOCP已通过。
 
 下表L1/L2证据来自历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`的 [VERIFICATION-R2](../verification/VERIFICATION-R2.md) 与 [ROUND3](../review/ROUND3.md)；77个旧安全域文件及native字节未变，但Python Peer关闭逻辑已变，不能把旧全套报告直接套新整树。[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已Linux/Android成功、Windows90秒exit124未打包。当前新版需同commit重跑原双echo诊断+全套测试+打包，详见 [WINDOWS-INTEGRATION](WINDOWS-INTEGRATION.md)。
 
@@ -13,7 +13,7 @@
 | Linux Chromium | WebRTC聊天/文件/录音/诊断 | Web静态资源已同步 | 真实浏览器↔独立Python echo、文件SHA、独立benchmark、断信令补传通过 | 本机有证据；两条家宽NOT_RUN |
 | Linux Electron x64 | 共享UI+安全IPC+内置Python sidecar | 本地最终包已重建 | sandbox启动、sidecar来源hash；JS业务→platform桥→双Python native测试通过 | Electron完整GUI跨设备/网关NOT_RUN；本机glibc2.44包不保证旧Linux |
 | Python Linux | 双栈信令/STUN、中心日志、WebRTC Echo、native API | 源码与本地sidecar构建 | 独立进程、v4/v6 socket、隔离v6 stateful/延迟丢包、候选负例通过 | 真实双NAT/公网/CPE兼容NOT_RUN |
-| Windows Electron | 同源封装/sidecar配置 | **关闭修复待当前commit CI确认，无成功包**；旧CI90/600秒超时未打包 | 未运行当前版Windows | GUI/文件/麦克风/防火墙实机NOT_RUN |
+| Windows Electron | 同源封装/sidecar配置 | **计时修复待当前commit CI确认，无成功包**；61b400e关闭正常但elapsed0失败，旧版另有90/600秒超时 | 未运行当前版Windows | GUI/文件/麦克风/防火墙实机NOT_RUN |
 | Android Capacitor | 共享WebRTC UI、SAF保存、音频权限、pause/resume/切网回调 | 关闭修复同版待CI；旧commit debug APK成功不继承 | lifecycle/旧ACK/track回收仅源码+模拟 | 真机安装、WebView互通、录音、后台/切网NOT_RUN |
 
 新关闭修复各平台运行结论/产物链接由captain推送新commit后按实际终态补充，目前Windows修复不预判成功；上述a1c6e7e仅旧版历史。旧`855c19ceed67d6ae23cbf52c61131dd6d637ea8d` / run`38122604055`：Linux、Android成功；Windows watchdog600秒exit124，未打包。详情见 [交付版本表](DELIVERY.md#版本与ci状态)。

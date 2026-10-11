@@ -1,6 +1,10 @@
 # Client platform evidence and build instructions
 
-## Current integration status (t24, 2026-10-11)
+## Current integration status (t29, 2026-10-11)
+
+**Timing repair awaits current-commit CI; Windows is not complete.** The actual61b400e run built Linux/Android; Windows received4000B but failed elapsedMs>0 because elapsedMs was0. Close completed normally, watchdog exited1 in approximately4.937s, not old exit124/hang. Reviewed t27/t28 uses same-source perf_counter_ns integer differences and explicit unknown timing; JS no longer invents a1ms floor. Linux full77 and independent25Python/17Node passed, not Windows-native proof. Frontend changed, so t29 re-syncs and rebuilds Linux rather than reusing old app.asar. Current hashes are [FREEZE](docs/FREEZE.json); commit/run await captain. See [timing integration](docs/TIMING-INTEGRATION.md).
+
+## Previous close-fix integration (t24 history)
 
 **Windows修复待当前commit CI确认 / Windows close fix awaits CI on the new commit.** Current complete source and rebuilt Linux artifact hashes are in [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) and [FREEZE](docs/FREEZE.json). This integrates t22+t25 reviewed by [T26](review/windows/T26.md), plus the delivery documentation; it is not the old 8687adf snapshot. Linux implementation tests (72) and independent close-focused review tests (33) passed. The narrow workaround only applies to win32/CPython3.12.10/aiortc1.15.0/aioice0.10.2 and owned Proactor UDP transports; Linux simulated coverage is **not** Windows IOCP validation.
 

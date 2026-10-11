@@ -25,6 +25,17 @@ from p2pchat.backend.rtc_shutdown import close_rtc
 
 MAX_FILE=32*1024*1024
 
+def measured_elapsed(start_ns):
+    """Performance interval only; deadlines continue using monotonic seconds.
+
+    Subtract integer samples before converting units. A clock with insufficient
+    resolution is unknown, never an epsilon duration or an infinite goodput.
+    """
+    elapsed_ns=time.perf_counter_ns()-start_ns
+    if elapsed_ns<=0:
+        return {'elapsedMs':None,'timingError':'TIMING_UNAVAILABLE'}
+    return {'elapsedMs':elapsed_ns/1_000_000}
+
 def allowed_candidate(line,profile):
     p=line.removeprefix('a=').split()
     if len(p)<8 or p[7]=='relay':return False
@@ -182,11 +193,11 @@ class Peer:
                     if m.get('v')!=1:raise ValueError()
                     if m['kind']=='bench-start':
                         if any(p.get('bench') for p in self.paths.values()):raise ValueError()
-                        path['bench']={'id':identifier(m['id']),'seq':0,'bytes':0,'start':time.monotonic()}
+                        path['bench']={'id':identifier(m['id']),'seq':0,'bytes':0,'start':time.monotonic(),'measure_start_ns':time.perf_counter_ns()}
                     elif m['kind']=='bench-end':
                         b=path['bench']
                         if not b or m['id']!=b['id'] or time.monotonic()-b['start']>10:raise ValueError()
-                        dc.send(json.dumps({'v':1,'kind':'bench-ack','id':b['id'],'bytes':b['bytes'],'elapsedMs':(time.monotonic()-b['start'])*1000}));path['bench']=None
+                        dc.send(json.dumps({'v':1,'kind':'bench-ack','id':b['id'],'bytes':b['bytes'],**measured_elapsed(b['measure_start_ns'])}));path['bench']=None
                     else:raise ValueError()
             except (ValueError,KeyError,TypeError):path['bench']=None;dc.close()
     def duplicate(self,peer,fid):
@@ -250,13 +261,13 @@ class Peer:
             valid=type(size) is int and 0<=size<=MAX_FILE and self.active_receives+self.echo_count<8 and self.reserved+self.echo_bytes+size<=64*1024*1024 and fid not in path['files'] and not m.get('benchmark')
             valid=valid and isinstance(m.get('name'),str) and len(m['name'])<=255 and isinstance(m.get('mime'),str) and len(m['mime'])<=128 and isinstance(m.get('sha256'),str) and bool(re.fullmatch('[0-9a-f]{64}',m['sha256'])) and (path['peer'],fid) not in self.seen
             if not valid:self.send(path,{'kind':'file-ready','id':fid,'ok':False,'reason':'LIMIT_EXCEEDED'});return
-            now=time.monotonic();path['files'][fid]={**m,'data':bytearray(),'received':0,'seq':0,'started':now,'progress':now,'last_ack':now};self.reserved+=size;self.active_receives+=1
+            now=time.monotonic();path['files'][fid]={**m,'data':bytearray(),'received':0,'seq':0,'measure_start_ns':time.perf_counter_ns(),'progress':now,'last_ack':now};self.reserved+=size;self.active_receives+=1
             self.send(path,{'kind':'file-ready','id':fid,'ok':True})
         elif kind=='file-end':
             fid=identifier(m.get('id'));t=self.release_file(path,fid)
             if t is None:raise ValueError('SCHEMA_INVALID')
             digest=hashlib.sha256(t['data']).hexdigest();ok=t['received']==t['size'] and digest==t['sha256']
-            self.send(path,{'kind':'file-ack','id':fid,'ok':ok,'bytes':t['received'],'sha256':digest,'elapsedMs':(time.monotonic()-t['started'])*1000})
+            self.send(path,{'kind':'file-ack','id':fid,'ok':ok,'bytes':t['received'],'sha256':digest,**measured_elapsed(t['measure_start_ns'])})
             self.event('transfer.received',{'bytes':t['received'],'integrityOk':ok},path)
             duplicate=self.duplicate(path['peer'],fid)
             if ok and not duplicate:
