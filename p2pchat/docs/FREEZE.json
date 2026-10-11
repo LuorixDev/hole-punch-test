@@ -1,0 +1,35 @@
+{
+  "sourceTreeSha256": "fd54a6fba2cd4740e460984298b7693a5585b81f61d040897662e8df09b9af92",
+  "sourceFileCount": 121,
+  "sourceManifestSha256": "8610dd52d679b685f6f0f4e1357ca425787ec18ef7118c765546fa9fdc1cb11f",
+  "packageTreeSha256": "8dae640c9145bb3eb781ba32d0d8073f481741a3784a79c8de52d0b9641746d2",
+  "packageFileCount": 109,
+  "artifactSha256": {
+    "releases/linux-unpacked/p2p-observatory-chat": "10a14d05c6ff4f94075cfb3eeb6ed6571be33ebcc08cbd675b5ce9ff84706564",
+    "releases/linux-unpacked/resources/app.asar": "cbf29c6b3f2ddba0196679ba50ba8a258ce6680f7d4e42f4812f738684dc899d",
+    "releases/linux-unpacked/resources/native/p2p-native": "6941a9b123b92fe5f1fb6d338b13372bf09bc5ffc2bffed15d49942a805698f7",
+    "package-lock.json": "6beed4f9163d5bcc775c1dd8429caf6b405b71909a8643ba23720a20f64dbef0",
+    "requirements-lock.txt": "e8a8f0a6b1dbf627b99353c4e42aeb2add5859bfa0594d0c0959e295bf75c9bd"
+  },
+  "tests": {
+    "python": "45 passed; 8 AppKey warnings; 73.21s",
+    "nodeClientPlatform": "27 passed",
+    "nodeRealNativeBridge": "1 passed",
+    "syncWeb": "passed",
+    "linuxBuild": "passed",
+    "linuxSandboxSmoke": "passed",
+    "nativeManifestMatches": "passed"
+  },
+  "notRun": [
+    "Windows build/runtime/microphone",
+    "Android build/runtime/microphone",
+    "real residential NAT",
+    "real gateways",
+    "browser successful IPv6 path"
+  ],
+  "sourceFrozen": true,
+  "releaseMetadataExcludedFromSourceTree": [
+    "docs/SOURCE-MANIFEST.json",
+    "docs/FREEZE.json"
+  ]
+}

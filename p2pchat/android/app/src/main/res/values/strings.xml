@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">P2P Observatory</string>
+    <string name="title_activity_main">P2P Observatory</string>
+    <string name="package_name">dev.p2pobservatory.chat</string>
+    <string name="custom_url_scheme">dev.p2pobservatory.chat</string>
+</resources>

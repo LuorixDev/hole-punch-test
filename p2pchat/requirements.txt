@@ -1,0 +1,5 @@
+aiohttp>=3.11,<4
+aiortc>=1.13,<2
+aioquic>=1.2,<2
+pytest>=8,<9
+pytest-asyncio>=0.25,<2

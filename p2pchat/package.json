@@ -1,0 +1,29 @@
+{
+  "name": "p2p-observatory-chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Strict P2P connectivity and chat diagnostics",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "sync:web": "node tools/sync-web.cjs",
+    "desktop": "npm run sync:web && electron .",
+    "build:native": "node tools/build-native.cjs",
+    "test:platform": "node --test tests/platform/*.test.cjs",
+    "dist:linux": "npm run sync:web && npm run build:native && electron-builder --config electron-builder.yml --linux dir",
+    "dist:windows": "npm run sync:web && npm run build:native && electron-builder --config electron-builder.yml --win portable",
+    "android:add": "npm run sync:web && cap add android",
+    "android:sync": "npm run sync:web && cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/core": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3"
+  },
+  "overrides": {
+    "xcode": {"uuid": "11.1.1"}
+  }
+}

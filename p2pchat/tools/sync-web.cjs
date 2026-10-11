@@ -1,0 +1,12 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const target = path.join(root, 'dist-web');
+fs.mkdirSync(target, {recursive: true});
+fs.cpSync(path.join(root, 'web'), target, {recursive: true});
+fs.copyFileSync(path.join(root, 'platform/mobile.js'), path.join(target, 'platform-mobile.js'));
+let html = fs.readFileSync(path.join(target, 'index.html'), 'utf8');
+html = html.replaceAll('/assets/', './').replace('</head>', '<script src="./platform-mobile.js"></script>\n</head>');
+fs.writeFileSync(path.join(target, 'index.html'), html);
+console.log('Web assets synchronized:', target);

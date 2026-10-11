@@ -1,0 +1,46 @@
+/* Shared pure protocol helpers. CommonJS export is for node:test only. */
+(function(root){
+'use strict';
+const enc=new TextEncoder(),dec=new TextDecoder('utf-8',{fatal:true});
+const LIMIT={file:32*1024*1024,reserved:64*1024*1024,chunk:16384,high:524288,low:131072};
+const uuid=()=>crypto.randomUUID();
+function family(address){return typeof address==='string'?(address.includes(':')?6:/^(\d{1,3}\.){3}\d{1,3}$/.test(address)?4:null):null;}
+function candidateInfo(c){const a=c.trim().split(/\s+/);return {family:family(a[4]),protocol:a[2]?.toLowerCase(),type:a[a.indexOf('typ')+1]};}
+function permitted(c,profile){const m=candidateInfo(c);return m.type!=='relay'&&(profile==='ice-dual'||m.family===null||m.family===(profile==='ice-v6'?6:4));}
+function filterSdp(sdp,profile){return sdp.split(/\r?\n/).filter(l=>!l.startsWith('a=candidate:')||permitted(l.slice(2),profile)).join('\r\n');}
+function encodeFrame(id,sequence,payload){const n=enc.encode(id),b=new Uint8Array(payload);if(!n.length||n.length>100||!Number.isInteger(sequence)||sequence<0||sequence>0xffffffff||b.length>LIMIT.chunk)throw Error('INVALID_CHUNK');const out=new Uint8Array(6+n.length+b.length),v=new DataView(out.buffer);v.setUint16(0,n.length);out.set(n,2);v.setUint32(2+n.length,sequence);out.set(b,6+n.length);return out;}
+function decodeFrame(data){const b=new Uint8Array(data),v=new DataView(b.buffer,b.byteOffset,b.byteLength);if(b.length<7)throw Error('INVALID_CHUNK');const n=v.getUint16(0);if(!n||n>100||b.length<6+n||b.length-6-n>LIMIT.chunk)throw Error('INVALID_CHUNK');return {id:dec.decode(b.subarray(2,2+n)),sequence:v.getUint32(2+n),payload:b.subarray(6+n)};}
+const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
+const sha=async b=>hex(await crypto.subtle.digest('SHA-256',b));
+async function proof(secret,fields){const key=await crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);return hex(await crypto.subtle.sign('HMAC',key,enc.encode(JSON.stringify(fields))));}
+function equal(a,b){if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let d=0;for(let i=0;i<a.length;i++)d|=a.charCodeAt(i)^b.charCodeAt(i);return d===0;}
+class Handshake{
+ constructor(config){Object.assign(this,config);this.nonce=hex(crypto.getRandomValues(new Uint8Array(32)));this.remoteNonce=null;this.gotAck=false;this.sentAck=false;}
+ fields(ack,sender,receiver,nonce,echo){const a=[ack?'p2pobs-v1-ack':'p2pobs-v1',this.room,this.connectionId,this.attemptId,sender,receiver,nonce];if(ack)a.push(echo);return a;}
+ async hello(){return {v:1,kind:'hello',peer:this.localPeerId,connectionId:this.connectionId,attemptId:this.attemptId,nonce:this.nonce,proof:await proof(this.secret,this.fields(false,this.localPeerId,this.peerId,this.nonce))};}
+ async receive(m){if(m.v!==1||m.peer!==this.peerId||m.connectionId!==this.connectionId||m.attemptId!==this.attemptId||!/^[a-f0-9]{64}$/.test(m.nonce))throw Error('AUTH_FAILED');const ack=m.kind==='hello-ack';if(!ack&&m.kind!=='hello')throw Error('AUTH_FAILED');if(!equal(m.proof,await proof(this.secret,this.fields(ack,this.peerId,this.localPeerId,m.nonce,m.echoNonce))))throw Error('AUTH_FAILED');if(ack){if(m.echoNonce!==this.nonce||this.gotAck||this.earlyAck)throw Error('AUTH_REPLAY');if(!this.remoteNonce){this.earlyAck=m.nonce;return null;}if(m.nonce!==this.remoteNonce)throw Error('AUTH_REPLAY');this.gotAck=true;return null;}if(this.remoteNonce)throw Error('AUTH_REPLAY');this.remoteNonce=m.nonce;if(this.earlyAck){if(this.earlyAck!==m.nonce)throw Error('AUTH_FAILED');this.earlyAck=null;this.gotAck=true;}this.sentAck=true;return {v:1,kind:'hello-ack',peer:this.localPeerId,connectionId:this.connectionId,attemptId:this.attemptId,nonce:this.nonce,echoNonce:m.nonce,proof:await proof(this.secret,this.fields(true,this.localPeerId,this.peerId,this.nonce,m.nonce))};}
+ get complete(){return !!this.remoteNonce&&this.sentAck&&this.gotAck;}
+ clear(){this.secret='';}
+}
+class Receiver{
+ constructor(){this.items=new Map();this.reserved=0;}
+ start(key,m,now=performance.now()){if(this.items.has(key)||this.items.size>=8||!Number.isInteger(m.size)||m.size<0||m.size>LIMIT.file||this.reserved+m.size>LIMIT.reserved||typeof m.id!=='string'||!m.id.length||enc.encode(m.id).length>100||typeof m.name!=='string'||m.name.length>255||typeof m.mime!=='string'||m.mime.length>128||!/^[a-f0-9]{64}$/.test(m.sha256)||m.benchmark!==false)throw Error('TRANSFER_LIMIT');this.items.set(key,{...m,parts:[],bytes:0,nextSequence:0,started:now,updated:now});this.reserved+=m.size;}
+ chunk(key,c,now=performance.now()){const t=this.items.get(key);if(!t||c.sequence!==t.nextSequence||t.bytes+c.payload.length>t.size)throw Error('INVALID_SEQUENCE');t.parts.push(c.payload.slice());t.bytes+=c.payload.length;t.nextSequence++;t.updated=now;return t;}
+ take(key){const t=this.items.get(key);if(t){this.items.delete(key);this.reserved-=t.size;}return t;}
+ expire(now=performance.now()){for(const [k,t]of this.items)if(now-t.updated>30000)this.take(k);}
+}
+class Dedup{constructor(){this.entries=new Map();}has(key,now=Date.now()){for(const [k,t]of this.entries)if(now-t>600000)this.entries.delete(k);if(this.entries.has(key))return true;this.entries.set(key,now);while(this.entries.size>10000)this.entries.delete(this.entries.keys().next().value);return false;}}
+function b64encode(bytes){let s='';for(const b of bytes)s+=String.fromCharCode(b);return btoa(s);}
+function b64decode(s){if(typeof s!=='string'||s.length>90000)throw Error('INVALID_FRAME');return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
+class NativeAdapter{
+ constructor(bridge,onEvent){this.bridge=bridge;this.attempts=new Map();this.unsubscribe=bridge?.onEvent(e=>{const p=e.params||e,a=this.attempts.get(p.attemptId);if(!a||a.connectionId!==p.connectionId)return;const event=e.event||e.type;if(event==='data'){if(a.state!=='direct'||!a.canMessage)return;onEvent({event,...p,data:b64decode(p.dataB64)});}else{if(event==='state')a.state=p.state;onEvent({event,...p});}});}
+ async capabilities(){return this.bridge?this.bridge.invoke('capabilities',{}):{v:1,methods:[{mechanism:'native',status:'unsupported',canMessage:false,reason:'NATIVE_BRIDGE_UNAVAILABLE'}]};}
+ async start(p,canMessage){this.attempts.set(p.attemptId,{...p,canMessage,state:'gathering'});try{return await this.bridge.invoke('start',p);}catch(e){this.attempts.delete(p.attemptId);throw e;}}
+ signal(p){return this.bridge.invoke('signal',p);}
+ send({attemptId,lane,data}){const p=this.attempts.get(attemptId);if(p?.state!=='direct'||!p.canMessage)throw Error('NOT_DIRECT');if(data.length>65536)throw Error('FRAME_LIMIT');return this.bridge.invoke('send',{attemptId,lane,dataB64:b64encode(data)});}
+ stats(p){return this.bridge.invoke('stats',p);}
+ async close(p){this.attempts.delete(p.attemptId);return this.bridge?.invoke('close',p);}
+ destroy(){this.unsubscribe?.();}
+}
+const api={enc,dec,LIMIT,uuid,family,candidateInfo,permitted,filterSdp,encodeFrame,decodeFrame,sha,Handshake,Receiver,Dedup,NativeAdapter};root.P2PCore=api;if(typeof module!=='undefined')module.exports=api;
+})(globalThis);

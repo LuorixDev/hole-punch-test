@@ -1,0 +1,20 @@
+appId: dev.p2pobservatory.chat
+productName: P2P Observatory
+asar: true
+files:
+  - desktop/**/*
+  - dist-web/**/*
+  - package.json
+extraResources:
+  - from: platform/build/p2p-native
+    to: native
+    filter: ['**/*']
+directories:
+  output: releases
+linux:
+  target: [dir]
+  category: Network
+win:
+  target: [portable]
+  signAndEditExecutable: false
+publish: null
