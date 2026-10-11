@@ -299,9 +299,11 @@ class Attempt:
             if remote not in self.remote_candidates:
                 self.remote_candidates[remote] = dict(c)
                 auth = Auth(self.auth.room, self.auth.key.decode(), self.connection, self.id, self.auth.local, self.peer)
-                # One attempt/socket nonce, but separate received-hello/ACK state:
-                # proofs from distinct source tuples cannot be combined into direct.
-                auth.nonce = self.auth.nonce
+                # Independent unpredictable challenge for this exact observed source.
+                # Never reuse the attempt/TCP nonce: a captured complete hello+ACK
+                # exchange for another candidate must not answer this challenge.
+                # Only nonces (not locally observed tuple strings) enter the MAC,
+                # because each side may observe different addresses behind NAT.
                 self.candidate_auth[remote] = auth
             if self.remote is None:
                 self.remote, self.remote_candidate = remote, self.remote_candidates[remote]

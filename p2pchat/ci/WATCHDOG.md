@@ -16,4 +16,6 @@ Run locally from repository root:
 .venv/bin/python -m unittest discover -s p2pchat/ci -p 'test_*.py'
 ```
 
+Windows only: after watchdog unit tests and before the unchanged full Python suite, CI runs the reviewed `windows-analysis/diagnostic_runner.py` against `p2pchat/tests/backend/test_data_limits.py` from repository root. Its wrapper imports the repository explicitly and emits phase, function/line and async await-chain information without locals or credentials. The outer watchdog is90 seconds and pytest's thread dump60 seconds. Original stdout/stderr is captured to `releases/windows-peer-diagnostic.log` and included by the existing always-upload `*.log` artifact rule. A nonzero diagnostic/timeout fails the job via `set -euo pipefail`; only successful diagnostics proceed to the complete suite. This does not skip or replace those tests in the complete suite, and Linux/Android commands are unchanged. No proposed cleanup patch is applied. Native Windows confirmation remains pending the next run; local Linux entry validation cannot establish the Windows root cause.
+
 This change is diagnostic only. It does not establish the cause of run38121429541's Windows hang or imply Windows product tests now pass. Owner repairs require observed nodeid/stack evidence and a new source freeze.

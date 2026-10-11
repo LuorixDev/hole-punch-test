@@ -193,7 +193,7 @@ async def test_proof_fragments_from_different_candidates_cannot_combine():
             await a.signal(dict(connectionId=cid, attemptId=aid, **{'from': 'b'},
                 nativeCandidate={**attempt.candidate, 'port': transport.get_extra_info('sockname')[1]}))
         auth = Auth('test', 'test-secret-128-bit', cid, aid, 'b', 'a')
-        auth.receive(attempt.auth.frame())
+        auth.receive(attempt.candidate_auth[senders[0].get_extra_info('sockname')].frame())
         await asyncio.sleep(.02)
         senders[0].sendto(b'P2POBS1'+packed(auth.frame()), attempt.sock.getsockname())
         senders[1].sendto(b'P2POBS1'+packed(auth.frame(ack=True)), attempt.sock.getsockname())

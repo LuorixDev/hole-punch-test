@@ -65,6 +65,9 @@ jobs:
           set -euo pipefail
           mkdir -p p2pchat/releases
           python -u -m unittest discover -s p2pchat/ci -p 'test_*.py' 2>&1 | tee p2pchat/releases/watchdog-tests.log
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python -u p2pchat/ci/watchdog.py --timeout 90 -- python -u p2pchat/ci/windows-analysis/diagnostic_runner.py p2pchat/tests/backend/test_data_limits.py -vv -s --tb=short -o faulthandler_timeout=60 2>&1 | tee p2pchat/releases/windows-peer-diagnostic.log
+          fi
           python -u p2pchat/ci/watchdog.py --timeout 600 -- python -u -m pytest p2pchat/tests -vv -s -o faulthandler_timeout=120 --durations=20 2>&1 | tee p2pchat/releases/python-tests.log
       - name: Build desktop native sidecar and client
         if: matrix.target != 'android'

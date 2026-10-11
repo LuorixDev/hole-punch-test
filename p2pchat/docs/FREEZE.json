@@ -1,19 +1,19 @@
 {
-  "round": 2,
-  "sourceTreeSha256": "bfac700a7058d517e2d3c355a807529bf38a29184b1304224312d502162b1363",
-  "sourceFileCount": 127,
-  "sourceManifestSha256": "746822416d47fb123583286823d7272dbc9d091ba23866aa95c261737b0273e9",
-  "packageTreeSha256": "05f7341090e86ae4fff0f4456410d7ab3331791b5f28c583c4f4d6bccba8b67c",
+  "round": 3,
+  "sourceTreeSha256": "8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388",
+  "sourceFileCount": 129,
+  "sourceManifestSha256": "1173efbab49cfb3156d1d5df3bbaa2e5c003ec0a5759082186671251f13ac52e",
+  "packageTreeSha256": "b0c9f7aae146f8ee852a30f2fcf7ebe25e4f16e55748dd9fd046a63ac49e9227",
   "packageFileCount": 109,
   "artifactSha256": {
     "releases/linux-unpacked/p2p-observatory-chat": "10a14d05c6ff4f94075cfb3eeb6ed6571be33ebcc08cbd675b5ce9ff84706564",
     "releases/linux-unpacked/resources/app.asar": "352275b49b9097ac027a0b4fb251beed77cf67b093909bead3dfd23216dde59b",
-    "releases/linux-unpacked/resources/native/p2p-native": "06f2e210f39ecd056514c69f2bb766fd5731e2f14c1886493e327323485c3559",
+    "releases/linux-unpacked/resources/native/p2p-native": "c27f1cf3bee14f48549c8cfc24953f1c582663d886f708a3b310e8296bb9e3f6",
     "package-lock.json": "6beed4f9163d5bcc775c1dd8429caf6b405b71909a8643ba23720a20f64dbef0",
     "requirements-lock.txt": "e8a8f0a6b1dbf627b99353c4e42aeb2add5859bfa0594d0c0959e295bf75c9bd"
   },
   "tests": {
-    "python": "52 passed, 8 AppKey warnings, 77.74s",
+    "python": "58 passed, 8 AppKey warnings, 80.37s",
     "nodeClientPlatform": "34 passed",
     "nodeRealNativeIntegration": "4 passed",
     "syncWeb": "passed",
