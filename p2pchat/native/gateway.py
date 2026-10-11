@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.sax.saxutils import escape
 import aiohttp
+from .stun import canonical_endpoint
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ class Gateway:
         sock = socket.socket(family, socket.SOCK_DGRAM)
         sock.setblocking(False)
         sock.bind((self.policy.local_address, 0))
-        remote = (self.policy.gateway, self.policy.port)
+        remote = canonical_endpoint((self.policy.gateway, self.policy.port), family)
         loop = asyncio.get_running_loop()
         try:
             for multiplier in [1, 2, 4]:
@@ -105,8 +106,11 @@ class Gateway:
                         reply, addr = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), deadline - time.monotonic())
                     except asyncio.TimeoutError:
                         break
-                    if addr[:2] == remote:
-                        return reply
+                    try:
+                        if canonical_endpoint(addr, family) == remote:
+                            return reply
+                    except ValueError:
+                        continue
             raise TimeoutError("GATEWAY_TIMEOUT")
         finally:
             sock.close()

@@ -1,8 +1,10 @@
 # 最终能力矩阵与限制
 
-**当前状态：高分辨率计时修复已审，Windows待当前commit CI确认。** 61b400e的Linux/Android成功，Windows收到4000B但elapsedMs=0导致断言失败；关闭正常完成、约4.937秒exit1，不是旧挂起。t27改perf_counter_ns测量及JS未知计时提示，t28独立25 Python+17 Node通过；本轮按新前端字节重建Linux，详见 [TIMING-INTEGRATION](TIMING-INTEGRATION.md)。下面关闭修复描述为此前t24边界，仍保留但不能覆盖本轮计时变更。 最新完整源码和Linux包哈希见 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)、[FREEZE](FREEZE.json)，已合并t22+t25关闭修复及交付文档。该补丁仅精确win32/Python3.12.10/aiortc1.15.0/aioice0.10.2的本Peer Proactor UDP；Linux模拟/全套72项与 [T26](../review/windows/T26.md) 独立33项通过，不表示Windows IOCP已通过。
+**t34最新：STUN窗口、native IPv6规范化与网关平台分支修复待新commit Windows CI。** 78a2050原双echo/计时2pass，完整70pass6fail1skip；不是旧关闭挂起/elapsed0。六失败与t30/t31及t32/t33审查对应见 [公开脱敏索引](EVIDENCE-INDEX.md)。本轮native字节已变，不能沿用下文历史“native未变”作为当前断言。最新hash见FREEZE。
 
-下表L1/L2证据来自历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`的 [VERIFICATION-R2](../verification/VERIFICATION-R2.md) 与 [ROUND3](../review/ROUND3.md)；77个旧安全域文件及native字节未变，但Python Peer关闭逻辑已变，不能把旧全套报告直接套新整树。[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已Linux/Android成功、Windows90秒exit124未打包。当前新版需同commit重跑原双echo诊断+全套测试+打包，详见 [WINDOWS-INTEGRATION](WINDOWS-INTEGRATION.md)。
+**当前状态：高分辨率计时修复已审，Windows待当前commit CI确认。** 61b400e的Linux/Android成功，Windows收到4000B但elapsedMs=0导致断言失败；关闭正常完成、约4.937秒exit1，不是旧挂起。t27改perf_counter_ns测量及JS未知计时提示，t28独立25 Python+17 Node通过；本轮按新前端字节重建Linux，详见 [TIMING-INTEGRATION](TIMING-INTEGRATION.md)。下面关闭修复描述为此前t24边界，仍保留但不能覆盖本轮计时变更。 最新完整源码和Linux包哈希见 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)、[FREEZE](FREEZE.json)，已合并t22+t25关闭修复及交付文档。该补丁仅精确win32/Python3.12.10/aiortc1.15.0/aioice0.10.2的本Peer Proactor UDP；Linux模拟/全套72项与 T26（本地私有证据，不随GitHub交付） 独立33项通过，不表示Windows IOCP已通过。
+
+下表L1/L2证据来自历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`的 VERIFICATION-R2（本地私有证据，不随GitHub交付） 与 ROUND3（本地私有证据，不随GitHub交付）；77个旧安全域文件及native字节未变，但Python Peer关闭逻辑已变，不能把旧全套报告直接套新整树。[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已Linux/Android成功、Windows90秒exit124未打包。当前新版需同commit重跑原双echo诊断+全套测试+打包，详见 [WINDOWS-INTEGRATION](WINDOWS-INTEGRATION.md)。
 
 ## 1. 平台分层状态
 

@@ -162,10 +162,14 @@ def stun_binding(data,addr):
     return struct.pack('!HHI',0x0101,len(attr),magic)+tx+attr
 
 class Stun(asyncio.DatagramProtocol):
-    def __init__(self,store):self.store=store;self.buckets={};self.window=time.monotonic();self.total=0
+    def __init__(self,store,*,clock=None):
+        # Injection is for deterministic rate-window tests; production always
+        # uses monotonic arrival-callback time, not sender/OS scheduling time.
+        self.clock=clock if clock is not None else time.monotonic
+        self.store=store;self.buckets={};self.window=self.clock();self.total=0
     def connection_made(self,transport):self.transport=transport
     def datagram_received(self,data,addr):
-        now=time.monotonic()
+        now=self.clock()
         if now-self.window>=1:self.window=now;self.total=0;self.buckets={}
         self.total+=1
         if self.total>1000:return

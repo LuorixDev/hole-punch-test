@@ -1,12 +1,16 @@
 # Client platform evidence and build instructions
 
-## Current integration status (t29, 2026-10-11)
+## Current integration status (t34, 2026-10-11)
+
+Windows post-repair CI remains PENDING. Historical78a2050 passed the original two-echo/timing diagnostic (2passed), then full Python returned70passed/6failed/1skipped: two STUN window assumptions, three native IPv6 cases, one gateway platform expectation. Linux/Android jobs succeeded. Current t30/t31 repairs were independently reviewed by t32/t33 on Linux, not Windows. No IPv6-positive gate is skipped. Public summaries and private-evidence boundaries: [EVIDENCE-INDEX](docs/EVIDENCE-INDEX.md).
+
+## Previous timing integration (t29 history)
 
 **Timing repair awaits current-commit CI; Windows is not complete.** The actual61b400e run built Linux/Android; Windows received4000B but failed elapsedMs>0 because elapsedMs was0. Close completed normally, watchdog exited1 in approximately4.937s, not old exit124/hang. Reviewed t27/t28 uses same-source perf_counter_ns integer differences and explicit unknown timing; JS no longer invents a1ms floor. Linux full77 and independent25Python/17Node passed, not Windows-native proof. Frontend changed, so t29 re-syncs and rebuilds Linux rather than reusing old app.asar. Current hashes are [FREEZE](docs/FREEZE.json); commit/run await captain. See [timing integration](docs/TIMING-INTEGRATION.md).
 
 ## Previous close-fix integration (t24 history)
 
-**Windows修复待当前commit CI确认 / Windows close fix awaits CI on the new commit.** Current complete source and rebuilt Linux artifact hashes are in [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) and [FREEZE](docs/FREEZE.json). This integrates t22+t25 reviewed by [T26](review/windows/T26.md), plus the delivery documentation; it is not the old 8687adf snapshot. Linux implementation tests (72) and independent close-focused review tests (33) passed. The narrow workaround only applies to win32/CPython3.12.10/aiortc1.15.0/aioice0.10.2 and owned Proactor UDP transports; Linux simulated coverage is **not** Windows IOCP validation.
+**Windows修复待当前commit CI确认 / Windows close fix awaits CI on the new commit.** Current complete source and rebuilt Linux artifact hashes are in [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) and [FREEZE](docs/FREEZE.json). This integrates t22+t25 reviewed by T26（本地私有证据，不随GitHub交付）, plus the delivery documentation; it is not the old 8687adf snapshot. Linux implementation tests (72) and independent close-focused review tests (33) passed. The narrow workaround only applies to win32/CPython3.12.10/aiortc1.15.0/aioice0.10.2 and owned Proactor UDP transports; Linux simulated coverage is **not** Windows IOCP validation.
 
 Historical a1c6e7e/run38124339483 built Linux/Android, but Windows diagnostic timed out at90s (exit124), before packaging; the await chain reached aioice StunProtocol.close. New Windows gates must run the original two-echo diagnostic, all tests, and native packaging without skipping failure. Current commit/run are pending captain push. Android/Windows interactive device, microphone, home NAT and real gateways remain NOT_RUN. See [integration delta](docs/WINDOWS-INTEGRATION.md).
 

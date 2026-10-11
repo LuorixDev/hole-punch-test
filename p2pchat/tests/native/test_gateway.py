@@ -86,14 +86,30 @@ async def test_gateway_rejection_and_missing_external_validation(kind, cls):
 async def test_optin_route_validation_and_timeout():
     with pytest.raises(PermissionError, match="OPT_IN"):
         await PCP(GatewayPolicy("127.0.0.1", "127.0.0.1")).map(12345)
-    with pytest.raises(PermissionError, match="NOT_LOCAL_ROUTED_GATEWAY"):
-        GatewayPolicy("198.51.100.77", "127.0.0.1", enabled=True).validate()
     with pytest.raises(ValueError, match="CONTROL_URL"):
         UPnP(GatewayPolicy("127.0.0.1", "127.0.0.1"), "http://192.0.2.1/control", "urn:schemas-upnp-org:service:WANIPConnection:1")
     transport, _, policy = await mock("pcp")
     transport.close()
     with pytest.raises(TimeoutError, match="GATEWAY_TIMEOUT"):
         await PCP(policy).map(12345)
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32", "darwin"])
+def test_gateway_platform_validation_fail_closed(monkeypatch, platform):
+    import p2pchat.native.gateway as module
+    monkeypatch.setattr(module.sys, "platform", platform)
+    # No host route probing needed: deterministic empty Linux routing fixture.
+    monkeypatch.setattr(module.Path, "read_text", lambda self: "Iface Destination Gateway Flags\n")
+    with pytest.raises(PermissionError, match="GATEWAY_OPT_IN_REQUIRED"):
+        GatewayPolicy("198.51.100.77", "127.0.0.1").validate()
+    if platform == "linux":
+        with pytest.raises(PermissionError, match="NOT_LOCAL_ROUTED_GATEWAY"):
+            GatewayPolicy("198.51.100.77", "127.0.0.1", enabled=True).validate()
+    else:
+        with pytest.raises(NotImplementedError, match="LOCAL_GATEWAY_VALIDATION_UNAVAILABLE"):
+            GatewayPolicy("198.51.100.77", "127.0.0.1", enabled=True).validate()
+    # Authorized mock protocol testing remains allowed; not real route discovery.
+    GatewayPolicy("::1", "::1", enabled=True, mock_loopback=True).validate()
 
 
 @pytest.mark.asyncio

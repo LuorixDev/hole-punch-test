@@ -14,7 +14,7 @@ Python性能测量用perf_counter_ns同源整数先相减再换算ms；timeouts/
 
 JS消费者区分完整性和计时可用性：远端未知时间提示不可计算，本地有效采样才计算速率；删除Math.max(1,elapsed)人为下限，零/负/非有限不产生NaN/Infinity。因为前端字节改变，本轮重新sync和Linux完整构建，不复用旧app.asar；native源码未变仍核对随包来源hash。
 
-独立 [T28](../review/timing/T28.md) pass：25 Python+17 Node（含真实QUIC）通过、7目标hash匹配；实现者t27全套77 Python通过、Node transfer14通过。这些均是Linux/Node证据，不是Windows计数器频率或IOCP实测。t29核对审查字节并重建，不重复无关全套或旧浏览器实验。
+独立 T28（本地私有证据，不随GitHub交付） pass：25 Python+17 Node（含真实QUIC）通过、7目标hash匹配；实现者t27全套77 Python通过、Node transfer14通过。这些均是Linux/Node证据，不是Windows计数器频率或IOCP实测。t29核对审查字节并重建，不重复无关全套或旧浏览器实验。
 
 ## 交付与验证门
 

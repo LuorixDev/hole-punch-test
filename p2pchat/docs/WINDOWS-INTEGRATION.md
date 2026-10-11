@@ -17,7 +17,7 @@
 
 ## 审查与回归来源
 
-[独立T26](../review/windows/T26.md) pass：33项backend/core/独立关闭测试通过；原未经修改的真实UDP取消probe现在明确失败，W1解决。实现者t25：backend27通过、全套72通过、90秒诊断双echo2项通过exit0；这些全部是Linux证据。T24只核对审查目标字节与构建，不无故重跑旧浏览器/公网实验。
+独立T26（本地私有证据，不随GitHub交付） pass：33项backend/core/独立关闭测试通过；原未经修改的真实UDP取消probe现在明确失败，W1解决。实现者t25：backend27通过、全套72通过、90秒诊断双echo2项通过exit0；这些全部是Linux证据。T24只核对审查目标字节与构建，不无故重跑旧浏览器/公网实验。
 
 T26目标SHA256：
 

@@ -1,37 +1,38 @@
 {
-  "revision": "t29-high-resolution-timing-reviewed",
-  "previousSourceTreeSha256": "cfe56456bea2bff6dede08753ca348e6b3450d48b637406f216d4cf644ea52b4",
-  "sourceTreeSha256": "44389408db396a4cc22ab4a3646700f060901ae6c5df323ad21c0b210c998eb3",
-  "sourceFileCount": 137,
-  "sourceManifestSha256": "d5dd0cf274e8b59c9660e3b68adb259a4bbe02194a6399e59c2486677d197507",
-  "packageTreeSha256": "a1975555668b12a544f9a84f933e01762ce2670de0d7aa3ada2233b1cd767928",
+  "revision": "t34-windows-stun-ipv6-platform-reviewed",
+  "previousSourceTreeSha256": "44389408db396a4cc22ab4a3646700f060901ae6c5df323ad21c0b210c998eb3",
+  "sourceTreeSha256": "430471c693a875b09f57154222d31a1ad8d57e2b46ce1516e889d3b3b9807c58",
+  "sourceFileCount": 140,
+  "sourceManifestSha256": "fec6d557e2df485f65fdc6e1fe9c0deb8248a794cbe164b1fa176d25928ca294",
+  "packageTreeSha256": "02e17b5685b92724975cdd7330cd5c31f52aeb1411774fca16c1c79adc821294",
   "packageFileCount": 109,
   "artifactSha256": {
     "releases/linux-unpacked/p2p-observatory-chat": "10a14d05c6ff4f94075cfb3eeb6ed6571be33ebcc08cbd675b5ce9ff84706564",
     "releases/linux-unpacked/resources/app.asar": "021c5e233616f545094b78e81bf1fa4caf0c211dc1dfcce0ebc97980758b4ec7",
-    "releases/linux-unpacked/resources/native/p2p-native": "c27f1cf3bee14f48549c8cfc24953f1c582663d886f708a3b310e8296bb9e3f6",
+    "releases/linux-unpacked/resources/native/p2p-native": "922d0587fdf992c94874e1b753b81c29678940a1c03ea3bbc7aa0eb85caaa95b",
     "package-lock.json": "6beed4f9163d5bcc775c1dd8429caf6b405b71909a8643ba23720a20f64dbef0",
     "requirements-lock.txt": "e8a8f0a6b1dbf627b99353c4e42aeb2add5859bfa0594d0c0959e295bf75c9bd"
   },
   "tests": {
-    "t27ImplementationLinuxPython": "77 passed (dependency evidence)",
-    "t28IndependentReview": "25 Python and 17 Node passed (dependency evidence)",
-    "t29ReviewedTargetHashes": "7 files matched",
-    "syncWeb": "passed; transfer.js matches source",
-    "linuxBuild": "passed; frontend rebuilt not reused",
+    "python": "97 passed, 8 AppKey warnings, 81.21s, no skip",
+    "nodeClientPlatformNativeIntegration": "48 passed, no skip",
+    "reviewTargetHashes": "8 T32/T33 targets matched",
+    "publishedDocumentationLinks": "all README/PLATFORMS/docs local targets are in explicit upload allowlist; private reports rendered as text",
+    "syncWeb": "passed",
+    "linuxBuild": "passed; changed native rebuilt",
     "linuxSandboxSmoke": "passed",
     "nativeManifestMatches": "passed"
   },
   "historicalCI": {
-    "commit": "61b400e98ff955120e42caafe05284fcb940b11f",
-    "run": "38129731771",
+    "commit": "78a20506972d24605bdb9557378c3ce47c92a818",
+    "run": "38132637106",
     "linux": "success",
     "android": "success",
-    "windows": "4000B ACK received but elapsedMs 0; failure exit1; close completed; not timeout124; no EXE"
+    "windows": "original two-echo/timing 2 passed; full suite 70 passed 6 failed 1 skipped; 2 STUN window, 3 native IPv6, 1 gateway platform failures; no EXE"
   },
-  "currentCI": "PENDING captain push; Windows timing fix not yet confirmed",
+  "currentCI": "PENDING captain push; Windows post-repair not yet confirmed",
   "notRun": [
-    "current Windows timing runner verification",
+    "post-repair Windows runner",
     "Android/Windows interactive device and microphone",
     "real residential NAT",
     "real gateway devices"

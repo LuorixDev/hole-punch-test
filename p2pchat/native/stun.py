@@ -14,6 +14,34 @@ import time
 COOKIE = 0x2112A442
 
 
+def canonical_endpoint(endpoint, family=None):
+    """Canonical numeric socket tuple without weakening the signaling boundary.
+
+    IPv6 flowinfo is not endpoint identity. The current candidate schema does
+    NOT negotiate interface scopes: reject nonzero scopes rather than silently
+    drop them. Windows can include a harmless %0 textual zone and/or a 4-tuple.
+    Never equate IPv4 with IPv4-mapped IPv6 (different socket families).
+    """
+    if not isinstance(endpoint, (tuple, list)) or len(endpoint) not in {2, 4}:
+        raise ValueError("INVALID_ENDPOINT")
+    host, port = endpoint[:2]
+    if not isinstance(host, str) or not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError("INVALID_ENDPOINT")
+    address = ipaddress.ip_address(host)
+    if family is not None and address.version != (4 if family == socket.AF_INET else 6 if family == socket.AF_INET6 else 0):
+        raise ValueError("ENDPOINT_FAMILY_MISMATCH")
+    if address.version == 6:
+        zone = address.scope_id
+        if zone not in {None, "0"} or (len(endpoint) == 4 and endpoint[3] != 0):
+            raise ValueError("ENDPOINT_SCOPE_UNNEGOTIATED")
+        address = ipaddress.IPv6Address(address.packed)
+    elif len(endpoint) != 2:
+        raise ValueError("INVALID_ENDPOINT")
+    if address.is_multicast or address.is_unspecified or address.is_link_local or str(address) == "255.255.255.255":
+        raise ValueError("INVALID_ENDPOINT")
+    return str(address), port
+
+
 def parse_binding(data, transaction):
     if len(data) < 20:
         raise ValueError("STUN_TRUNCATED")
@@ -43,9 +71,7 @@ def parse_binding(data, transaction):
 
 async def binding(sock, server, timeout=2):
     """An explicit STUN server only; no scan/discovery. Does not close caller socket."""
-    address = ipaddress.ip_address(server[0])
-    if address.is_multicast or address.is_unspecified or not 1 <= server[1] <= 65535:
-        raise ValueError("INVALID_STUN_SERVER")
+    server = canonical_endpoint(server, sock.family)
     tid = secrets.token_bytes(12)
     request = struct.pack("!HHI12s", 1, 0, COOKIE, tid)
     loop, start = asyncio.get_running_loop(), time.monotonic()
@@ -60,7 +86,10 @@ async def binding(sock, server, timeout=2):
                 packet, remote = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), deadline-time.monotonic())
             except asyncio.TimeoutError:
                 break
-            if remote[:2] != tuple(server):
+            try:
+                if canonical_endpoint(remote, sock.family) != server:
+                    continue
+            except ValueError:
                 continue
             try:
                 mapped = parse_binding(packet, tid)

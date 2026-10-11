@@ -2,9 +2,11 @@
 
 **当前交付：已独立验证的 Linux 本地实验源码与本地构建；不是全平台/任意网络可用产品。** 小房间最多12人、逐对端mesh，支持文本、图片、文件和录制完成后的语音文件；不做实时通话或语音识别。TURN永久禁用，信令/日志不代转聊天；无可用直连就明确失败。
 
-**当前状态：高分辨率计时修复已审，Windows待当前commit CI确认。** 最新源码/包哈希以 [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) 和 [FREEZE](docs/FREEZE.json) 为准；本轮整合t27+t28性能计时/未知提示修复并重新sync和Linux构建，不改已审产品。最近61b400e的Linux/Android成功，Windows4000B已收到但elapsedMs=0断言失败；关闭正常完成，约4.937秒exit1，**不是旧关闭挂起/超时124**。新commit/run待captain推送，详见 [计时修复集成](docs/TIMING-INTEGRATION.md)。
+**当前状态：STUN窗口与native IPv6/网关平台修复已审，Windows待新commit CI确认。** 最新78a2050原双echo/计时2 passed，但完整suite70 passed/6 failed/1 skipped；六失败对应t30双栈STUN窗口假设及t31三项native IPv6/一项网关差异，不再是旧挂起或零计时。公开结论见 [脱敏证据索引](docs/EVIDENCE-INDEX.md)。以下61b400e仅历史。
 
-历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`（129文件）的 [VERIFICATION-R2](verification/VERIFICATION-R2.md)（t15）/[ROUND3](review/ROUND3.md)（t19）仅对应旧版；[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已终态：Linux/Android成功，Windows90秒诊断exit124未打包。挂起链已定位至Peer.close→RTCPeerConnection.close→ICE.stop→aioice StunProtocol.close；新版本必须重跑原双echo诊断、完整测试与打包门，不能继承旧成功包。差异与边界见 [Windows修复集成](docs/WINDOWS-INTEGRATION.md)。
+**此前计时修复历史：** 最新源码/包哈希以 [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) 和 [FREEZE](docs/FREEZE.json) 为准；本轮整合t27+t28性能计时/未知提示修复并重新sync和Linux构建，不改已审产品。最近61b400e的Linux/Android成功，Windows4000B已收到但elapsedMs=0断言失败；关闭正常完成，约4.937秒exit1，**不是旧关闭挂起/超时124**。新commit/run待captain推送，详见 [计时修复集成](docs/TIMING-INTEGRATION.md)。
+
+历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`（129文件）的 VERIFICATION-R2（本地私有证据，不随GitHub交付）（t15）/ROUND3（本地私有证据，不随GitHub交付）（t19）仅对应旧版；[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已终态：Linux/Android成功，Windows90秒诊断exit124未打包。挂起链已定位至Peer.close→RTCPeerConnection.close→ICE.stop→aioice StunProtocol.close；新版本必须重跑原双echo诊断、完整测试与打包门，不能继承旧成功包。差异与边界见 [Windows修复集成](docs/WINDOWS-INTEGRATION.md)。
 
 快速导航：[平台/机制矩阵](docs/CAPABILITIES.md) · [交付状态与产物哈希](docs/DELIVERY.md) · [协议](docs/PROTOCOL.md) · [验收定义](docs/ACCEPTANCE.md)。
 

@@ -6,6 +6,8 @@
 
 ## 版本与CI状态
 
+**t34当前：两项已审平台修复已整合，等待captain推送新commit完整Windows门。** 78a20506972d24605bdb9557378c3ce47c92a818/run38132637106：Linux/Android成功；Windows原双echo/计时2 passed（watchdog6.141s exit0），完整70 passed/6 failed/1 skipped（154.33s），无成功EXE。六项为双栈STUN限流窗口假设、IPv6 UDP/QUIC/TCP端点比较、网关Linux-only验证预期；公开证据/私有报告索引见 [EVIDENCE-INDEX](EVIDENCE-INDEX.md)。以下t29与更早段落为历史，不是当前CI状态。
+
 **当前：高分辨率计时修复待当前commit CI确认，Windows尚未完成。** t29整合t27+t28已审性能测量与JS未知时间显示修复，重新sync/Linux构建及完整 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)/[FREEZE](FREEZE.json)。最新源码/产物SHA以这两个文件为唯一当前清单，当前commit/run尚待captain推送，不继承旧包。最近61b400e Linux/Android成功，Windows4000B收到但elapsedMs=0导致原正耗时断言失败，关闭正常、约4.937秒exit1；**与此前90/600秒关闭挂起不同**。详见 [TIMING-INTEGRATION](TIMING-INTEGRATION.md)。
 
 变化包含新增 [rtc_shutdown.py](../backend/rtc_shutdown.py)、Peer幂等有界关闭、required closer取消失败传播及相关测试；范围与Linux证据见 [WINDOWS-INTEGRATION](WINDOWS-INTEGRATION.md)。新Windows runner必须完成原双echo90秒诊断、完整测试和portable打包门。下面的8687adf数值与哈希表只保留作**历史t15已验证快照**，不是当前版本标识。
@@ -56,7 +58,7 @@ Linux packageTreeSha256 = b0c9f7aae146f8ee852a30f2fcf7ebe25e4f16e55748dd9fd046a6
 
 ## 独立验证与审查依据
 
-本地报告 [VERIFICATION-R2](../verification/VERIFICATION-R2.md)（t15）在验证前后逐文件核对129源码、两个冻结文件与5 artifact/lock，前后相同；[ROUND3](../review/ROUND3.md)（t19）独立审查pass。上传这些报告须另做脱敏/链接裁剪，不上传其引用的run树；本文件摘要可直接用于交付。
+本地报告 VERIFICATION-R2（本地私有证据，不随GitHub交付）（t15）在验证前后逐文件核对129源码、两个冻结文件与5 artifact/lock，前后相同；ROUND3（本地私有证据，不随GitHub交付）（t19）独立审查pass。上传这些报告须另做脱敏/链接裁剪，不上传其引用的run树；本文件摘要可直接用于交付。
 
 - **58 Python、34客户端/平台Node、4真实native应用集成**通过；另独立23资源边界、移动track与旧ACK检查。
 - 四独立进程server/echo/A/B，文字/合法PNG/WAV/随机文件SHA与回声；杀server后63.316秒继续数据传输，恢复后pending归零。

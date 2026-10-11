@@ -29,6 +29,7 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import HandshakeCompleted, StreamDataReceived, ConnectionTerminated
 from aioquic.quic.packet import pull_quic_header
 from .auth import Auth, packed
+from .stun import canonical_endpoint
 
 MAX_FRAME = 65536
 MAX_WIRE = 100000
@@ -60,7 +61,7 @@ def validate_candidate(c):
             or c["kind"] not in {"host", "srflx", "mapped"}
             or c["transport"] not in {"udp", "quic", "tcp"}):
         raise ValueError("INVALID_CANDIDATE")
-    return str(address), c["port"]
+    return canonical_endpoint((c["address"], c["port"]))
 
 
 @dataclass
@@ -169,6 +170,7 @@ class Attempt:
         auth = p["auth"]
         self.auth = Auth(auth["room"], auth["secret"], self.connection, self.id, auth["localPeerId"], self.peer)
         self.state, self.failure = "gathering", None
+        self.socket_error = None
         self.sock = self.writer = self.server = self.quic = None
         self.tasks = set()
         self.remote = self.remote_candidate = self.remote_pem = self.remote_cert = None
@@ -210,6 +212,11 @@ class Attempt:
         task.add_done_callback(self.tasks.discard)
         return task
 
+    def record_socket_error(self, exc):
+        # Bounded numeric diagnostics only: no exception text, endpoints or payload.
+        if isinstance(exc, OSError):
+            self.socket_error = {"errno": exc.errno, "winerror": getattr(exc, "winerror", None)}
+
     def stats(self):
         return {"state": self.state, "mechanism": self.mechanism, "profile": self.profile,
                 "family": self.candidate["family"] if self.candidate else None,
@@ -219,7 +226,7 @@ class Attempt:
                 "localTuple": [self.candidate["address"], self.candidate["port"]] if self.candidate else None,
                 "remoteTuple": list(self.remote) if self.remote else None,
                 "rttMs": self.rtt, "txBytes": self.tx, "rxBytes": self.rx,
-                "goodput": None, "failureCode": self.failure,
+                "goodput": None, "failureCode": self.failure, "socketError": self.socket_error,
                 "observability": {"scope": "native-local-socket", "goodput": "MEASURE_WITH_EXPLICIT_BENCHMARK_ACK"}}
 
     async def start(self):
@@ -262,7 +269,8 @@ class Attempt:
                 except (OSError, TimeoutError):
                     self.event("diagnostic", code="STUN_MAPPING_UNAVAILABLE")
             self.spawn(self.run())
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            self.record_socket_error(exc)
             await self.fail("BIND_UNAVAILABLE")
 
     async def signal(self, p):
@@ -354,7 +362,8 @@ class Attempt:
                         if now >= due:
                             try:
                                 await self.raw_udp(b"P2POBS1" + packed(self.candidate_auth[target].frame()), target)
-                            except OSError:
+                            except OSError as exc:
+                                self.record_socket_error(exc)
                                 # An unroutable host candidate cannot kill later srflx.
                                 if target not in self.probe_schedule:
                                     self.event("diagnostic", code="CANDIDATE_SEND_UNAVAILABLE")
@@ -371,7 +380,8 @@ class Attempt:
                 await asyncio.sleep(.01)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            self.record_socket_error(exc)
             await self.fail("UDP_IO_FAILED")
 
     async def raw_udp(self, data, target=None):
@@ -381,7 +391,10 @@ class Attempt:
         try:
             while self.state not in TERMINAL:
                 data, addr = await asyncio.get_running_loop().sock_recvfrom(self.sock, MAX_WIRE)
-                source = addr[:2]
+                try:
+                    source = canonical_endpoint(addr, self.sock.family)
+                except ValueError:
+                    continue
                 if source not in self.remote_candidates or (self.selected and source != self.remote):
                     continue
                 if data.startswith(b"P2POBS1"):
@@ -434,12 +447,13 @@ class Attempt:
                             continue
                         header = pull_quic_header(Buffer(data=data), host_cid_length=8)
                         self.init_quic(header.destination_cid)
-                    self.quic.receive_datagram(data, addr, now=time.monotonic())
+                    self.quic.receive_datagram(data, source, now=time.monotonic())
                     await self.quic_events()
                     await self.quic_flush()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            self.record_socket_error(exc)
             await self.fail("UDP_IO_FAILED")
 
     def init_quic(self, original=None):
@@ -455,8 +469,12 @@ class Attempt:
     async def quic_flush(self):
         for data, addr in self.quic.datagrams_to_send(now=time.monotonic()):
             # aioquic may suggest migration; this adapter only permits the authenticated tuple.
-            if addr[:2] == self.remote:
-                await asyncio.get_running_loop().sock_sendto(self.sock, data, addr)
+            try:
+                target = canonical_endpoint(addr, self.sock.family)
+            except ValueError:
+                continue
+            if target == self.remote:
+                await asyncio.get_running_loop().sock_sendto(self.sock, data, target)
 
     async def quic_events(self):
         while self.quic:
@@ -511,7 +529,12 @@ class Attempt:
                 self.sock.listen(4)
                 while True:
                     connected, addr = await loop.sock_accept(self.sock)
-                    if addr[:2] == self.remote:
+                    try:
+                        source = canonical_endpoint(addr, self.sock.family)
+                    except ValueError:
+                        connected.close()
+                        continue
+                    if source == self.remote:
                         self.sock.close()
                         self.sock = connected
                         break
@@ -544,7 +567,8 @@ class Attempt:
                 await self.handle_frame(frame, "chat")
         except asyncio.CancelledError:
             raise
-        except (OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError):
+        except (OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError, ssl.SSLError) as exc:
+            self.record_socket_error(exc)
             await self.fail("TCP_SIMOPEN_UNAVAILABLE" if self.mechanism == "tcp-simopen" else "TCP_TLS_OR_CONNECT_FAILED")
         except Exception:
             await self.fail("TCP_IO_FAILED")

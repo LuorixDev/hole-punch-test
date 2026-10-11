@@ -112,18 +112,34 @@ def test_signal_ssrf_candidate_invalid_end_and_spoofing():
 @pytest.mark.parametrize('address,family',[('127.0.0.1',socket.AF_INET),('::1',socket.AF_INET6)])
 async def test_real_udp_stun_and_abuse_rate(tmp_path,address,family):
     store=Store(tmp_path);loop=asyncio.get_running_loop()
-    transport,protocol=await loop.create_datagram_endpoint(lambda:Stun(store),local_addr=(address,0),family=family)
+    class ObservedStun(Stun):
+        def __init__(self):
+            super().__init__(store,clock=lambda:100.0)
+            self.processed=0;self.batch_done=asyncio.Event();self.trace=[]
+        def datagram_received(self,data,addr):
+            start=time.perf_counter_ns()
+            super().datagram_received(data,addr)
+            self.trace.append({'arrivalNs':start,'callbackNs':time.perf_counter_ns()-start})
+            self.processed+=1
+            if self.processed==26:self.batch_done.set()
+    transport,protocol=await loop.create_datagram_endpoint(ObservedStun,local_addr=(address,0),family=family)
     sock=socket.socket(family,socket.SOCK_DGRAM);sock.bind((address,0));sock.setblocking(False)
     try:
         remote=transport.get_extra_info('sockname');request=struct.pack('!HHI',1,0,0x2112A442)+b'123456789012'
         await loop.sock_sendto(sock,request,remote);response,_=await asyncio.wait_for(loop.sock_recvfrom(sock,1024),2)
         assert response==stun_binding(request,sock.getsockname())
         for _ in range(25):await loop.sock_sendto(sock,request,remote)
+        # Await all arrival callbacks, not a guessed OS send duration. Only the
+        # limiter clock is frozen; sockets, logging, loop and timeout are real.
+        await asyncio.wait_for(protocol.batch_done.wait(),10)
         n=0
-        while True:
-            try:await asyncio.wait_for(loop.sock_recvfrom(sock,1024),.05);n+=1
-            except TimeoutError:break
-        assert n<=19
+        while n<19:
+            reply,_=await asyncio.wait_for(loop.sock_recvfrom(sock,1024),2)
+            assert reply==stun_binding(request,sock.getsockname());n+=1
+        assert n==19 and protocol.buckets[address]==26 and protocol.total==26
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(loop.sock_recvfrom(sock,1024),.05)
+        (tmp_path/'stun-arrivals.json').write_text(json.dumps(protocol.trace))
         bad=struct.pack('!HHI',1,4,0x2112A442)+b'123456789012'+struct.pack('!HH',0x8022,100)
         assert stun_binding(bad,(address,1234)) is None
     finally:sock.close();transport.close();store.close()
