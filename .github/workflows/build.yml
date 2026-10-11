@@ -25,15 +25,16 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: '24.20.0'
           cache: npm
           cache-dependency-path: p2pchat/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.12.12'
+          # Resolve an available platform build; artifact manifest records actual patch.
+          python-version: '3.12'
           cache: pip
           cache-dependency-path: |
             p2pchat/requirements.txt
@@ -55,9 +56,14 @@ jobs:
           set -o pipefail
           mkdir -p releases
           node --test tests/platform/*.test.cjs tests/client/*.test.cjs 2>&1 | tee releases/js-tests.log
-          PYTHONPATH=.. python -m pytest tests -q 2>&1 | tee releases/python-tests.log
           npm audit --omit=dev --audit-level=moderate
           npm audit --audit-level=high
+      - name: Python gates (repository root, including cross-language fixtures)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p p2pchat/releases
+          python -m pytest p2pchat/tests -q 2>&1 | tee p2pchat/releases/python-tests.log
       - name: Build desktop native sidecar and client
         if: matrix.target != 'android'
         working-directory: p2pchat
@@ -65,7 +71,7 @@ jobs:
         run: |
           set -o pipefail
           npm run dist:${{ matrix.target }} 2>&1 | tee releases/build.log
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         if: matrix.target == 'android'
         with:
           distribution: temurin
@@ -93,7 +99,7 @@ jobs:
           python tools/artifact-manifest.py
       - name: Upload private build output and failure evidence (no release)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: p2p-observatory-${{ matrix.target }}-${{ github.sha }}
           path: |
