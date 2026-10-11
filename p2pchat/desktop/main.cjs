@@ -2,11 +2,12 @@
 const {app, BrowserWindow, session, dialog, ipcMain, Menu} = require('electron');
 const os = require('node:os');
 let bindAddress = '127.0.0.1';
+let stunConfig = null; // session-only, explicitly confirmed; never read from renderer
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const {pathToFileURL} = require('node:url');
 const {spawn} = require('node:child_process');
-const {Sidecar, validateRequest, isTrustedSender, unavailable} = require('./bridge.cjs');
+const {Sidecar, validateRequest, isTrustedSender, unavailable, validateStunConfig, sidecarArgs} = require('./bridge.cjs');
 const entry = path.join(__dirname, '../dist-web/index.html');
 const entryURL = pathToFileURL(entry).href;
 let win, sidecar, saving = false;
@@ -15,10 +16,34 @@ function startSidecar() {
   // Fixed, packaged executable only: never accept executable/argv/cwd from renderer.
   const root = app.isPackaged ? path.join(process.resourcesPath, 'native') : path.join(__dirname, '../platform/build/p2p-native');
   const executable = path.join(root, process.platform === 'win32' ? 'p2p-native.exe' : 'p2p-native');
-  const child = spawn(executable, ['--bind', bindAddress], {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false,
+  const child = spawn(executable, sidecarArgs(bindAddress, stunConfig), {stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false,
     cwd: app.getPath('userData'), env: {...process.env, PYTHONNOUSERSITE: '1'}});
   sidecar = new Sidecar(child);
   sidecar.on('event', event => { if (win && !win.isDestroyed() && win.webContents.getURL() === entryURL) win.webContents.send('p2p:event', event); });
+}
+async function configureStun() {
+  // Native file picker is main-owned: the renderer cannot nominate/read paths.
+  // A tiny explicit JSON document avoids DNS resolution, lists/ranges and scanning.
+  const selected = await dialog.showOpenDialog(win, {title: '选择 STUN 设置 JSON（仅 address、port）',
+    properties: ['openFile'], filters: [{name: 'STUN JSON', extensions: ['json']}]});
+  if (selected.canceled || selected.filePaths.length !== 1) return;
+  let handle;
+  try {
+    handle = await fs.open(selected.filePaths[0], 'r');
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > 1024) throw new Error('INVALID_STUN_CONFIG');
+    const buffer = Buffer.alloc(1025);
+    const {bytesRead} = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > 1024) throw new Error('INVALID_STUN_CONFIG');
+    const config = validateStunConfig(JSON.parse(buffer.subarray(0, bytesRead).toString('utf8')));
+    const result = await dialog.showMessageBox(win, {type: 'question', buttons: ['取消', '授权此 STUN 地址'], defaultId: 0, cancelId: 0,
+      message: `允许向 ${config.address}:${config.port} 发送有限 STUN Binding 请求？`,
+      detail: '仅本次应用会话有效。不会扫描网段、修改网关或中继聊天；STUN 服务可见公网端点。更改会断开旧原生路径，需重新发现。'});
+    if (result.response === 1) { stunConfig = config; sidecar?.stop(); startSidecar(); }
+  } catch {
+    await dialog.showMessageBox(win, {type: 'error', message: '无效的 STUN 设置',
+      detail: '需要不超过 1024 字节的 JSON，例如 {"address":"127.0.0.1","port":3478}。只接受一个明确 IPv4 单播地址和 UDP 端口；默认关闭。'});
+  } finally { await handle?.close(); }
 }
 function createWindow() {
   win = new BrowserWindow({width: 1360, height: 960, minWidth: 840, minHeight: 650, backgroundColor: '#0c111b',
@@ -70,7 +95,10 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([{label: '原生网络绑定（更改将断开原生路径）', submenu: ['127.0.0.1', ...interfaces].map(address => ({label: address, type: 'radio', checked: address === bindAddress, click: async () => {
     const result = await dialog.showMessageBox(win, {buttons: ['取消', '绑定本机接口'], defaultId: 0, cancelId: 0, message: `允许原生 P2P 传输使用本机接口 ${address}？`, detail: '不会开放本地 RPC 服务；停止旧原生路径。网络变化后需重新选择和发现。'});
     if (result.response === 1) { bindAddress = address; sidecar?.stop(); startSidecar(); }
-  }}))}, {label: '窗口', submenu: [{role: 'reload'}, {role: 'quit'}]}]));
+  }}))}, {label: '原生 STUN（默认关闭）', submenu: [
+    {label: '从 JSON 配置并确认授权…', click: configureStun},
+    {label: '禁用 STUN 并断开旧原生路径', click: () => { stunConfig = null; sidecar?.stop(); startSidecar(); }}
+  ]}, {label: '窗口', submenu: [{role: 'reload'}, {role: 'quit'}]}]));
   createWindow(); app.on('activate', () => { if (!win) createWindow(); });
 });
 app.on('before-quit', () => sidecar?.stop());

@@ -16,7 +16,7 @@ def allowed(p):
     if parts[0]=='platform':return len(parts)==2 and r.name in {'native_entry.py','mobile.js','build-requirements.txt','constraints.txt'}
     if parts[0]=='android':
         if 'assets' in parts or 'capacitor-cordova-android-plugins' in parts or '.idea' in parts:return False
-        return p.suffix in {'.gradle','.properties','.java','.kt','.xml','.png','.jar','.bat'} or r.name in {'gradlew','.gitignore'}
+        return p.suffix in {'.gradle','.properties','.java','.kt','.xml','.png','.jar','.bat','.pro'} or r.name in {'gradlew','.gitignore'}
     return False
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def snapshot():return {str(p.relative_to(ROOT)):sha(p) for p in sorted(ROOT.rglob('*')) if allowed(p)}

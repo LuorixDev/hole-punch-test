@@ -1,31 +1,31 @@
 {
-  "sourceTreeSha256": "fd54a6fba2cd4740e460984298b7693a5585b81f61d040897662e8df09b9af92",
-  "sourceFileCount": 121,
-  "sourceManifestSha256": "8610dd52d679b685f6f0f4e1357ca425787ec18ef7118c765546fa9fdc1cb11f",
-  "packageTreeSha256": "8dae640c9145bb3eb781ba32d0d8073f481741a3784a79c8de52d0b9641746d2",
+  "round": 2,
+  "sourceTreeSha256": "bfac700a7058d517e2d3c355a807529bf38a29184b1304224312d502162b1363",
+  "sourceFileCount": 127,
+  "sourceManifestSha256": "746822416d47fb123583286823d7272dbc9d091ba23866aa95c261737b0273e9",
+  "packageTreeSha256": "05f7341090e86ae4fff0f4456410d7ab3331791b5f28c583c4f4d6bccba8b67c",
   "packageFileCount": 109,
   "artifactSha256": {
     "releases/linux-unpacked/p2p-observatory-chat": "10a14d05c6ff4f94075cfb3eeb6ed6571be33ebcc08cbd675b5ce9ff84706564",
-    "releases/linux-unpacked/resources/app.asar": "cbf29c6b3f2ddba0196679ba50ba8a258ce6680f7d4e42f4812f738684dc899d",
-    "releases/linux-unpacked/resources/native/p2p-native": "6941a9b123b92fe5f1fb6d338b13372bf09bc5ffc2bffed15d49942a805698f7",
+    "releases/linux-unpacked/resources/app.asar": "352275b49b9097ac027a0b4fb251beed77cf67b093909bead3dfd23216dde59b",
+    "releases/linux-unpacked/resources/native/p2p-native": "06f2e210f39ecd056514c69f2bb766fd5731e2f14c1886493e327323485c3559",
     "package-lock.json": "6beed4f9163d5bcc775c1dd8429caf6b405b71909a8643ba23720a20f64dbef0",
     "requirements-lock.txt": "e8a8f0a6b1dbf627b99353c4e42aeb2add5859bfa0594d0c0959e295bf75c9bd"
   },
   "tests": {
-    "python": "45 passed; 8 AppKey warnings; 73.21s",
-    "nodeClientPlatform": "27 passed",
-    "nodeRealNativeBridge": "1 passed",
+    "python": "52 passed, 8 AppKey warnings, 77.74s",
+    "nodeClientPlatform": "34 passed",
+    "nodeRealNativeIntegration": "4 passed",
     "syncWeb": "passed",
     "linuxBuild": "passed",
     "linuxSandboxSmoke": "passed",
     "nativeManifestMatches": "passed"
   },
   "notRun": [
-    "Windows build/runtime/microphone",
-    "Android build/runtime/microphone",
+    "Android lifecycle/recording real device",
+    "Windows runtime/microphone",
     "real residential NAT",
-    "real gateways",
-    "browser successful IPv6 path"
+    "real gateway devices"
   ],
   "sourceFrozen": true,
   "releaseMetadataExcludedFromSourceTree": [

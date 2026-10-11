@@ -1,6 +1,24 @@
 'use strict';
 const { EventEmitter } = require('node:events');
 const crypto = require('node:crypto');
+const net = require('node:net');
+function validateStunConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'address,port' || typeof value.address !== 'string' || net.isIP(value.address) !== 4 ||
+      !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error('INVALID_STUN_CONFIG');
+  const octets = value.address.split('.').map(Number);
+  if (octets[0] >= 224 || value.address === '0.0.0.0' || (octets[0] === 169 && octets[1] === 254)) throw new Error('INVALID_STUN_CONFIG');
+  return Object.freeze({address: value.address, port: value.port});
+}
+function sidecarArgs(bindAddress, stun = null) {
+  if (!net.isIP(bindAddress)) throw new Error('INVALID_BIND_ADDRESS');
+  const args = ['--bind', bindAddress];
+  if (stun !== null) {
+    const safe = validateStunConfig(stun);
+    args.push('--stun-address', safe.address, '--stun-port', String(safe.port));
+  }
+  return args;
+}
 const METHODS = new Set(['capabilities', 'start', 'signal', 'send', 'stats', 'close']);
 const EVENTS = new Set(['candidate', 'state', 'data', 'diagnostic']);
 const MAX_LINE = 128 * 1024;
@@ -67,4 +85,4 @@ class Sidecar extends EventEmitter {
   }
 }
 const unavailable = reason => ({v: 1, methods: ['udp-probe','quic','tcp','tcp-simopen','upnp','pcp','natpmp'].map(mechanism => ({mechanism, status: 'unsupported', canMessage: false, reason, limits: {}}))});
-module.exports = {Sidecar, validateRequest, isTrustedSender, unavailable, METHODS};
+module.exports = {Sidecar, validateRequest, isTrustedSender, unavailable, METHODS, validateStunConfig, sidecarArgs};

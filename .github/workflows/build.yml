@@ -58,12 +58,14 @@ jobs:
           node --test tests/platform/*.test.cjs tests/client/*.test.cjs 2>&1 | tee releases/js-tests.log
           npm audit --omit=dev --audit-level=moderate
           npm audit --audit-level=high
-      - name: Python gates (repository root, including cross-language fixtures)
+      - name: Python gates (repository root, bounded diagnostic runner)
+        timeout-minutes: 12
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p p2pchat/releases
-          python -m pytest p2pchat/tests -q 2>&1 | tee p2pchat/releases/python-tests.log
+          python -u -m unittest discover -s p2pchat/ci -p 'test_*.py' 2>&1 | tee p2pchat/releases/watchdog-tests.log
+          python -u p2pchat/ci/watchdog.py --timeout 600 -- python -u -m pytest p2pchat/tests -vv -s -o faulthandler_timeout=120 --durations=20 2>&1 | tee p2pchat/releases/python-tests.log
       - name: Build desktop native sidecar and client
         if: matrix.target != 'android'
         working-directory: p2pchat

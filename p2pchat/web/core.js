@@ -24,9 +24,9 @@ class Handshake{
 }
 class Receiver{
  constructor(){this.items=new Map();this.reserved=0;}
- start(key,m,now=performance.now()){if(this.items.has(key)||this.items.size>=8||!Number.isInteger(m.size)||m.size<0||m.size>LIMIT.file||this.reserved+m.size>LIMIT.reserved||typeof m.id!=='string'||!m.id.length||enc.encode(m.id).length>100||typeof m.name!=='string'||m.name.length>255||typeof m.mime!=='string'||m.mime.length>128||!/^[a-f0-9]{64}$/.test(m.sha256)||m.benchmark!==false)throw Error('TRANSFER_LIMIT');this.items.set(key,{...m,parts:[],bytes:0,nextSequence:0,started:now,updated:now});this.reserved+=m.size;}
- chunk(key,c,now=performance.now()){const t=this.items.get(key);if(!t||c.sequence!==t.nextSequence||t.bytes+c.payload.length>t.size)throw Error('INVALID_SEQUENCE');t.parts.push(c.payload.slice());t.bytes+=c.payload.length;t.nextSequence++;t.updated=now;return t;}
- take(key){const t=this.items.get(key);if(t){this.items.delete(key);this.reserved-=t.size;}return t;}
+ start(key,m,now=performance.now()){const budget=m.size+1024+256*Math.ceil(m.size/LIMIT.chunk);if(this.items.has(key)||this.items.size>=8||!Number.isInteger(m.size)||m.size<0||m.size>LIMIT.file||this.reserved+budget>LIMIT.reserved||typeof m.id!=='string'||!m.id.length||enc.encode(m.id).length>100||typeof m.name!=='string'||m.name.length>255||typeof m.mime!=='string'||m.mime.length>128||!/^[a-f0-9]{64}$/.test(m.sha256)||m.benchmark!==false)throw Error('TRANSFER_LIMIT');this.items.set(key,{id:m.id,name:m.name,mime:m.mime,size:m.size,sha256:m.sha256,echoOf:typeof m.echoOf==='string'?m.echoOf.slice(0,100):null,budget,parts:[],bytes:0,nextSequence:0,maxChunks:Math.ceil(m.size/LIMIT.chunk),started:now,updated:now});this.reserved+=budget;}
+ chunk(key,c,now=performance.now()){const t=this.items.get(key);if(!t||c.sequence!==t.nextSequence||!c.payload.length||t.nextSequence>=t.maxChunks||c.payload.length!==Math.min(LIMIT.chunk,t.size-t.bytes))throw Error('INVALID_SEQUENCE');t.parts.push(c.payload.slice());t.bytes+=c.payload.length;t.nextSequence++;t.updated=now;return t;}
+ take(key){const t=this.items.get(key);if(t){this.items.delete(key);this.reserved-=t.budget;}return t;}
  expire(now=performance.now()){for(const [k,t]of this.items)if(now-t.updated>30000)this.take(k);}
 }
 class Dedup{constructor(){this.entries=new Map();}has(key,now=Date.now()){for(const [k,t]of this.entries)if(now-t>600000)this.entries.delete(k);if(this.entries.has(key))return true;this.entries.set(key,now);while(this.entries.size>10000)this.entries.delete(this.entries.keys().next().value);return false;}}
@@ -37,9 +37,9 @@ class NativeAdapter{
  async capabilities(){return this.bridge?this.bridge.invoke('capabilities',{}):{v:1,methods:[{mechanism:'native',status:'unsupported',canMessage:false,reason:'NATIVE_BRIDGE_UNAVAILABLE'}]};}
  async start(p,canMessage){this.attempts.set(p.attemptId,{...p,canMessage,state:'gathering'});try{return await this.bridge.invoke('start',p);}catch(e){this.attempts.delete(p.attemptId);throw e;}}
  signal(p){return this.bridge.invoke('signal',p);}
- send({attemptId,lane,data}){const p=this.attempts.get(attemptId);if(p?.state!=='direct'||!p.canMessage)throw Error('NOT_DIRECT');if(data.length>65536)throw Error('FRAME_LIMIT');return this.bridge.invoke('send',{attemptId,lane,dataB64:b64encode(data)});}
+ async send({attemptId,lane,data}){const p=this.attempts.get(attemptId);if(p?.state!=='direct'||!p.canMessage)throw Error('NOT_DIRECT');if(data.length>65536)throw Error('FRAME_LIMIT');const params={attemptId,lane,dataB64:b64encode(data)},deadline=performance.now()+(lane==='benchmark'?2000:10000);for(;;){if(this.attempts.get(attemptId)!==p||p.state!=='direct')throw Error('NOT_DIRECT');try{return await this.bridge.invoke('send',params);}catch(e){if(e.message!=='BACKPRESSURE')throw e;if(performance.now()>=deadline)throw Error('BACKPRESSURE_TIMEOUT');await new Promise((resolve,reject)=>{p.backpressureWaits||=new Set();const cancel=()=>{clearTimeout(timer);p.backpressureWaits.delete(cancel);reject(Error('NOT_DIRECT'));};const timer=setTimeout(()=>{p.backpressureWaits.delete(cancel);resolve();},20);p.backpressureWaits.add(cancel);});}}}
  stats(p){return this.bridge.invoke('stats',p);}
- async close(p){this.attempts.delete(p.attemptId);return this.bridge?.invoke('close',p);}
+ async close(p){const old=this.attempts.get(p.attemptId);for(const cancel of old?.backpressureWaits||[])cancel();this.attempts.delete(p.attemptId);return this.bridge?.invoke('close',p);}
  destroy(){this.unsubscribe?.();}
 }
 const api={enc,dec,LIMIT,uuid,family,candidateInfo,permitted,filterSdp,encodeFrame,decodeFrame,sha,Handshake,Receiver,Dedup,NativeAdapter};root.P2PCore=api;if(typeof module!=='undefined')module.exports=api;

@@ -108,7 +108,7 @@ class NativeAdapter:
              "canMessage": m in {"quic", "tcp", "tcp-simopen"},
              "reason": "OPT_IN_GATEWAY_API_ONLY" if m in {"upnp", "pcp", "natpmp"} else
                        ("PROBE_ONLY" if m == "udp-probe" else "EXPERIMENTAL_PLATFORM_UNVERIFIED"),
-             "limits": {"maxFrameBytes": MAX_FRAME, "benchmark": m == "quic", "maxAttempts": self.budget.attempts}}
+             "limits": {"maxFrameBytes": MAX_FRAME, "benchmark": m == "quic", "independentBenchmark": m == "quic", "maxAttempts": self.budget.attempts}}
             for m in METHODS]}
 
     async def start(self, params):
@@ -188,6 +188,12 @@ class Attempt:
         self._temp = None
         self.key = self.cert = None
         self.candidate_count = 0
+        self.remote_candidates = {}  # authenticated signaling tuples only; <=64
+        self.candidate_auth = {}  # proof state isolated per exact source tuple
+        self.remote_socket_id = None
+        self.selected = False
+        self.probe_cursor = 0
+        self.probe_schedule = {}
         self.queued = 0
         self.rx_window, self.rx_packets = time.monotonic(), 0
 
@@ -269,6 +275,9 @@ class Attempt:
             cert = x509.load_pem_x509_certificate(pem.encode())
             if self.remote_pem is not None and self.remote_pem != pem:
                 raise ValueError("CERTIFICATE_CHANGED")
+            if any(c.get("certificateFingerprint") != cert.fingerprint(hashes.SHA256()).hex()
+                   for c in self.remote_candidates.values()):
+                raise ValueError("CERTIFICATE_FINGERPRINT_MISMATCH")
             self.remote_pem, self.remote_cert = pem, cert
         elif "nativeCandidate" in p:
             self.candidate_count += 1
@@ -278,9 +287,24 @@ class Attempt:
             remote = validate_candidate(c)
             if c["transport"] != self.candidate["transport"] or c["family"] != self.candidate["family"]:
                 raise ValueError("CANDIDATE_INCOMPATIBLE")
-            if self.remote is not None and self.remote != remote:
-                raise ValueError("ONE_TUPLE_PER_ATTEMPT")
-            self.remote, self.remote_candidate = remote, dict(c)
+            if self.remote_socket_id is not None and c["socketId"] != self.remote_socket_id:
+                raise ValueError("CANDIDATE_SOCKET_CHANGED")
+            if self.remote_pem and c.get("certificateFingerprint") != self.remote_cert.fingerprint(hashes.SHA256()).hex():
+                raise ValueError("CERTIFICATE_FINGERPRINT_MISMATCH")
+            if self.remote_candidate and c.get("certificateFingerprint") != self.remote_candidate.get("certificateFingerprint"):
+                raise ValueError("CERTIFICATE_FINGERPRINT_MISMATCH")
+            if self.mechanism not in {"udp-probe", "quic"} and self.remote is not None and self.remote != remote:
+                raise ValueError("TCP_TUPLE_REQUIRES_NEW_ATTEMPT")
+            self.remote_socket_id = c["socketId"]
+            if remote not in self.remote_candidates:
+                self.remote_candidates[remote] = dict(c)
+                auth = Auth(self.auth.room, self.auth.key.decode(), self.connection, self.id, self.auth.local, self.peer)
+                # One attempt/socket nonce, but separate received-hello/ACK state:
+                # proofs from distinct source tuples cannot be combined into direct.
+                auth.nonce = self.auth.nonce
+                self.candidate_auth[remote] = auth
+            if self.remote is None:
+                self.remote, self.remote_candidate = remote, self.remote_candidates[remote]
         else:
             raise ValueError("INVALID_SIGNAL")
         if self.remote and (self.mechanism == "udp-probe" or self.remote_pem):
@@ -314,14 +338,28 @@ class Attempt:
             await self.fail("TRANSPORT_FAILED")
 
     async def udp_clock(self):
-        delay, next_hello = .1, 0
+        next_send = 0
         try:
             while self.state not in TERMINAL:
                 now = time.monotonic()
-                if not self.auth.direct and now >= next_hello:
-                    await self.raw_udp(b"P2POBS1" + packed(self.auth.frame()))
-                    next_hello = now + delay
-                    delay = min(1, delay * 2)
+                if not self.selected and now >= next_send:
+                    tuples = list(self.remote_candidates)
+                    # Round-robin trickled candidates, aggregate <=20 probes/sec.
+                    for offset in range(len(tuples)):
+                        index = (self.probe_cursor + offset) % len(tuples)
+                        target = tuples[index]
+                        due, delay = self.probe_schedule.get(target, (0, .1))
+                        if now >= due:
+                            try:
+                                await self.raw_udp(b"P2POBS1" + packed(self.candidate_auth[target].frame()), target)
+                            except OSError:
+                                # An unroutable host candidate cannot kill later srflx.
+                                if target not in self.probe_schedule:
+                                    self.event("diagnostic", code="CANDIDATE_SEND_UNAVAILABLE")
+                            self.probe_schedule[target] = (now + delay, min(1, delay * 2))
+                            self.probe_cursor = (index + 1) % len(tuples)
+                            next_send = now + .05
+                            break
                 if self.quic:
                     timer = self.quic.get_timer()
                     if timer is not None and timer <= now:
@@ -334,14 +372,15 @@ class Attempt:
         except Exception:
             await self.fail("UDP_IO_FAILED")
 
-    async def raw_udp(self, data):
-        await asyncio.get_running_loop().sock_sendto(self.sock, data, self.remote)
+    async def raw_udp(self, data, target=None):
+        await asyncio.get_running_loop().sock_sendto(self.sock, data, target or self.remote)
 
     async def receive_udp(self):
         try:
             while self.state not in TERMINAL:
                 data, addr = await asyncio.get_running_loop().sock_recvfrom(self.sock, MAX_WIRE)
-                if addr[:2] != self.remote:
+                source = addr[:2]
+                if source not in self.remote_candidates or (self.selected and source != self.remote):
                     continue
                 if data.startswith(b"P2POBS1"):
                     if time.monotonic() - self.rx_window >= 1:
@@ -354,10 +393,16 @@ class Attempt:
                     try:
                         frame = json.loads(data[7:])
                         if frame.get("kind") in {"hello", "hello-ack"}:
-                            response = self.auth.receive(frame)
+                            candidate_auth = self.candidate_auth[source]
+                            response = candidate_auth.receive(frame)
                             if response:
-                                await self.raw_udp(b"P2POBS1" + packed(response))
-                            if self.auth.direct:
+                                await self.raw_udp(b"P2POBS1" + packed(response), source)
+                            if candidate_auth.direct and not self.selected:
+                                self.auth = candidate_auth
+                                self.remote = source
+                                self.remote_candidate = self.remote_candidates[source]
+                                self.selected = True
+                                self.last_receive = time.monotonic()
                                 self.rtt = (time.monotonic() - self.probe_start) * 1000
                                 if self.mechanism == "udp-probe":
                                     if self.state != "direct":
@@ -627,6 +672,11 @@ class Attempt:
             self._temp.cleanup()
             self._temp = None
         self.auth.clear()
+        for auth in self.candidate_auth.values():
+            auth.clear()
+        self.candidate_auth.clear()
+        self.remote_candidates.clear()
+        self.probe_schedule.clear()
         if hasattr(self, "channel_auth"):
             self.channel_auth.clear()
         self.key = self.cert = self.remote_cert = self.remote_pem = self.quic = None

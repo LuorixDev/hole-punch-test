@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import base64
 import json
+import ipaddress
 import sys
 from .adapter import NativeAdapter, MAX_FRAME
 
@@ -89,11 +90,32 @@ async def serve(adapter=None, reader=None, output=None):
         await asyncio.gather(writer, return_exceptions=True)
 
 
+def stun_config(address=None, port=None):
+    """Trusted CLI configuration only; one explicit numeric IPv4 STUN endpoint."""
+    if address is None and port is None:
+        return None
+    try:
+        ip = ipaddress.IPv4Address(address)
+        if ip.is_multicast or ip.is_unspecified or ip.is_link_local or str(ip) == "255.255.255.255":
+            raise ValueError
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise ValueError
+    except (ValueError, TypeError, ipaddress.AddressValueError):
+        raise ValueError("INVALID_STUN_CONFIG") from None
+    return str(ip), port
+
+
 def main():
     parser = argparse.ArgumentParser(description="Direct P2P native stdio adapter; no relay")
     parser.add_argument("--bind", default="127.0.0.1", help="Explicit local numeric IP; no wildcard bind")
+    parser.add_argument("--stun-address", help="Explicitly authorized numeric IPv4 STUN server; disabled by default")
+    parser.add_argument("--stun-port", type=int, help="Authorized STUN UDP port (1..65535)")
     args = parser.parse_args()
-    asyncio.run(serve(NativeAdapter(bind_host=args.bind)))
+    try:
+        server = stun_config(args.stun_address, args.stun_port)
+    except ValueError:
+        parser.error("INVALID_STUN_CONFIG")
+    asyncio.run(serve(NativeAdapter(bind_host=args.bind, stun_server=server)))
 
 
 if __name__ == "__main__":

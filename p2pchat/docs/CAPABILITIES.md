@@ -2,7 +2,11 @@
 
 这是 **2026-10-11 原型基线 + 本轮目标边界**，不是发布已完成清单。实现完成后必须附独立验证证据更新状态。共同契约见 [PROTOCOL](PROTOCOL.md)，测试等级见 [ACCEPTANCE](ACCEPTANCE.md)。
 
-## t6 当前集成状态（优先于下方历史基线）
+## Round 2 更新
+
+R1–R4实现修复详见 [REPAIR-ROUND2](REPAIR-ROUND2.md)：有界块对象/空块拒绝；native多可信候选同socket调度、受控STUN桌面授权入口；真实QUIC应用bench bytes/ACK；移动pause/resume/切网实现及模拟回归。仍不声称Android/Windows实机或真实家宽验证。旧t6哈希已被新SOURCE-MANIFEST替代，不能以旧审查结果当修复后证据。
+
+## t6 历史集成状态
 
 2026-10-11：四模块已实现并在Linux进行局部真实集成；完整证据和运行方法见 [INTEGRATION](INTEGRATION.md)。下方P/E矩阵保留为t1历史快照，不应读作当前尚无实现。
 
