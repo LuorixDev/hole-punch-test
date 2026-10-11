@@ -1,97 +1,57 @@
-# 平台与机制支持矩阵
+# 最终能力矩阵与限制
 
-这是 **2026-10-11 原型基线 + 本轮目标边界**，不是发布已完成清单。实现完成后必须附独立验证证据更新状态。共同契约见 [PROTOCOL](PROTOCOL.md)，测试等级见 [ACCEPTANCE](ACCEPTANCE.md)。
+**当前状态：Windows修复待当前commit CI确认。** 最新完整源码和Linux包哈希见 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)、[FREEZE](FREEZE.json)，已合并t22+t25关闭修复及交付文档。该补丁仅精确win32/Python3.12.10/aiortc1.15.0/aioice0.10.2的本Peer Proactor UDP；Linux模拟/全套72项与 [T26](../review/windows/T26.md) 独立33项通过，不表示Windows IOCP已通过。
 
-## Round 2 更新
+下表L1/L2证据来自历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`的 [VERIFICATION-R2](../verification/VERIFICATION-R2.md) 与 [ROUND3](../review/ROUND3.md)；77个旧安全域文件及native字节未变，但Python Peer关闭逻辑已变，不能把旧全套报告直接套新整树。[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已Linux/Android成功、Windows90秒exit124未打包。当前新版需同commit重跑原双echo诊断+全套测试+打包，详见 [WINDOWS-INTEGRATION](WINDOWS-INTEGRATION.md)。
 
-R1–R4实现修复详见 [REPAIR-ROUND2](REPAIR-ROUND2.md)：有界块对象/空块拒绝；native多可信候选同socket调度、受控STUN桌面授权入口；真实QUIC应用bench bytes/ACK；移动pause/resume/切网实现及模拟回归。仍不声称Android/Windows实机或真实家宽验证。旧t6哈希已被新SOURCE-MANIFEST替代，不能以旧审查结果当修复后证据。
+## 1. 平台分层状态
 
-## t6 历史集成状态
+`实现`不等于`构建`，`构建`不等于`实机互通`，本机/隔离namespace测试不等于真实家宽。NOT_RUN=条件不具备；“未实现”是功能缺口，两者不可互换。
 
-2026-10-11：四模块已实现并在Linux进行局部真实集成；完整证据和运行方法见 [INTEGRATION](INTEGRATION.md)。下方P/E矩阵保留为t1历史快照，不应读作当前尚无实现。
-
-| 方法 | Linux浏览器 | Linux桌面/Python native | Windows | Android |
+| 平台 | 实现 | 当前基线构建 | 当前基线本地运行/测试 | 平台实机/现场 |
 |---|---|---|---|---|
-| WebRTC IPv4 host / DataChannel | 真实Chromium↔独立Python echo通过（本机） | Python独立进程通过；Electron包启动证据单列 | 源码+构建配置，实机NOT_RUN | 源码+Capacitor工程，编译/实机NOT_RUN |
-| WebRTC IPv6 host | 实际无成功v6路径，超时可见 | STUN/原生v6 socket测试通过，不替代WebRTC v6 | NOT_RUN | NOT_RUN |
-| STUN srflx | 配置实现；真实NAT NOT_RUN | 双栈STUN socket测试通过，公网NAT NOT_RUN | NOT_RUN | NOT_RUN |
-| prflx/triggered ICE | 引擎能力，具体路径未证实 | 同左 | NOT_RUN | NOT_RUN |
-| UDP精确tuple探测 | 无原生API | 真双向认证socket测试v4/v6通过，probe不可聊天 | 源码未实机 | 未实现原生 |
-| QUIC同socket | 无原生API | 实现；双Python stdio+JS桥真实双lane完整性通过 | 源码未实机 | 未实现原生 |
-| TCP直连 | 无原生API | mutual TLS socket测试v4/v6通过 | 源码未实机 | 未实现原生 |
-| TCP simultaneous open | 无原生API | 真bind/connect实现，t3双netns正例；同机可明确失败 | 源码未实机 | 未实现原生 |
-| UPnP IGD / IPv6 pinhole / PCP / NAT-PMP | 无原生API | Python显式opt-in API实现/模拟网关测试；真实网关NOT_RUN；桥/UI授权入口未实现 | 源码未实机 | 未实现原生 |
+| Linux Chromium | WebRTC聊天/文件/录音/诊断 | Web静态资源已同步 | 真实浏览器↔独立Python echo、文件SHA、独立benchmark、断信令补传通过 | 本机有证据；两条家宽NOT_RUN |
+| Linux Electron x64 | 共享UI+安全IPC+内置Python sidecar | 本地最终包已重建 | sandbox启动、sidecar来源hash；JS业务→platform桥→双Python native测试通过 | Electron完整GUI跨设备/网关NOT_RUN；本机glibc2.44包不保证旧Linux |
+| Python Linux | 双栈信令/STUN、中心日志、WebRTC Echo、native API | 源码与本地sidecar构建 | 独立进程、v4/v6 socket、隔离v6 stateful/延迟丢包、候选负例通过 | 真实双NAT/公网/CPE兼容NOT_RUN |
+| Windows Electron | 同源封装/sidecar配置 | **关闭修复待当前commit CI确认，无成功包**；旧CI90/600秒超时未打包 | 未运行当前版Windows | GUI/文件/麦克风/防火墙实机NOT_RUN |
+| Android Capacitor | 共享WebRTC UI、SAF保存、音频权限、pause/resume/切网回调 | 关闭修复同版待CI；旧commit debug APK成功不继承 | lifecycle/旧ACK/track回收仅源码+模拟 | 真机安装、WebView互通、录音、后台/切网NOT_RUN |
 
-重要限制：网关映射桥返回 `OPT_IN_GATEWAY_API_ONLY`，入口是 [gateway.py](../native/gateway.py) 的显式 opt-in API，而不是客户端可点即用；不得把模拟网关成功当真实路由器兼容。Python Echo只广告WebRTC，原生QUIC/TCP互通需两端native客户端，不宣称所有机制支持Python Echo。Electron默认原生绑定loopback，可通过“原生网络绑定”菜单经确认选择本机接口；跨主机原生/家宽证据仍NOT_RUN。Windows/Android麦克风、移动后台、网络切换和真实NAT全部NOT_RUN，不能被Linux浏览器结果替代。
+新关闭修复各平台运行结论/产物链接由captain推送新commit后按实际终态补充，目前Windows修复不预判成功；上述a1c6e7e仅旧版历史。旧`855c19ceed67d6ae23cbf52c61131dd6d637ea8d` / run`38122604055`：Linux、Android成功；Windows watchdog600秒exit124，未打包。详情见 [交付版本表](DELIVERY.md#版本与ci状态)。
 
-本轮修复早到ACK、信令离线直连保留、503重连异常、自动集中诊断默认开启与明确暂停/丢弃提示、高ID有界重试终态。v1消息字段未变。浏览器已实际录音发送并获得回声/完整性ACK，播放进度可见；音源硬件身份/人声质量未验证，媒体原件不进入仓库。
+## 2. 所有约定机制逐平台状态
 
-## 状态含义（t1基线）
+缩写：**L1**=本机真实进程/socket/浏览器；**L2**=隔离netns/可控拓扑；**U**=实现但该平台/网络未验证；**无API/未实现**=明确不可用，不以绿灯占位。
 
-- **P/U**：源码路径存在（prototype），目标平台/网络未经验证；不是“可用保证”。
-- **P/L**：有原型且本机测试覆盖部分功能（local），绝不是公网、真实 NAT 或平台实机通过。
-- **E/U**：本轮实验目标在原型基线尚未实现、未验证；不是允许用 unsupported 占位完成任务。交付时必须分别记录实现状态与测试状态。
-- **N/U**：本轮不提供原生能力（浏览器API限制或Android当前明确范围缺口）；运行时返回 unsupported，而非永久不可实现，也不表示所有平台的同一机制都可免做。
-- **engine/U**：ICE引擎可能支持，不由应用单独实现或保证；必须以实际候选/抓包证据确认。
+| 方法 | Linux浏览器 | Linux桌面/Python native | Windows桌面 | Android | 限制/证据 |
+|---|---|---|---|---|---|
+| IPv6 host（WebRTC） | 实现，本次v6策略超时 | Python实现，未据此声明WebRTC v6成功 | U | WebView实现/U | native v6通过不能替代WebRTC v6；隐藏地址族unknown |
+| IPv4 LAN/public host | WebRTC L1 host成功 | Python WebRTC/native L1成功 | U | U | LAN跨设备/public host现场NOT_RUN |
+| STUN srflx | WebRTC STUN配置实现，真实NAT U | 双栈STUN服务；native IPv4受控STUN同socket测试通过 | 源码U | WebRTC引擎/U | STUN观察映射不是NAT分类；桌面配置需明确授权 |
+| prflx / triggered ICE | 引擎能力，具体prflx轨迹未证实 | aiortc引擎能力/U | 引擎能力/U | WebView引擎能力/U | 不是独立协议；不可观测不编造 |
+| WebRTC DataChannel DTLS/SCTP | 真实L1文字/文件/echo/benchmark通过 | Python独立进程L1通过 | U | U | 三profile是同协议地址族策略，不是三算法 |
+| UDP精确tuple双向探测 | 浏览器无任意UDP API | v4/v6真socket；每candidate随机challenge；错source/key/完整proof重放与单向丢包负例通过 | 源码U | 原生未实现 | probe-only，canMessage=false |
+| QUIC同UDP socket | 浏览器无API | 探测/候选保持fd/port；host黑洞→srflx可控转换+双向64KiB；业务benchmark ACK L1；v6 stateful和40ms/5%loss L2通过 | 源码U | 原生未实现 | 转换shim不是内核双NAT/CPE成功；独立stream共享拥塞 |
+| TCP直连 | 浏览器无API | mutual TLS、v4/v6 socket完整性通过 | 源码U | 原生未实现 | 不支持独立benchmark；不得回退控制面443传正文 |
+| TCP simultaneous open | 浏览器无API | 真双端bind/connect；t3双netns正例；零延迟可失败 | 源码U | 原生未实现 | 不是普通listener/connect；OS/NAT依赖，现场U |
+| UPnP IGD IPv4映射 | 无API | Python opt-in API实现+受控服务测试 | 源码；网关验证受限 | 未实现 | 桌面桥没有映射授权入口，OPT_IN_GATEWAY_API_ONLY |
+| UPnP IPv6 firewall pinhole | 无API | Python API+受控IPv6服务测试 | 源码U | 未实现 | 不能由IPv4映射成功推断；link-local scope受限 |
+| PCP MAP | 无API | 编码/nonce/lease/续租删除API+受控服务测试 | 源码U | 未实现 | 真实网关NOT_RUN |
+| NAT-PMP | 无API | IPv4协议/API+受控服务测试 | 源码U | 未实现 | 协议本身无密码学认证，须可信本地网关与外部验证 |
+| TURN / 信令数据中继 | 永久禁用 | 永久禁用 | 永久禁用 | 永久禁用 | 配置、候选、实际pair、控制面schema均拒绝 |
 
-## 每个平台逐项矩阵（基线）
+网关映射是不同机制/候选来源，不是STUN变种或传输成功证明。调用 [gateway.py](../native/gateway.py) 需显式opt-in、可信路由网关、外部peer验证、有限lease/续租/close；本产品没有替用户操作真实路由器。Python Echo只支持WebRTC，native QUIC/TCP应连另一个native客户端，不把“无法向Echo使用native”隐藏成所有机制均已回声。
 
-| 机制/路径 | Linux浏览器 | Linux Electron | Windows Electron | Android Capacitor | Python Linux peer | 实现/测试限制 |
-|---|---|---|---|---|---|---|
-| IPv6 host | P/U | P/U | P/U | P/U | P/L | ICE候选过滤存在；本机测试未强制v6路径成功，stateful防火墙/公网未验 |
-| IPv4 LAN/public host | P/U | P/U | P/U | P/U | P/L | 本地两Peer存在可用通道，未证明独立LAN主机/公网host |
-| STUN srflx | P/U | P/U | P/U | P/U | P/U | 浏览器/aiortc STUN配置和Python Binding编码存在；函数级v4/v6编码通过，不等于网络穿透通过 |
-| prflx / triggered ICE checks | engine/U | engine/U | engine/U | engine/U | engine/U | 引擎内ICE机制；非独立协议；浏览器不暴露时记不可观测 |
-| WebRTC DataChannel (DTLS/SCTP) | P/U | P/U | P/U | P/U | P/L | Python同进程实例文本/文件回声通过；其余平台无实机互通证据 |
-| 原生UDP精确tuple双向探测 | N/U | E/U | E/U | N/U | E/U | Python sidecar为桌面实验目标，浏览器无任意UDP socket；probe不是安全可靠聊天 |
-| QUIC同UDP socket接续 | N/U | E/U | E/U | N/U | E/U | 必须证明探测/STUN/QUIC复用socket；aioquic已安装不等于实现 |
-| TCP直连 | N/U | E/U | E/U | N/U | E/U | 真实端点listener/connect及身份验证；Windows防火墙待验证 |
-| TCP simultaneous open | N/U | E/U | E/U | N/U | E/U | OS/NAT依赖；必须实际同tuple双端active-open，普通TCP直连不得冒充 |
-| UPnP IGD IPv4映射 | N/U | E/U | E/U | N/U | E/U | 用户明确opt-in，路由器兼容/授权/到期清理未验；不是打洞算法 |
-| UPnP IPv6 firewall pinhole | N/U | E/U | E/U | N/U | E/U | 与IPv4端口映射分开；服务支持受限，不能用IGD成功推断 |
-| PCP | N/U | E/U | E/U | N/U | E/U | 需要网关支持，映射生命周期/nonce/撤销测试；非STUN变种 |
-| NAT-PMP | N/U | E/U | E/U | N/U | E/U | 主要IPv4，网关支持受限；不同于PCP，拒绝猜测路由器支持 |
-| TURN / 信令聊天中继 | 禁用 | 禁用 | 禁用 | 禁用 | 禁用 | 配置、候选、选中pair、服务端消息类型各层拒绝 |
+## 3. 传输与诊断
 
-E/U 不承诺每个真实网络都能成功，但不降低 t3 的真实 socket 实现要求。桌面/Python 已约定方法必须真实实现并提供对应测试；无法完成须向 captain 上报具体阻断与拟议范围调整，未获明确调整不能仅返回 unavailable/unsupported 就完成任务。交付状态必须区分：**平台确实不支持**（说明API/OS限制，运行时unsupported）、**实现存在但环境不能测**（NOT_RUN并列缺少设备/授权/拓扑条件）、**尚未实现**（实现缺口，不能冒充前两者）。Android 原生仍是当前显式范围缺口，不能当作桌面方法的豁免。普通公网 QUIC 直连若实现，可单列实验项，不能冒称已完成“同 socket 打洞”。网关映射是另一种机制；成功只证明产生候选，仍需双向P2P握手。
+- 文本UTF-8≤16KiB；文件/图片/录音≤32MiB；16KiB非尾块，严格sequence/最终SHA256 ACK；空文件仅start/end。预算≤64MiB且计对象开销、块数有界，超限明确失败。
+- 录音是完成后的文件，非实时通话。t6历史Linux浏览器实际录音566865B并回声播放；**t15最终独立复验只生成合法WAV，真实麦克风未重测**，不覆盖Windows/Android麦克风。
+- Android暂停停止已登记及迟到stream，关闭旧path/ACK；resume/切网合并且有界重建。没有后台服务、wake-lock或系统回收保证；真实锁屏/Doze仍NOT_RUN。
+- WebRTC与QUIC允许独立lane手动测速；TCP禁用。goodput来自实际接收ACK与单调时间，不是线路带宽；共享链路/拥塞仍可能影响聊天。
+- 日志IndexedDB/SQLite持久化、session/connection/attempt关联、中心ACK去重补传、白名单脱敏、限额。自动汇集当前确认中心已获授权；暂停/淘汰显示“中心记录不完整”。磁盘满/断电/真实7天长跑未验。
+- 底层包头、STUN重传/TCP flags/MTU等API不暴露字段返回null/unknown；Python selected pair是明确声明的aiortc私有只读观察。
 
-## 平台交付策略
+## 4. 信任与交付边界
 
-- **Linux**：优先可复现 Python server/echo/native CLI + 浏览器；Electron 封装走同一 web。Python 3.12 .venv 已存在，aiohttp/aiortc/aioquic/pytest 已可导入并运行基线。
-- **Windows**：Electron便携包是构建目标，原生功能需兼容Python sidecar/可分发运行时。若未打包runtime则明确安装Python依赖及路径配置，不能交付“原生已内置”假象。Actions 构建成功≠Windows桌面启动、麦克风、网络/防火墙实测。
-- **Android**：Capacitor WebView + WebRTC 是务实目标，录音权限和HTTPS要求明确；Python sidecar不适用，native机制默认unsupported。Java25已知，Android SDK待确认；根据Android Gradle Plugin实际需求选CI JDK，不能假设Java25兼容。存在Flutter目录不代表项目已移植Flutter，不在本轮混入第二套UI。
-- **浏览器**：受限于WebRTC/MediaRecorder/IndexedDB/安全上下文权限；没有原生UDP/TCP/网关API。IPv6 mDNS候选或stats隐去地址显示unknown，不按profile命名推断。
-- npm install已完成，报告10个漏洞（8 moderate、2 high）；Electron postinstall此前未执行。platform-engineer必须验证Electron可执行文件、锁版本与审计影响，不可把node_modules存在当构建通过。此计数为输入快照，最终需重新审计并记录。
-- GitHub 私有仓库 `LuorixDev/hole-punch-test` 与 Actions Windows 等构建获授权；只上传审核后的源码/构建配置，不上传 `.venv`、依赖目录、秘密、data、日志、pcap、研究证据或聊天数据。capture/upload/deploy 三种权限独立；此处外部上传限制不影响用户已要求并授权的本产品脱敏诊断元数据自动汇集到所配置中心，原始pcap、聊天正文与研究证据不属于该授权。
+共享房间密钥不防恶意同房间成员冒充；TLS/WSS必须验证证书且精确Origin，不支持trust-all。默认所有服务/原生绑定loopback；公网部署和网关修改另需操作者确认。对称NAT、CGNAT、UDP封锁、IPv6防火墙或任意网络均不保证成功。
 
-## 已读取原型与真实基线
-
-已完整阅读 [server.py](../server.py)、[peer.py](../peer.py)、[app.js](../web/app.js)、[package.json](../package.json)、[desktop/main.cjs](../desktop/main.cjs)、[capacitor.config.json](../capacitor.config.json)、[test_core.py](../tests/test_core.py)。
-
-本次运行（退出0）：
-
-```sh
-.venv/bin/python -m pytest p2pchat/tests/test_core.py -v
-# 4 passed, 10 warnings in 1.26s
-```
-
-1. STUN v4/v6 XOR-MAPPED-ADDRESS函数编码、坏报文长度拒绝。
-2. 敏感key脱敏、二进制frame往返及SDP族/relay过滤。
-3. loopback信令拒绝错房间key与chat消息；日志不含该测试聊天正文。
-4. 同一Python进程中的两个真实aiortc对象，三个profile尝试存在、至少一路文本和文件回声/ACK/hash成功。不是两个独立进程，不是独立设备，不是隔离NAT，不是三个协议全部通。
-
-警告：aiohttp NotAppKeyWarning 2项及bare handler deprecation 8项；未使测试失败，但不应忽略维护整改。
-
-### 尚未完成，后续实现不得沿用过强声明
-
-- v0无版本、connectionId；hello仅比较peer字段和strictP2P标志，无双向密钥证明；部分接收逻辑未以认证态为门槛。必须按v1修正。
-- 浏览器首次发起按profile循环await，非完整并发调度；既有路径数量不证明三路成功。重试、早到ICE缓存/限额、信令离线后的roster清理行为要验。
-- 浏览器日志仅内存，Python客户端没有持久pending/ACK补传；中心以临时peerId拼事件id，不保证跨重连去重；SQLite/JSONL无轮转限额；允许任意遥测嵌套字段，仅敏感词redact不足以防日志承载正文。
-- 日志目前含原始IP/candidate/name/remote字段；脱敏与事件白名单尚不满足v1；底层抓包细节不可观测不能补造。
-- 文件已有32MiB限制、16KiB块、最终hash ACK与高水位等待；没有块sequence/ready/progress、全局总内存预留、完整超时释放。测速复用文件与聊天通道，未隔离。
-- 文本/文件echoOf防循环原型存在，但现有用例末尾发送echoOf后未严格计数证明无回复；需要真正负例。
-- Electron只有安全窗口与麦克风提示，无preload/native桥；Capacitor仅配置，未确认Android项目/SDK与APK。原生UDP/QUIC/TCP/映射均无原型实现证据。
-
-## 永久限制与声明规则
-
-不承诺对称NAT、CGNAT、UDP阻断、IPv6有状态防火墙或任意网络都能成功；IPv6地址存在不表示入站允许。所有可用路径并行尝试且首路成功不取消其它尝试，但用户取消/退出/资源上限可结束，并必须注明原因。无成功路线时只报告失败/建议检查网络，不自动启用TURN。默认绑定loopback；任何公网部署与网关变更需另行用户确认。
+依赖标准：STUN Binding、ICE/DTLS/SCTP、QUIC/TLS1.3、TCP、UPnP/PCP/NAT-PMP分别按实际实现列出；标准名称不等于互操作认证。旧t7失败基线fd54a6与round2的bfac700缺陷均保留，不能作为最终通过依据；最终t15与t19覆盖R1–R5。t24已将关闭修复与交付文档重新纳入完整manifest，不暗改原t15/t19记录；未来代码变更仍须新hash复验。

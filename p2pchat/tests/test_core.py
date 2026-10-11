@@ -1,4 +1,6 @@
 import asyncio
+import sys
+from p2pchat.tests.backend.cleanup import cleanup_peers
 import hashlib
 import json
 import socket
@@ -95,7 +97,4 @@ async def test_real_webrtc_echo_text_file_and_parallel_paths(tmp_path):
         await asyncio.sleep(.3)
         assert 'hello P2P 世界' not in (tmp_path/'hub'/'server.jsonl').read_text()
     finally:
-        await a.close();await b.close()
-        for t in tasks:t.cancel()
-        await asyncio.gather(*tasks,return_exceptions=True)
-        await runner.cleanup()
+        await cleanup_peers((a,b),tasks,runner,sys.exception())

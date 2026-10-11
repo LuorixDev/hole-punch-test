@@ -1,4 +1,6 @@
 import asyncio
+import sys
+from p2pchat.tests.backend.cleanup import cleanup_peers
 import hashlib
 import json
 import uuid
@@ -39,7 +41,7 @@ async def test_real_two_echo_bots_no_loop_and_benchmark(tmp_path):
                 if m.get('echoOf')==mid:break
         await asyncio.sleep(.1)
         assert sum(1 for _,m in list(b.received._queue) if m.get('text')=='single echo')==1
-        dc=path['benchmark'];future=asyncio.get_running_loop().create_future();fid=str(uuid.uuid4())
+        dc=await a.wait_benchmark(path);future=asyncio.get_running_loop().create_future();fid=str(uuid.uuid4())
         @dc.on('message')
         def got(raw):
             if isinstance(raw,str):
@@ -50,6 +52,4 @@ async def test_real_two_echo_bots_no_loop_and_benchmark(tmp_path):
         dc.send(json.dumps({'v':1,'kind':'bench-end','id':fid}))
         ack=await asyncio.wait_for(future,3);assert ack['bytes']==4000 and ack['elapsedMs']>0
     finally:
-        await a.close();await b.close()
-        for task in tasks:task.cancel()
-        await asyncio.gather(*tasks,return_exceptions=True);await runner.cleanup()
+        await cleanup_peers((a,b),tasks,runner,sys.exception())

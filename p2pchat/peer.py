@@ -21,6 +21,7 @@ from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSession
 from aiortc.sdp import candidate_from_sdp
 from p2pchat.server import PROFILES
 from p2pchat.backend.telemetry import LocalQueue
+from p2pchat.backend.rtc_shutdown import close_rtc
 
 MAX_FILE=32*1024*1024
 
@@ -153,7 +154,18 @@ class Peer:
                     self.event('receive.error',{'error':'SCHEMA_INVALID'},path);await self.close_path(path);return
         self.spawn(worker(),path)
         if dc.readyState=='open':opened()
+    async def wait_benchmark(self,path,timeout=5):
+        async with asyncio.timeout(timeout):
+            await path['benchmark_ready'].wait()
+        dc=path.get('benchmark')
+        if path['closing'] or not path['hello'] or not dc or dc.readyState!='open':
+            raise RuntimeError('BENCHMARK_CHANNEL_NOT_OPEN')
+        return dc
     def install_benchmark(self,path,dc):
+        def opened():path['benchmark_ready'].set()
+        dc.on('open',opened)
+        dc.on('close',lambda:path['benchmark_ready'].set())
+        if dc.readyState=='open':opened()
         # Separate channel and bounded independent state; never echo benchmark bytes.
         path['bench']=None
         @dc.on('message')
@@ -269,7 +281,7 @@ class Peer:
     def new_path(self,peer,profile,attempt,cid):
         if len(self.paths)>=96:raise ValueError('LIMIT_EXCEEDED')
         pc=RTCPeerConnection(RTCConfiguration(iceServers=self.ice))
-        path={'pc':pc,'peer':peer,'profile':profile,'attempt':attempt,'connectionId':cid,'files':{},'acks':{},'hello':False,'nonce':secrets.token_hex(32),'remote_nonce':None,'ack_sent':False,'ack_received':False,'hello_sent':False,'tasks':set(),'closing':False,'low':asyncio.Event(),'created':time.monotonic()}
+        path={'pc':pc,'peer':peer,'profile':profile,'attempt':attempt,'connectionId':cid,'files':{},'acks':{},'hello':False,'nonce':secrets.token_hex(32),'remote_nonce':None,'ack_sent':False,'ack_received':False,'hello_sent':False,'tasks':set(),'closing':False,'low':asyncio.Event(),'benchmark_ready':asyncio.Event(),'created':time.monotonic()}
         self.paths[attempt]=path
         @pc.on('connectionstatechange')
         async def changed():
@@ -376,33 +388,109 @@ class Peer:
                 # their identity until a new welcome explicitly replaces session.
                 self.ws=None
             if not self.closed:await asyncio.sleep(backoff);backoff=min(30,backoff*2)
-    async def close_path(self,path):
-        # aiortc.close owns a shared completion Future: cancellation must never
-        # propagate into it, including shutdown racing a channel-close callback.
+    CLOSE_TIMEOUT = 5.0
+
+    @staticmethod
+    def _consume_close_result(task):
+        # Retrieving an exception is not declaring success: errors are re-raised
+        # by the owning close operation and timeout residuals are reported.
+        if not task.cancelled():
+            task.exception()
+
+    async def _close_wait(self, tasks, deadline, phase, *, required):
+        tasks = set(tasks)
+        required = set(required)
+        if not required <= tasks:
+            raise ValueError('REQUIRED_CLOSE_TASK_NOT_TRACKED')
+        if not tasks:
+            return
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        done, pending = await asyncio.wait(tasks, timeout=remaining)
+        errors = []
+        for task in done:
+            if task.cancelled():
+                if task in required:
+                    errors.append(RuntimeError('P2P_CLOSE_CANCELLED:' + phase))
+            elif task.exception() is not None:
+                errors.append(task.exception())
+        if pending:
+            import sys
+            # Enumerated phase/count only; never repr(task), locals, URL or SDP.
+            print('P2P_CLOSE_TIMEOUT phase=%s pending=%d' % (phase, len(pending)),
+                  file=sys.stderr, flush=True)
+            errors.append(TimeoutError('P2P_CLOSE_TIMEOUT:' + phase))
+        if errors:
+            raise BaseExceptionGroup('P2P close failed: ' + phase, errors)
+
+    async def close_path(self, path):
         if 'cleanup_task' not in path:
-            path['cleanup_task']=asyncio.create_task(self._close_path(path))
+            path['cleanup_deadline'] = min(asyncio.get_running_loop().time() + self.CLOSE_TIMEOUT, getattr(self, '_shutdown_deadline', float('inf')))
+            path['cleanup_task'] = asyncio.create_task(self._close_path(path))
+            path['cleanup_task'].add_done_callback(self._consume_close_result)
+        # Callers must not cancel the shared cleanup or aiortc's shared close
+        # Future. _close_path itself observes an absolute deadline.
         if asyncio.current_task() is not path['cleanup_task']:
             await asyncio.shield(path['cleanup_task'])
-    async def _close_path(self,path):
-        path['closing']=True;path['hello']=False;path['low'].set()
-        for fid in list(path['files']):self.release_file(path,fid)
+
+    async def _close_path(self, path):
+        path['closing'] = True
+        path['hello'] = False
+        path['low'].set()
+        path['benchmark_ready'].set()
+        for fid in list(path['files']):
+            self.release_file(path, fid)
         for pending in path['acks'].values():
-            for name in ('ready','ack'):
-                if not pending[name].done():pending[name].cancel()
-        current=asyncio.current_task();tasks=[t for t in path['tasks'] if t is not current]
-        signaling=self.signal_tasks.get(path['attempt'])
-        if signaling and signaling is not current:tasks.append(signaling)
-        for task in tasks:task.cancel()
-        await asyncio.gather(*tasks,return_exceptions=True)
-        await path['pc'].close();self.event('path.state',{'state':'closed','reason':'CLOSED'},path)
+            for name in ('ready', 'ack'):
+                if not pending[name].done():
+                    pending[name].cancel()
+        current = asyncio.current_task()
+        tasks = {t for t in path['tasks'] if t is not current}
+        signaling = self.signal_tasks.get(path['attempt'])
+        if signaling and signaling is not current:
+            tasks.add(signaling)
+        for task in tasks:
+            task.cancel()
+        # Start transport shutdown before waiting for cancelled workers. A worker
+        # blocked on I/O must not prevent the operation which releases its I/O.
+        path['rtc_close_task'] = asyncio.create_task(close_rtc(path['pc']))
+        path['rtc_close_task'].add_done_callback(self._consume_close_result)
+        tasks.add(path['rtc_close_task'])
+        await self._close_wait(tasks, path['cleanup_deadline'], 'path.workers_rtc', required={path['rtc_close_task']})
+        self.event('path.state', {'state':'closed','reason':'CLOSED'}, path)
+
     async def close(self):
-        if self.closed:return
-        self.closed=True
-        if self.ws and not self.ws.closed:await self.ws.close()
-        for task in list(self.tasks):task.cancel()
-        await asyncio.gather(*self.tasks,return_exceptions=True)
-        await asyncio.gather(*(self.close_path(p) for p in self.paths.values()),return_exceptions=True)
-        self.secret='';self.store.close()
+        # Idempotence includes failure: concurrent/repeated callers see the same
+        # result rather than returning early because `closed` was already set.
+        if not hasattr(self, '_shutdown_task'):
+            self.closed = True
+            self._shutdown_deadline = asyncio.get_running_loop().time() + self.CLOSE_TIMEOUT
+            self._shutdown_task = asyncio.create_task(self._shutdown())
+            self._shutdown_task.add_done_callback(self._consume_close_result)
+        await asyncio.shield(self._shutdown_task)
+
+    async def _shutdown(self):
+        tasks = set(self.tasks)
+        required = set()
+        for task in tasks:
+            task.cancel()
+        # Close BOTH control and data I/O without serially waiting on WS first.
+        # All child operations share the peer-level deadline.
+        if self.ws and not self.ws.closed:
+            self._ws_close_task = asyncio.create_task(self.ws.close())
+            self._ws_close_task.add_done_callback(self._consume_close_result)
+            tasks.add(self._ws_close_task)
+            required.add(self._ws_close_task)
+        for path in list(self.paths.values()):
+            closer = asyncio.create_task(self.close_path(path))
+            closer.add_done_callback(self._consume_close_result)
+            tasks.add(closer)
+            required.add(closer)
+        try:
+            await self._close_wait(tasks, self._shutdown_deadline, 'peer.workers_ws_paths', required=required)
+        finally:
+            self.secret = ''
+            self.store.close()
+
 
 async def main(args):
     peer=Peer(args.server,args.room,Path(args.secret_file).read_text().strip(),args.name,args.logs,echo=True,origin=args.origin)

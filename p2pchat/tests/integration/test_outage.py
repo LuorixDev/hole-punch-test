@@ -1,5 +1,7 @@
 """Real local sockets: one-sided roster loss then 60s two-sided control outage."""
 import asyncio
+import sys
+from p2pchat.tests.backend.cleanup import cleanup_peers
 import hashlib
 import secrets
 import time
@@ -45,6 +47,4 @@ async def test_control_outage_keeps_authenticated_data_and_replays_logs(tmp_path
         rows=app['store'].db.execute('SELECT scope,session,id,count(*) FROM diagnostics GROUP BY scope,session,id HAVING count(*)>1').fetchall();assert not rows
         await a.close();assert all(p['closing'] for p in a.paths.values())
     finally:
-        await asyncio.gather(a.close(),b.close())
-        for task in tasks:task.cancel()
-        await asyncio.gather(*tasks,return_exceptions=True);await runner.cleanup()
+        await cleanup_peers((a,b),tasks,runner,sys.exception())

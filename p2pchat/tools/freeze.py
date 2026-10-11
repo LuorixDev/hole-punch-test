@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+CI_ALLOWLIST=('ci/windows-analysis/diagnostic_runner.py',)
 ROOT_FILES={'README.md','PLATFORMS.md','__init__.py','server.py','peer.py','requirements.txt','requirements-lock.txt','package.json','package-lock.json','capacitor.config.json','electron-builder.yml'}
 SOURCE_DIRS={'web','backend','native','desktop','tools','tests','docs'}
 SKIP={'__pycache__','.pytest_cache','.gradle','build','node_modules'}
@@ -26,6 +27,6 @@ def main():
     if args.verify:
         saved=json.loads(target.read_text());current=snapshot();assert current==saved['sourceHashes'],'SOURCE_FREEZE_CHANGED';print('SOURCE_FREEZE_VERIFIED',saved['treeSha256'],len(current));return
     hashes=snapshot();tree=hashlib.sha256(json.dumps(hashes,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-    manifest={'scope':'p2pchat explicit source only; .github reviewed separately by captain','treeSha256':tree,'sourceHashes':hashes,'excluded':['data','media','logs','pcap','screenshots','releases','platform/build','platform/work','node_modules','dist-web','android/app/src/main/assets','research outputs'],'uploadAllowlist':['p2pchat/'+p for p in hashes]}
+    manifest={'scope':'p2pchat explicit source only; .github reviewed separately by captain','treeSha256':tree,'sourceHashes':hashes,'excluded':['data','media','logs','pcap','screenshots','releases','platform/build','platform/work','node_modules','dist-web','android/app/src/main/assets','ci/windows-analysis except explicit ciUploadAllowlist','review','verification','research outputs'],'uploadAllowlist':['p2pchat/'+p for p in hashes], 'ciUploadAllowlist':['p2pchat/'+p for p in CI_ALLOWLIST], 'ciSourceHashes':{p:sha(ROOT/p) for p in CI_ALLOWLIST}, 'ciScope':'Only the previously reviewed diagnostic runner; workflow/watchdog review remains captain-owned. Never upload windows-analysis snapshots, proposals, patches, logs or runtime evidence.'}
     target.write_text(json.dumps(manifest,indent=2)+'\n');print('SOURCE_FREEZE_CREATED',tree,len(hashes))
 if __name__=='__main__':main()

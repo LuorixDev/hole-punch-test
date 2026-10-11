@@ -1,6 +1,12 @@
 # Client platform evidence and build instructions
 
-## Evidence boundary (2026-10-11)
+## Current integration status (t24, 2026-10-11)
+
+**Windows修复待当前commit CI确认 / Windows close fix awaits CI on the new commit.** Current complete source and rebuilt Linux artifact hashes are in [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) and [FREEZE](docs/FREEZE.json). This integrates t22+t25 reviewed by [T26](review/windows/T26.md), plus the delivery documentation; it is not the old 8687adf snapshot. Linux implementation tests (72) and independent close-focused review tests (33) passed. The narrow workaround only applies to win32/CPython3.12.10/aiortc1.15.0/aioice0.10.2 and owned Proactor UDP transports; Linux simulated coverage is **not** Windows IOCP validation.
+
+Historical a1c6e7e/run38124339483 built Linux/Android, but Windows diagnostic timed out at90s (exit124), before packaging; the await chain reached aioice StunProtocol.close. New Windows gates must run the original two-echo diagnostic, all tests, and native packaging without skipping failure. Current commit/run are pending captain push. Android/Windows interactive device, microphone, home NAT and real gateways remain NOT_RUN. See [integration delta](docs/WINDOWS-INTEGRATION.md).
+
+## Earlier platform implementation evidence (not current CI certification)
 
 | Platform | Source | Local build | Launch / hardware |
 |---|---|---|---|
@@ -16,7 +22,7 @@ The shared UI provides server address, room/shared-secret settings, text/image/f
 
 Android loads local assets from `https://localhost`; cleartext traffic and mixed content are disabled, no trust-all certificate hook exists. Use a valid HTTPS/WSS signaling certificate. Default WebView TLS errors remain rejected. External navigation is blocked. Desktop loads the exact packaged file, blocks navigation/new windows/webviews, uses `sandbox:true`, `contextIsolation:true`, `nodeIntegration:false`, web security enabled. Its WSS Origin is `null`, so operators must explicitly configure `--origin null` if enabling desktop clients; this value is **not authentication**. Android origin allowlist is exactly `https://localhost`. Room secret/HMAC remains independently required. Never use wildcard origins.
 
-Android has **no Python/native networking adapter**: UDP-probe, QUIC, TCP, TCP simultaneous-open, UPnP, PCP and NAT-PMP each report `unsupported / ANDROID_NATIVE_ADAPTER_NOT_IMPLEMENTED`; no mock-success path. WebRTC availability depends on Android System WebView and real device tests. No foreground service, wake-lock, background execution or battery-optimization exemption is implemented. Screen-off/Doze/process death may terminate signaling/transfers; no background delivery promise. On network changes users must reconnect/re-discover with new attempts; never call the old path verified on a new network. WebView IndexedDB persists locally but uninstall/clear-data removes diagnostics.
+Android has **no Python/native networking adapter**: UDP-probe, QUIC, TCP, TCP simultaneous-open, UPnP, PCP and NAT-PMP each report `unsupported / ANDROID_NATIVE_ADAPTER_NOT_IMPLEMENTED`; no mock-success path. WebRTC availability depends on Android System WebView and real device tests. No foreground service, wake-lock, background execution or battery-optimization exemption is implemented. Screen-off/Doze/process death may terminate signaling/transfers; no background delivery promise. Native pause/resume/network signals now stop tracked recording streams and clear old paths/ACKs; resume/network changes debounce and rebuild new attempts with a bounded budget. Users manually reconnect when that budget is exhausted; this source/mock coverage is not physical Android lifecycle proof. WebView IndexedDB persists locally but uninstall/clear-data removes diagnostics.
 
 ## Restricted desktop bridge
 

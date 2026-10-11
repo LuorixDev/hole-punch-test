@@ -1,9 +1,10 @@
 {
-  "round": 3,
-  "sourceTreeSha256": "8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388",
-  "sourceFileCount": 129,
-  "sourceManifestSha256": "1173efbab49cfb3156d1d5df3bbaa2e5c003ec0a5759082186671251f13ac52e",
-  "packageTreeSha256": "b0c9f7aae146f8ee852a30f2fcf7ebe25e4f16e55748dd9fd046a63ac49e9227",
+  "revision": "t24-windows-close-reviewed",
+  "previousVerifiedSourceTreeSha256": "8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388",
+  "sourceTreeSha256": "cfe56456bea2bff6dede08753ca348e6b3450d48b637406f216d4cf644ea52b4",
+  "sourceFileCount": 135,
+  "sourceManifestSha256": "b5dd9e3f4f0d65ca149eaeb5c1b7676666274a7036b1cdb74c8465fed96e5dad",
+  "packageTreeSha256": "5386fc09e861ab7d3056601da27169a9af582ae947175a5c79eb473f49b340ec",
   "packageFileCount": 109,
   "artifactSha256": {
     "releases/linux-unpacked/p2p-observatory-chat": "10a14d05c6ff4f94075cfb3eeb6ed6571be33ebcc08cbd675b5ce9ff84706564",
@@ -13,17 +14,24 @@
     "requirements-lock.txt": "e8a8f0a6b1dbf627b99353c4e42aeb2add5859bfa0594d0c0959e295bf75c9bd"
   },
   "tests": {
-    "python": "58 passed, 8 AppKey warnings, 80.37s",
-    "nodeClientPlatform": "34 passed",
-    "nodeRealNativeIntegration": "4 passed",
+    "t25ImplementationLinuxPython": "72 passed (dependency evidence; not rerun by t24)",
+    "t26IndependentLinuxReview": "33 passed; W1 resolved (dependency evidence)",
+    "t24ReviewedTargetHashes": "4 files matched T26",
     "syncWeb": "passed",
     "linuxBuild": "passed",
     "linuxSandboxSmoke": "passed",
-    "nativeManifestMatches": "passed"
+    "nativeManifestMatches": "passed",
+    "uploadAllowlistAudit": "135 source files; diagnostic runner separately allowed; snapshots/patches/logs excluded"
   },
+  "windowsStatus": "Windows修复待当前commit CI确认",
+  "requiredWindowsGates": [
+    "original two-echo 90-second diagnostic",
+    "full tests",
+    "native build and portable packaging"
+  ],
   "notRun": [
-    "Android lifecycle/recording real device",
-    "Windows runtime/microphone",
+    "current Windows IOCP candidate verification",
+    "Android/Windows interactive device and microphone",
     "real residential NAT",
     "real gateway devices"
   ],
