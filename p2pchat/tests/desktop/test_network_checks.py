@@ -388,3 +388,175 @@ def test_settings_panel_exposes_the_entry_point_and_renders_rows(qt_app):
         assert window.gateway_line.text() and window.lan_line.text() and window.prediction_line.text()
     finally:
         _destroy_window(window, qt_app)
+
+
+# ----------------------------- v6-reach 结论帧的分发（t62：权威结论不得被静默丢弃）
+class FakeWsMessage:
+    def __init__(self, payload):
+        from aiohttp import WSMsgType
+
+        self.type = WSMsgType.TEXT
+        self.data = json.dumps(payload)
+
+
+class FakeWs:
+    """Yields scripted server frames, then ends the stream."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.sent = []
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.frames:
+            raise StopAsyncIteration
+        return FakeWsMessage(self.frames.pop(0))
+
+    async def send_json(self, frame):
+        self.sent.append(frame)
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeClientSession:
+    def __init__(self, ws):
+        self.ws = ws
+
+    async def ws_connect(self, url, **kwargs):
+        return self.ws
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def session_with_frames(monkeypatch, frames):
+    """Drive the real SignalSession.run() dispatch with scripted frames."""
+    from p2pchat.python_desktop import signal_session as session_module
+    from p2pchat.python_desktop.signal_session import SignalSession
+
+    ws = FakeWs(frames)
+
+    async def fake_join(sock, room, secret, name, session_id, capabilities):
+        return None
+
+    monkeypatch.setattr(session_module, "join_v2", fake_join)
+    session = SignalSession("ws://127.0.0.1:1/ws", "room", "s" * 16, "tester", ("webrtc",),
+                            "client-session-0001", factory=lambda: FakeClientSession(ws))
+    return session, ws
+
+
+async def run_frames(session, predicate, timeout=5.0):
+    import contextlib
+
+    task = asyncio.ensure_future(session.run())
+    try:
+        async with asyncio.timeout(timeout):
+            while not predicate():
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await session.close()
+
+
+def result_frame(code, *, token="one-time-token", verdict=None):
+    frame = {"v": 1, "type": "v6-reach-result", "code": code, "ok": code == "REACHABLE",
+             "connectionId": str(uuid.uuid4()), "attemptId": str(uuid.uuid4()), "token": token}
+    if verdict is not None:
+        frame["verdict"] = verdict
+    return frame
+
+
+@pytest.mark.asyncio
+async def test_signal_session_dispatches_every_authoritative_result_code(monkeypatch):
+    codes = ("CONNECTION_REFUSED", "TOKEN_MISMATCH", "REJECTED_BY_POLICY", "SOMETHING_NEW")
+    received = []
+    session, _ = session_with_frames(monkeypatch, [result_frame(code, token=f"t-{code}") for code in codes])
+    session.on_v6_reach_result = lambda frame: received.append(dict(frame))
+    await run_frames(session, lambda: len(received) == len(codes))
+    assert [frame["code"] for frame in received] == list(codes), "一帧都不许丢"
+    assert session.dropped_frames == [] and session.hook_errors == []
+    assert session.dropped_frame_count == 0 and session.hook_error_count == 0
+
+    # 经 t58 语义（code 权威）与展示层：只允许「已判定/拒绝/看不懂」，绝不是成功或超时
+    mapped = []
+    for frame in received:
+        try:
+            verdict = reach.parse_reach_verdict(frame, token=frame["token"])["verdict"]
+        except reach.ReachError:
+            verdict = reach.RESULT_UNRECOGNIZED
+        word, text = engine_module.V6_VERDICT_TEXT[verdict]
+        assert word in {"已判定", "拒绝", "看不懂"}, (frame["code"], word)
+        assert "回连成功" not in text and "入站可达" not in text, frame["code"]
+        assert "没有观测到回连" not in text, frame["code"]  # 不许折成 TIMEOUT
+        mapped.append((frame["code"], word))
+    assert mapped == [("CONNECTION_REFUSED", "已判定"), ("TOKEN_MISMATCH", "拒绝"),
+                      ("REJECTED_BY_POLICY", "拒绝"), ("SOMETHING_NEW", "看不懂")]
+
+
+@pytest.mark.asyncio
+async def test_signal_session_records_a_missing_hook_instead_of_dropping_silently(monkeypatch):
+    connection_id, attempt_id = str(uuid.uuid4()), str(uuid.uuid4())
+    frames = [{"v": 1, "type": "v6-reach-result", "code": "CONNECTION_REFUSED", "ok": False,
+               "connectionId": connection_id, "attemptId": attempt_id, "token": "t-1"},
+              {"v": 1, "type": "signal", "from": "peer-2", "attemptId": attempt_id}]
+    session, _ = session_with_frames(monkeypatch, frames)   # 故意不装 on_v6_reach_result
+    signals = []
+    session.on_signal = signals.append
+    await run_frames(session, lambda: bool(session.dropped_frames) and bool(signals))
+    assert session.dropped_frames == ["v6-reach-result"] and session.dropped_frame_count == 1
+    assert session.hook_errors == [] and session.hook_error_count == 0
+    assert signals[0]["type"] == "signal", "会话没崩：后续帧照常分发"
+
+
+@pytest.mark.asyncio
+async def test_signal_session_keeps_a_failing_hook_distinct_from_a_dropped_frame(monkeypatch):
+    session, _ = session_with_frames(monkeypatch, [result_frame("TOKEN_MISMATCH")])
+    seen = []
+
+    def raising(frame):
+        seen.append(dict(frame))
+        raise RuntimeError("hook blew up")
+
+    session.on_v6_reach_result = raising
+    await run_frames(session, lambda: bool(session.hook_errors))
+    assert seen and seen[0]["code"] == "TOKEN_MISMATCH", "帧确实到达过 hook"
+    assert session.hook_errors == [{"type": "v6-reach-result", "error": "RuntimeError"}]
+    assert session.dropped_frames == [] and session.dropped_frame_count == 0
+    assert session.hook_error_count == 1, "异常与丢弃必须区分开"
+
+
+@pytest.mark.asyncio
+async def test_the_engine_hook_receives_the_dispatch_through_the_session(monkeypatch):
+    """把 t53 装好的 hook 接在会话上，结论必须一路到达引擎（不再停在会话里）。"""
+    engine = make_engine()
+    session, _ = session_with_frames(monkeypatch, [result_frame("CONNECTION_REFUSED")])
+    session.on_v6_reach_result = engine.on_v6_reach_frame   # engine.start() 就是这么装的
+
+    async def start():
+        task = asyncio.ensure_future(session.run())
+        engine._v6_result_future = asyncio.get_running_loop().create_future()
+        try:
+            async with asyncio.timeout(5):
+                while not engine._v6_result_future.done():
+                    await asyncio.sleep(0.01)
+            return engine._v6_result_future.result()
+        finally:
+            task.cancel()
+            import contextlib
+
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await session.close()
+
+    delivered = await start()
+    assert delivered["code"] == "CONNECTION_REFUSED" and delivered["ok"] is False
+    assert session.dropped_frames == [] and session.hook_errors == []

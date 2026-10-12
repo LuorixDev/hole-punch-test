@@ -57,6 +57,36 @@ class SignalSession:
         self.on_signal = None
         self.on_nat_samples = None
         self.on_error = None
+        # 服务器的 v6-reach 权威结论（连接被拒/token 不符/策略拒绝/看不懂）走这个 hook。
+        self.on_v6_reach_result = None
+        # 结论要么进 hook，要么被明确记为“丢弃”，hook 抛错则单独记为“异常”：
+        # 三者必须可区分，否则拒绝类结论会被静默吞掉（t62 修的就是这个）。
+        self.dropped_frames = []
+        self.hook_errors = []
+        self.dropped_frame_count = 0
+        self.hook_error_count = 0
+
+    def _record_dropped_frame(self, frame_type: str) -> None:
+        """Bounded, inspectable record of a frame that had nowhere to go."""
+        self.dropped_frame_count += 1
+        self.dropped_frames.append(str(frame_type)[:64])
+        del self.dropped_frames[:-8]
+
+    def _record_hook_error(self, frame_type: str, error: BaseException) -> None:
+        """Bounded record of a hook failure: the frame *did* arrive, so this is not a drop."""
+        self.hook_error_count += 1
+        self.hook_errors.append({"type": str(frame_type)[:64], "error": type(error).__name__})
+        del self.hook_errors[:-8]
+
+    def _dispatch_v6_reach_result(self, data: dict) -> None:
+        """Hand the server's authoritative conclusion to the hook (never silently)."""
+        if self.on_v6_reach_result is None:
+            self._record_dropped_frame(data.get("type", "v6-reach-result"))
+            return
+        try:
+            self.on_v6_reach_result(data)
+        except Exception as error:  # 保持既有风格：hook 异常不让会话崩，但会被记录
+            self._record_hook_error(data.get("type", "v6-reach-result"), error)
 
     def _enqueue(self, frame: dict) -> None:
         if json.dumps(frame).encode().__len__() > MAX_MESSAGE_BYTES - 512:
@@ -124,6 +154,10 @@ class SignalSession:
                                         self.on_nat_samples(data)
                                     except Exception:
                                         pass
+                            elif data.get("type") == "v6-reach-result":
+                                # 服务器对 IPv6 入站回连的权威结论（含“连接被拒/token 不符/
+                                # 策略拒绝/看不懂”）：必须分发到 hook，绝不静默丢弃。
+                                self._dispatch_v6_reach_result(data)
                             elif data.get("type") == "error":
                                 if self.on_error is not None:
                                     self.on_error(str(data.get("code")))
