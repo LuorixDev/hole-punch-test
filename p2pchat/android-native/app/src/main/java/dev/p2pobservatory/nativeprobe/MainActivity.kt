@@ -67,7 +67,7 @@ class MainActivity : Activity(), SignalingClient.Listener, PathRunner.Listener, 
             // 算法自检失败就当场说出来，不要静默发一个假证明。
             diagnostics.emit("client.error", JSONObject().put("code", "INTEGRITY_FAILED").put("detail", failure))
         }
-        peerFactory = PeerConnectionFactory.builder().createPeerConnectionFactory()
+        peerFactory = RtcBootstrap.newFactory(this)
         runner = PathRunner(diagnostics, this)
         recorder = VoiceRecorder(this)
         discovery = LanDiscovery(this)
