@@ -3,11 +3,91 @@
 Two equivalent signaling transports share one App/Store/room/auth code path:
 WebSocket (`/ws`) and HTTP POST + SSE (`/signal/join`, `/signal`, `/signal/events`).
 Neither transport relays chat/file/voice data; both reject TURN.
+
+复盘导出（本地 CLI，只读 + 脱敏 + 有界）
+------------------------------------
+`python -m p2pchat.server --export-session <clientSessionId> --data <dir> [--export-attempt <id>]
+ [--export-out file] [--export-format jsonl|text] [--export-limit N] [--export-max-bytes N]
+ [--export-include-addresses]`
+
+* 把**服务端自己记的事件**与**各客户端上报的事件**合并成一条时间线（按服务端接收时间，
+  再按 rowid 稳定排序：流式、可重复；事件自报的 tsWallMs/monoMs/seq 原样保留，
+  跨端时钟乱序不会打乱同一来源的 seq 顺序）。
+* 默认脱敏：密钥/token/proof/凭据/证书私钥、聊天正文/文件名/显示名一律 `[redacted]`（键保留，
+  显式标记）；IP 只保留前缀（IPv6 /32、IPv4 /24），要完整地址必须显式 `--export-include-addresses`
+  （对应客户端的 fullAddressShared 同意）。
+* 有界：`--export-limit`（默认 5000 条）与 `--export-max-bytes`（默认 2 MiB）超出即截断并在
+  尾部 summary 标注；全程流式写出，不把整个会话读进内存。
+* 入口只有这个本地 CLI：**不绑定端口、不加 HTTP 路由**（默认不暴露到公网），也不引入任何中继/
+  转发路径。导出动作本身写一条中心日志 `export.session`（谁、何时、哪个会话、导了多少行/字节）。
+* 失败给稳定原因码：`EXPORT_TARGET_REQUIRED` / `EXPORT_FORMAT_INVALID` / `NO_SUCH_SESSION` /
+  `NO_SUCH_ATTEMPT`，退出码 2。
+
+受控 IPv6 入站回连验证（线上名 `v6-reach`，与 native/ipv6_reach.py 逐字对齐）
+----------------------------------------
+用途：客户端在本机开一个 HTTP 服务、自己知道自己的全局 IPv6（注意监听地址与临时地址
+的区别），但**是否被入站防火墙放行**只有从外面连一次才知道。它经信令把地址/端口/一次性
+token 交上来并显式请求后，服务器才替它回连一次（默认 HTTP），把结论回报并写中心日志。
+
+这是服务器**主动发起连接**的能力，默认关闭，且边界是硬的：
+
+* **双侧 opt-in**：服务器要 `--allow-inbound-check`（配置 `inboundCheckEnabled`），客户端
+  要 `request: true`。任何一侧没开都只回 `REJECTED_BY_POLICY`（`reason=FEATURE_DISABLED`／
+  `NOT_OPT_IN`），不发任何出站连接。
+* **目标白名单**：消息里同时带上目标与一次性 token 才会触发回连。主路径是客户端 offer
+  （字段与 native/ipv6_reach.py 的 `OFFER_FIELDS` 一致）：
+  `{'v':1,'type':'v6-reach','connectionId':…,'attemptId':…,'session':…,'address':<全局 IPv6>,
+    'addressType':…,'scope':…,'prefixLength':…,'port':…,'token':<48hex>,'mechanism':'ipv6-inbound',
+    'expiresInMs':…,'fullAddressShared':bool}`，token 由客户端生成、一次性、短时效（服务器只把它
+  原样带进那一次回连；同一 token 在同会话重放一律拒绝）。替代模式：不带 token 但显式
+  `'request':true` ⇒ 服务器下发一次性 token（`v6-reach-challenge`），回连时带回来即可。
+  既没有 token 又没有 `request:true` ⇒ `REJECTED_BY_POLICY(reason=NOT_OPT_IN)`。
+  只允许**全局 IPv6 单播**（`ipaddress.ip_address(...).is_global`），且拒绝未指定、组播、
+  IPv4-mapped、带 scope 的地址；环回/链路本地/ULA(私网) 默认也拒绝——只有操作者用
+  `inboundCheckAllowPrefixes`（CLI `--allow-inbound-check-prefix`，可重复）显式放行的前缀
+  例外（实验室/自测用，启动时会大声警告）。端口默认必须 ≥1024。
+  单次检查**只连这一个地址与端口**：不扫描、不换端口、不跟随重定向、不用 DNS（地址必须是
+  字面 IP）、不经环境里的代理（`trust_env=False`）、不带任何房间密钥/凭据。
+* **一次性且短时效的 token**：两种模式都是一次性、短时效、且绑定到 (会话, 地址, 端口)：
+  客户端自带 token 用 offer 里的 `expiresInMs`（钳到 ≤5s）当重放窗口，服务器下发的 token
+  默认 5 秒过期；重放/过期/换目标给 `REJECTED_BY_POLICY`（`reason=TOKEN_REUSED`/`TOKEN_EXPIRED`/
+  `TARGET_NOT_DECLARED`）。token 只出现在发给目标的那次 HTTP 请求里，**回报与日志里都没有**。
+* **有界**：单次尝试、总超时 ≤5 秒（默认 4 秒）、响应体最多读 4 KiB；每会话默认 1 次检查
+  （`maxInboundChecksPerSession`）、每会话最多 4 次挑战、全局在飞上限 2
+  （`maxInboundCheckInflight`）、未决 token 上限 `maxInboundCheckTokens`。
+
+结论只有这六个，且**不重叠**（任何非 REACHABLE 都不算成功，`ok` 只在 REACHABLE 为真）：
+
+============================  ==========================================
+`REACHABLE`                   2xx 且 204 空体或带回了本次 token（附 `elapsedMs`）
+`TIMEOUT`                     到点没拿到可用响应（防火墙丢包/接受后不响应）
+`CONNECTION_REFUSED`          TCP 被拒（没人监听）
+`UNREACHABLE_NO_ROUTE`        无 v6 路由/地址不可用（ENETUNREACH/EHOSTUNREACH/…）
+`TOKEN_MISMATCH`              有人应答但没能确认本次 token
+`REJECTED_BY_POLICY`          策略/限次/opt-in/token 问题（`reason` 给出细分）
+============================  ==========================================
+
+中心日志用既有白名单字段记录（同一判决在 (state, reason) 上互不相同，`ok` 只在 REACHABLE
+为真，`family=6`，可按会话/attempt 关联）：
+`REACHABLE→(completed,-)`、`TIMEOUT→(timeout,TIMEOUT)`、
+`CONNECTION_REFUSED→(failed,CLOSED)`、`UNREACHABLE_NO_ROUTE→(failed,ENDPOINT_UNOBSERVABLE)`、
+`TOKEN_MISMATCH→(failed,AUTH_FAILED)`、`REJECTED_BY_POLICY→(unsupported,SCHEMA_INVALID)`。
+
+回报字段与客户端解析器（`RESULT_FIELDS`）对齐，只多 `code`（本服务端权威结论，六选一）与
+`ok`（只有 REACHABLE 为真）；`failureCode` 优先给细分原因，`verdict` 只在客户端词表里有**诚实**
+对应项时才填（REACHABLE→`REACHED_BY_SERVER`、TIMEOUT、UNREACHABLE_NO_ROUTE→`NO_V6_ROUTE`）。
+连接被拒 / token 不符 / 策略拒绝在客户端词表里没有对应项 ⇒ 不填 `verdict`，只留 `code` 与
+`failureCode`：宁可让对端报"看不懂"，也不把拒绝写成超时或不可达（客户端词表若要覆盖这三种，
+需要它自己扩 `VERDICTS`）。
+
+这**不是**中继：它只对客户端自己声明的 HTTP 端点做一次可达性探测，不转发任何聊天/文件/
+语音内容，也不替第三方探测。
 """
 from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import errno
 import hashlib
 import hmac
 import ipaddress
@@ -16,12 +96,16 @@ import logging
 import re
 import secrets
 import socket
+import sqlite3
+import sys
 import ssl
 import struct
 import time
 from pathlib import Path
+import aiohttp
 from aiohttp import web, WSMsgType
-from p2pchat.backend.telemetry import Store, room_directory
+from p2pchat.backend.telemetry import (EXPORT_MAX_BYTES_DEFAULT, EXPORT_LIMIT_DEFAULT,
+                                       Store, export_session, room_directory)
 from p2pchat.backend.protocol import MECHANISMS, PROFILES, ProtocolError, check, fields, join, signal, string, uid
 
 BASE=Path(__file__).resolve().parent
@@ -54,6 +138,74 @@ HTTP_STATUS={'SCHEMA_INVALID':400,'AUTH_FAILED':401,'RELAY_FORBIDDEN':403,'LIMIT
              'ROOM_EXPIRED':410,'PEER_UNAVAILABLE':404,'ATTEMPT_CONFLICT':409,'TIMEOUT':408,
              'UNSUPPORTED_VERSION':400,'EVENT_CONFLICT':409}
 def error_code(exc):return str(exc) if str(exc) in ERROR_CODES else 'SCHEMA_INVALID'
+
+# ---------------------------------------------------------------------------
+# 受控 IPv6 入站回连验证：常量、判决到中心日志的投影、errno 分类
+# ---------------------------------------------------------------------------
+# 线上名字与客户端侧实现（p2pchat/native/ipv6_reach.py）逐字对齐：
+#   SIGNAL_TYPE='v6-reach' / SIGNAL_RESULT_TYPE='v6-reach-result' / REACH_PATH='/p2p-reach'
+# 'inbound-check' 作为同义别名保留（老文档/自测用），语义完全一致，不是第二套协议。
+INBOUND_CHECK='v6-reach'
+INBOUND_CHECK_ALIASES={'v6-reach','inbound-check'}
+INBOUND_CHECK_RESULT='v6-reach-result'
+INBOUND_CHECK_CHALLENGE='v6-reach-challenge'
+INBOUND_CHECK_PATH='/p2p-reach'
+INBOUND_CHECK_OFFER_FIELDS={'v','type','connectionId','attemptId','session','address','addressType',
+                            'scope','prefixLength','port','token','mechanism','expiresInMs','fullAddressShared'}
+INBOUND_CHECK_ADDRESS_TYPES={'stable','temporary','unverified','link-local','loopback','ula','multicast','unspecified','other'}
+# 客户端的 verdict 词表只有这三种能被服务端观测到的结论对应得上；其余三种（连接被拒/
+# token 不符/策略拒绝）在它的词表里**没有诚实对应项**，因此只填 code/failureCode，绝不硬套。
+INBOUND_CHECK_CLIENT_VERDICT={'REACHABLE':'REACHED_BY_SERVER','TIMEOUT':'TIMEOUT',
+                              'UNREACHABLE_NO_ROUTE':'NO_V6_ROUTE'}
+INBOUND_CHECK_NOTES={'REACHABLE':'服务器回连成功并收到本次 token',
+                     'TIMEOUT':'到点没有可用响应（可能被入站防火墙丢弃）',
+                     'CONNECTION_REFUSED':'目标端口拒绝连接（本机没有监听）',
+                     'UNREACHABLE_NO_ROUTE':'没有到达该 IPv6 地址的路由',
+                     'TOKEN_MISMATCH':'有人应答但没有给出本次 token',
+                     'REJECTED_BY_POLICY':'按策略/限次拒绝，未发起任何出站连接'}
+INBOUND_CHECK_USER_AGENT='p2pchat-inbound-check/1'
+INBOUND_CHECK_MAX_TIMEOUT=5.0
+INBOUND_CHECK_MAX_BODY=4096
+INBOUND_CHECK_MIN_PORT=1024
+INBOUND_CHECK_VERDICTS=('REACHABLE','TIMEOUT','CONNECTION_REFUSED','UNREACHABLE_NO_ROUTE','TOKEN_MISMATCH','REJECTED_BY_POLICY')
+# 六种判决在中心日志的既有白名单字段里各占一个不同的 (state, reason)，绝不重叠。
+INBOUND_CHECK_LOG={
+ 'REACHABLE':('completed',None),
+ 'TIMEOUT':('timeout','TIMEOUT'),
+ 'CONNECTION_REFUSED':('failed','CLOSED'),
+ 'UNREACHABLE_NO_ROUTE':('failed','ENDPOINT_UNOBSERVABLE'),
+ 'TOKEN_MISMATCH':('failed','AUTH_FAILED'),
+ 'REJECTED_BY_POLICY':('unsupported','SCHEMA_INVALID'),
+}
+def _errnos(*names):
+    """跨平台收集 errno 常量（Windows 用 WSAxxx；缺哪个就跳过哪个）。"""
+    return {getattr(errno,name) for name in names if getattr(errno,name,None) is not None}
+REFUSED_ERRNOS=_errnos('ECONNREFUSED','WSAECONNREFUSED')
+NO_ROUTE_ERRNOS=_errnos('ENETUNREACH','EHOSTUNREACH','ENETDOWN','EADDRNOTAVAIL','EAFNOSUPPORT',
+                        'WSAENETUNREACH','WSAEHOSTUNREACH','WSAEADDRNOTAVAIL')
+def inbound_result_payload(verdict,port,reason=None,detail=None,rtt_ms=None,
+                           connection_id=None,attempt_id=None,address_type=None):
+    """回报请求方：结论 + 可关联字段 + 人话说明；永不带 token/密钥/响应体内容。
+
+    字段与客户端解析器（native/ipv6_reach.py 的 RESULT_FIELDS）对齐，只多两个：
+    `code`（本服务端权威结论，六选一）与 `ok`（只有 REACHABLE 为真）。
+    `failureCode` 优先给**细分原因**（TOKEN_REUSED/SESSION_LIMIT/... 或底层原因），
+    没有细分时回落到 `code`；`verdict` 只在客户端词表里有诚实对应项时才填，
+    连接被拒/token 不符/策略拒绝没有对应项就不填 —— 宁可让对端说"看不懂"，
+    也不把拒绝写成超时或不可达。回连目标地址不回带（是否记录全地址由客户端自己决定）。
+    """
+    payload={'v':1,'type':INBOUND_CHECK_RESULT,'code':verdict,'ok':verdict=='REACHABLE',
+             'connectionId':connection_id,'attemptId':attempt_id,'port':port}
+    if address_type:payload['addressType']=address_type
+    client_verdict=INBOUND_CHECK_CLIENT_VERDICT.get(verdict)
+    if client_verdict:payload['verdict']=client_verdict
+    if verdict!='REACHABLE':payload['failureCode']=reason or verdict
+    note=INBOUND_CHECK_NOTES.get(verdict,'')
+    if detail:note=(note+'（'+str(detail)+'）') if note else str(detail)
+    payload['note']=note[:200]
+    if rtt_ms is not None:payload['elapsedMs']=rtt_ms
+    return payload
+
 
 # ---------------------------------------------------------------------------
 # 加入证明（join proof v2）：信令链路上不再传输可复用的房间密钥
@@ -183,6 +335,9 @@ class Hub:
         # HTTP/SSE bookkeeping (separate caps; the WS path is unchanged).
         self.http_sessions={};self.http_source_counts={};self.http_source_windows={}
         self.join_nonces={};self.join_source_windows={}
+        # 受控入站回连：token/限次/在飞计数（默认关闭，见 inboundCheckEnabled）。
+        self.inbound_tokens={};self.inbound_used={};self.inbound_challenges={}
+        self.inbound_checks={};self.inbound_inflight=0;self.inbound_source_windows={}
         self.tasks=set()
         self.salt=bytes.fromhex(store.salt)
     def digest(self,room,secret):return hmac.new(self.salt,(room+'\0'+secret).encode(),hashlib.sha256).digest()
@@ -266,6 +421,238 @@ class Hub:
         a['counts'][key]=a['counts'].get(key,0)+1
         check(a['counts'][key]<=self.NAT_SAMPLES_PER_ATTEMPT,'LIMIT_EXCEEDED')
         return target
+    # ---- 受控 IPv6 入站回连验证 --------------------------------------
+    # 只允许操作者显式放行的前缀（默认空 ⇒ 仅全局 IPv6 单播）。不联网、不做 DNS。
+    POLICY_ERROR_CLASS={'SESSION_LIMIT':'LIMIT_EXCEEDED','CONCURRENCY_LIMIT':'LIMIT_EXCEEDED',
+                        'SOURCE_LIMIT':'LIMIT_EXCEEDED',
+                        'CHALLENGE_LIMIT':'LIMIT_EXCEEDED','TOKEN_LIMIT':'LIMIT_EXCEEDED',
+                        'TOKEN_REUSED':'AUTH_FAILED','TOKEN_EXPIRED':'AUTH_FAILED',
+                        'TOKEN_UNKNOWN':'AUTH_FAILED','TARGET_NOT_DECLARED':'AUTH_FAILED'}
+    def inbound_prefixes(self):
+        """操作者显式放行的非全局前缀（实验室/自测用）；非法项只警告不生效。"""
+        prefixes=[]
+        for raw in self.config.get('inboundCheckAllowPrefixes') or []:
+            try:prefixes.append(ipaddress.ip_network(str(raw),strict=False))
+            except ValueError:LOG.warning('ignoring invalid inbound-check allow prefix %s',redact(raw))
+        return prefixes
+    def inbound_target(self,address,port):
+        """(ip,None) 或 (None,拒绝原因)。只认字面全局 IPv6 单播（或放行前缀）。"""
+        if not self.config.get('inboundCheckEnabled'):return None,'FEATURE_DISABLED'
+        if type(port) is not int or not 1<=port<=65535:return None,'PORT_NOT_ALLOWED'
+        if port<INBOUND_CHECK_MIN_PORT and not self.config.get('inboundCheckAllowLowPorts'):
+            return None,'PORT_NOT_ALLOWED'
+        if not isinstance(address,str) or len(address)>64 or '%' in address:return None,'ADDRESS_NOT_ALLOWED'
+        try:ip=ipaddress.ip_address(address)
+        except ValueError:return None,'ADDRESS_NOT_ALLOWED'
+        # IPv4、IPv4-mapped、未指定、组播：永远拒绝（即使配了放行前缀）。
+        if ip.version!=6 or ip.is_unspecified or ip.is_multicast:return None,'ADDRESS_NOT_ALLOWED'
+        if getattr(ip,'ipv4_mapped',None) is not None:return None,'ADDRESS_NOT_ALLOWED'
+        if not ip.is_global and not any(ip in net for net in self.inbound_prefixes()):
+            return None,'ADDRESS_NOT_ALLOWED'          # 环回/链路本地/ULA/保留段默认全拒
+        return ip,None
+    def prune_inbound_tokens(self,now,ttl):
+        for token,item in list(self.inbound_tokens.items()):
+            if now-item['created']>ttl:self.inbound_tokens.pop(token,None)
+        for token,used in list(self.inbound_used.items()):
+            if now-used>ttl:self.inbound_used.pop(token,None)
+    def issue_inbound_token(self,session,address,port,connection_id=None,attempt_id=None):
+        """下发一次性 token：绑定 (会话,地址,端口)、短时效、限次。"""
+        ttl=max(1.0,min(float(self.config.get('inboundCheckTokenTtl',5.0)),2*INBOUND_CHECK_MAX_TIMEOUT))
+        now=time.monotonic();self.prune_inbound_tokens(now,ttl)
+        key=session.pid;count=self.inbound_challenges.get(key,0)+1
+        check(count<=self.config.get('maxInboundCheckChallengesPerSession',4),'LIMIT_EXCEEDED')
+        check(len(self.inbound_tokens)<self.config.get('maxInboundCheckTokens',256),'LIMIT_EXCEEDED')
+        self.inbound_challenges[key]=count
+        token=secrets.token_hex(24)
+        self.inbound_tokens[token]={'session':session.pid,'address':address,'port':port,'created':now,
+                                    'connectionId':connection_id,'attemptId':attempt_id}
+        return token,int(ttl*1000)
+    def consume_inbound_token(self,session,address,port,token):
+        """取走 token：一次性（复用/过期/未知都拒绝）且必须与本会话登记的目标完全一致。"""
+        now=time.monotonic();ttl=float(self.config.get('inboundCheckTokenTtl',5.0))
+        item=self.inbound_tokens.pop(token,None)
+        if item is None:return None,('TOKEN_REUSED' if token in self.inbound_used else 'TOKEN_UNKNOWN')
+        if now-item['created']>ttl:
+            self.inbound_used[token]=now;return None,'TOKEN_EXPIRED'
+        if item['session']!=session.pid:return None,'TARGET_NOT_DECLARED'
+        if item['address']!=address or item['port']!=port:return None,'TARGET_NOT_DECLARED'
+        self.inbound_used[token]=now
+        return item,None
+    INBOUND_SOURCE_WINDOW=60.0
+    def accept_client_token(self,session,token,ttl_ms=None):
+        """客户端自带 token：一次性（同会话重放必拒）+ 短时效 + 限次。返回 None 或拒绝原因。
+
+        客户端监听点自己也会用 compare_digest 校验并一次性消费；这里是服务端侧的第二道
+        （防止同一 offer 被重放成多次回连）。时效口径：offer 里的 expiresInMs（钳到 ≤5s）。
+        """
+        now=time.monotonic()
+        ttl=max(0.5,min((ttl_ms/1000.0 if ttl_ms else 5.0),INBOUND_CHECK_MAX_TIMEOUT))
+        self.prune_inbound_tokens(now,ttl)
+        if token in self.inbound_used:return 'TOKEN_REUSED'      # 同会话一次性，不随时间遗忘
+        key=session.pid;count=self.inbound_challenges.get(key,0)+1
+        if count>self.config.get('maxInboundCheckChallengesPerSession',4):return 'CHALLENGE_LIMIT'
+        if len(self.inbound_used)+len(self.inbound_tokens)>=self.config.get('maxInboundCheckTokens',256):
+            return 'TOKEN_LIMIT'
+        self.inbound_challenges[key]=count
+        self.inbound_used[token]=now
+        return None
+    def claim_inbound_check(self,session):
+        """占用一次检查名额：每会话 + 每来源限次 + 全局在飞上限。返回 None 或拒绝原因。
+
+        先判定再计数：任何一条边界不满足都不会污染计数（否则并发拒绝会把自己的名额吃掉）。
+        """
+        if self.inbound_checks.get(session.pid,0)>=self.config.get('maxInboundChecksPerSession',1):
+            return 'SESSION_LIMIT'
+        now=time.monotonic();window,count=(now,0)
+        if session.source:
+            window,count=self.inbound_source_windows.get(session.source,(now,0))
+            if now-window>=self.INBOUND_SOURCE_WINDOW:window,count=now,0
+            if count>=self.config.get('maxInboundChecksPerSource',8):return 'SOURCE_LIMIT'
+        if self.inbound_inflight>=self.config.get('maxInboundCheckInflight',2):
+            return 'CONCURRENCY_LIMIT'
+        self.inbound_checks[session.pid]=self.inbound_checks.get(session.pid,0)+1
+        if session.source:self.inbound_source_windows[session.source]=(window,count+1)
+        self.inbound_inflight+=1
+        return None
+    def forget_inbound_state(self,pid):
+        """会话结束就清干净：限次计数、未用 token 与在飞归属（避免长期进程里无限增长）。"""
+        self.inbound_checks.pop(pid,None)
+        self.inbound_challenges.pop(pid,None)
+        for token,item in list(self.inbound_tokens.items()):
+            if item['session']==pid:self.inbound_tokens.pop(token,None)
+    def log_inbound(self,session,verdict,connection_id=None,attempt_id=None,rtt_ms=None,reason=None):
+        """判决写中心日志：只用既有白名单字段，绝不写 token/密钥/响应体。"""
+        state,log_reason=INBOUND_CHECK_LOG[verdict]
+        data={'state':state,'family':6,'ok':verdict=='REACHABLE','mechanism':'tcp','protocol':'tcp'}
+        if log_reason:data['reason']=log_reason
+        if rtt_ms is not None:data['rttMs']=rtt_ms
+        if verdict=='REJECTED_BY_POLICY':data['error']=self.POLICY_ERROR_CLASS.get(reason,'SCHEMA_INVALID')
+        self.store.event(session.scope,session.pid,'path.state',data,
+                         connection_id=connection_id,attempt_id=attempt_id)
+    async def inbound_probe(self,scheme,ip,port,token,timeout):
+        """单次 HTTP(S) 回连：字面 IPv6、无重定向、无代理、无凭据、有界读取。"""
+        url='%s://[%s]:%d%s?token=%s'%(scheme,ip.compressed,port,INBOUND_CHECK_PATH,token)
+        client_timeout=aiohttp.ClientTimeout(total=timeout,connect=timeout,sock_read=timeout)
+        try:
+            async with aiohttp.ClientSession(timeout=client_timeout,trust_env=False) as client:
+                async with client.get(url,allow_redirects=False,
+                                      headers={'User-Agent':INBOUND_CHECK_USER_AGENT}) as response:
+                    body=await response.content.read(INBOUND_CHECK_MAX_BODY)
+                    echoed=response.headers.get('X-P2P-Inbound-Token','')==token
+                    # 客户端监听点的契约：校验 token（compare_digest）并一次性消费，然后回 204 空体。
+                    # 因此"2xx + 204 空体"即对端已确认本次 token；非空响应体必须带回本次 token
+                    # （或 X-P2P-Inbound-Token 头），否则一律 TOKEN_MISMATCH，绝不当作成功。
+                    if 200<=response.status<300 and (token.encode('ascii') in body or echoed
+                                                     or (response.status==204 and not body)):
+                        return 'REACHABLE',None
+                    return 'TOKEN_MISMATCH','HTTP_%d'%response.status
+        except asyncio.TimeoutError:return 'TIMEOUT',None
+        except aiohttp.ClientConnectorError as exc:
+            code=getattr(exc,'errno',None)
+            if code is None:code=getattr(getattr(exc,'os_error',None),'errno',None)
+            if code in REFUSED_ERRNOS:return 'CONNECTION_REFUSED',None
+            return 'UNREACHABLE_NO_ROUTE',('ERRNO_%s'%code if code is not None else type(exc).__name__)
+        except aiohttp.ServerTimeoutError:return 'TIMEOUT',None
+        except (aiohttp.ServerDisconnectedError,aiohttp.ClientPayloadError,
+                getattr(aiohttp,'ClientConnectionResetError',aiohttp.ClientConnectionError)) as exc:
+            return 'TIMEOUT',type(exc).__name__        # 有人接下连接但没给出可用响应
+        except (aiohttp.ClientError,OSError,ValueError) as exc:
+            return 'UNREACHABLE_NO_ROUTE',type(exc).__name__
+    async def run_inbound_check(self,session,ip,port,token,connection_id=None,attempt_id=None,address_type=None):
+        """一次有界回连：无论成败都回报请求方并写中心日志；不重试、不换目标、不转发内容。"""
+        timeout=min(INBOUND_CHECK_MAX_TIMEOUT,max(0.2,float(self.config.get('inboundCheckTimeout',4.0))))
+        scheme=str(self.config.get('inboundCheckScheme','http')).lower()
+        if scheme not in ('http','https'):scheme='http'
+        started=time.monotonic()
+        try:verdict,detail=await self.inbound_probe(scheme,ip,port,token,timeout)
+        finally:self.inbound_inflight=max(0,self.inbound_inflight-1)
+        elapsed_ms=round((time.monotonic()-started)*1000,3)
+        rtt_ms=elapsed_ms if verdict=='REACHABLE' else None
+        self.log_inbound(session,verdict,connection_id,attempt_id,rtt_ms,detail)
+        try:
+            await session.send(inbound_result_payload(verdict,port,detail=detail,rtt_ms=rtt_ms,
+                                                      connection_id=connection_id,attempt_id=attempt_id,
+                                                      address_type=address_type))
+        except (ConnectionError,RuntimeError):pass      # 对方断线不再补救
+    async def handle_inbound_check(self,session,data):
+        """客户端 offer（线上名 `v6-reach`，字段与 native/ipv6_reach.py 逐字对齐）：
+
+            {v,type,connectionId,attemptId,session,address,addressType,scope,prefixLength,
+             port,token,mechanism:'ipv6-inbound',expiresInMs,fullAddressShared}
+
+        token 由客户端生成、一次性、短时效；服务器只把它原样带进**那一次**回连。
+        也接受替代模式：不带 token 的请求 ⇒ 服务器下发一次性 token（v6-reach-challenge），
+        回连时把 token 带回来即可（自测/无客户端 token 的调用方用）。
+
+        解析/策略/限次在同步路径上判定并立即回报；联网探测放到独立任务，不阻塞消息循环。
+        任何失败都走同一形状的回报（六选一的 code + 原因），不发任何出站连接。
+        """
+        fields(data,{'v','type','address','port'},
+               {'request','token','connectionId','attemptId','session','addressType','scope',
+                'prefixLength','mechanism','expiresInMs','fullAddressShared'})
+        check(data['v']==1,'UNSUPPORTED_VERSION')
+        check(data['type'] in INBOUND_CHECK_ALIASES,'SCHEMA_INVALID')
+        address=data['address'];port=data['port']
+        # 客户端解析器要求这两个字段存在且是会话号形状；未声明时回填本会话的 clientSessionId。
+        connection_id=data.get('connectionId') or session.client_session
+        attempt_id=data.get('attemptId') or session.client_session
+        uid(connection_id);uid(attempt_id)
+        address_type=data.get('addressType')
+        if address_type is not None:check(address_type in INBOUND_CHECK_ADDRESS_TYPES,'SCHEMA_INVALID')
+        if 'mechanism' in data:check(data['mechanism'] in ('ipv6-inbound','inbound-check'),'SCHEMA_INVALID')
+        if 'session' in data:string(str(data['session']),100,0)
+        if 'scope' in data:string(str(data['scope']),64,0)
+        if data.get('prefixLength') is not None:
+            check(type(data['prefixLength']) is int and 0<=data['prefixLength']<=128,'SCHEMA_INVALID')
+        if data.get('fullAddressShared') is not None:check(type(data['fullAddressShared']) is bool,'SCHEMA_INVALID')
+        ttl_ms=None
+        if data.get('expiresInMs') is not None:
+            check(type(data['expiresInMs']) is int and 100<=data['expiresInMs']<=5000,'SCHEMA_INVALID')
+            ttl_ms=data['expiresInMs']
+        def reply(verdict,reason=None,detail=None,rtt_ms=None):
+            return inbound_result_payload(verdict,port,reason=reason,detail=detail,rtt_ms=rtt_ms,
+                                          connection_id=connection_id,attempt_id=attempt_id,
+                                          address_type=address_type)
+        # opt-in 的判据：客户端 offer 自带 token（客户端就是显式请求）；或者显式 request=true
+        # （服务器下发 token 的替代模式）。既没有 token 又没有 request=true ⇒ 没有显式请求，
+        # 只回 NOT_OPT_IN，连 token 都不发。显式 request=false 同理拒绝。
+        if 'request' in data and data['request'] is not True:
+            self.log_inbound(session,'REJECTED_BY_POLICY',connection_id,attempt_id,reason='NOT_OPT_IN')
+            return [reply('REJECTED_BY_POLICY','NOT_OPT_IN')]
+        if data.get('token') is None and data.get('request') is not True:
+            self.log_inbound(session,'REJECTED_BY_POLICY',connection_id,attempt_id,reason='NOT_OPT_IN')
+            return [reply('REJECTED_BY_POLICY','NOT_OPT_IN')]
+        ip,rejected=self.inbound_target(address,port)
+        if rejected is not None:
+            self.log_inbound(session,'REJECTED_BY_POLICY',connection_id,attempt_id,reason=rejected)
+            return [reply('REJECTED_BY_POLICY',rejected)]
+        token=data.get('token')
+        if token is None:
+            try:value,expires=self.issue_inbound_token(session,address,port,connection_id,attempt_id)
+            except ProtocolError as exc:
+                self.log_inbound(session,'REJECTED_BY_POLICY',connection_id,attempt_id,reason='CHALLENGE_LIMIT')
+                return [reply('REJECTED_BY_POLICY',error_code(exc))]
+            return [{'v':1,'type':INBOUND_CHECK_CHALLENGE,'token':value,'expiresInMs':expires,
+                     'connectionId':connection_id,'attemptId':attempt_id,'address':address,'port':port,
+                     'addressType':address_type}]
+        check(isinstance(token,str) and bool(HEX48.fullmatch(token)),'SCHEMA_INVALID')
+        # 两种 token 模式共用一个入口：先按"服务器下发的一次性 token"校验（一次性 + 时效 +
+        # 目标绑定）；不在册的才是客户端自带 token（客户端 offer 的主路径，自己在监听点校验）。
+        item,reason=self.consume_inbound_token(session,address,port,token)
+        if item is None and reason!='TOKEN_UNKNOWN':
+            self.log_inbound(session,'REJECTED_BY_POLICY',connection_id,attempt_id,reason=reason)
+            return [reply('REJECTED_BY_POLICY',reason)]
+        if item is None:
+            reason=self.accept_client_token(session,token,ttl_ms)
+            if reason is not None:
+                self.log_inbound(session,'REJECTED_BY_POLICY',connection_id,attempt_id,reason=reason)
+                return [reply('REJECTED_BY_POLICY',reason)]
+        limited=self.claim_inbound_check(session)
+        if limited is not None:
+            self.log_inbound(session,'REJECTED_BY_POLICY',connection_id,attempt_id,reason=limited)
+            return [reply('REJECTED_BY_POLICY',limited)]
+        self.spawn(self.run_inbound_check(session,ip,port,token,connection_id,attempt_id,address_type))
+        return []
     # ---- 加入证明 v2 -------------------------------------------------
     def issue_join_nonce(self,room,client_session,source=None):
         """下发一次性 nonce；每次下发都顺手清理过期项，并限制未决 nonce 总数。"""
@@ -367,6 +754,7 @@ class Hub:
             if remaining>0:self.http_source_counts[session.source]=remaining
             else:self.http_source_counts.pop(session.source,None)
         if session.link is not None:session.link.close()
+        self.forget_inbound_state(session.pid)
         if session.joined:
             room=session.room
             self.rooms[room].discard(session.pid)
@@ -394,6 +782,8 @@ class Hub:
             session.telemetry+=1;check(session.telemetry<=RATE_TELEMETRY,'LIMIT_EXCEEDED')
             ids=self.store.ingest(session.scope,session.pid,data['clientSessionId'],data['events'])
             return [{'v':1,'type':'telemetry_ack','clientSessionId':data['clientSessionId'],'ids':ids}]
+        if kind==INBOUND_CHECK:
+            return await self.handle_inbound_check(session,data)
         if kind=='ping':
             fields(data,{'v','type'},{'ts'})
             check('ts' not in data or type(data['ts']) in (int,float))
@@ -633,6 +1023,10 @@ def data_directory(base,room=None):
     return room_directory(base,room) if room else Path(base)
 
 def make_app(data_dir,ice_servers=None,origins=None,**limits):
+    # 入站回连的超时上限在这里兜底：CLI/测试/任何调用方都越不过 5 秒。
+    limits=dict(limits)
+    if 'inboundCheckTimeout' in limits:
+        limits['inboundCheckTimeout']=max(0.2,min(INBOUND_CHECK_MAX_TIMEOUT,float(limits['inboundCheckTimeout'])))
     for server in ice_servers or []:
         check(set(server)=={'urls'})
         urls=server['urls'] if isinstance(server['urls'],list) else [server['urls']]
@@ -706,7 +1100,56 @@ def public_bind_error(hosts,cert,origin,allow_plaintext):
     return None
 PLAINTEXT_WARNING=('警告：--allow-plaintext 已启用，信令未加密，链路可被观察/干扰；房间密钥不再在链路上传输。'
                    '任何能看到这条链路的人都可以观察或干扰信令，请只在你有意为之的隔离网络里这样用。')
+def export_actor():
+    """审计字段"谁"：本机操作者（拿不到就用 local-cli）。只取用户名，不带路径/主机名。"""
+    try:
+        import getpass
+        user=re.sub('[^A-Za-z0-9_.-]','',getpass.getuser() or '')[:32]
+    except Exception:
+        user=''
+    return 'local-cli:'+user if user else 'local-cli'
+
+
+def run_export(args):
+    """本地 CLI 复盘导出（只读事件 + 一条审计记录）；返回进程退出码。"""
+    session=getattr(args,'export_session',None);attempt=getattr(args,'export_attempt',None)
+    if not session and not attempt:
+        print('EXPORT_TARGET_REQUIRED',file=sys.stderr);return 2
+    fmt=getattr(args,'export_format','jsonl')
+    directory=data_directory(args.data,getattr(args,'room',None))
+    out_path=getattr(args,'export_out',None)
+    try:
+        store=Store(str(directory))
+    except Exception as exc:
+        print('EXPORT_STORE_UNAVAILABLE:%s'%type(exc).__name__,file=sys.stderr);return 2
+    try:
+        handle=open(out_path,'w',encoding='utf-8') if out_path else sys.stdout
+    except OSError as exc:
+        print('EXPORT_OUTPUT_UNAVAILABLE:%s'%type(exc).__name__,file=sys.stderr);return 2
+    try:
+        try:
+            summary=export_session(store,handle,session=session,attempt=attempt,format=fmt,
+                                   limit=int(getattr(args,'export_limit',EXPORT_LIMIT_DEFAULT) or EXPORT_LIMIT_DEFAULT),
+                                   max_bytes=int(getattr(args,'export_max_bytes',EXPORT_MAX_BYTES_DEFAULT) or EXPORT_MAX_BYTES_DEFAULT),
+                                   include_addresses=bool(getattr(args,'export_include_addresses',False)),
+                                   actor=export_actor())
+        except ValueError as exc:
+            print(str(exc),file=sys.stderr);return 2
+        except sqlite3.Error as exc:
+            # 中心库被占用/损坏时也要给稳定原因码，而不是抛栈
+            print('EXPORT_DB_ERROR:%s'%type(exc).__name__,file=sys.stderr);return 2
+    finally:
+        if handle is not sys.stdout:handle.close()
+        store.close()
+    print('exported session=%s attempt=%s rows=%d/%d bytes=%d truncated=%s -> %s'%(
+        session or '-',attempt or '-',summary['rows'],summary['totalRows'],summary['writtenBytes'],
+        summary['truncated'],out_path or '<stdout>'),file=sys.stderr)
+    return 0
+
+
 async def main(args):
+    if getattr(args,'export_session',None) or getattr(args,'export_attempt',None):
+        return run_export(args)          # 本地 CLI 导出：不绑端口、不加路由、不发任何出站连接
     hosts=requested_hosts(args.host)
     loopback=all(is_loopback_host(host) for host in hosts)
     if bool(args.cert)!=bool(args.key):raise ValueError('both --cert and --key required')
@@ -728,10 +1171,23 @@ async def main(args):
     context=None
     if args.cert:
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2;context.load_cert_chain(args.cert,args.key)
+    inbound_check=bool(getattr(args,'allow_inbound_check',False))
+    inbound_prefixes=[p for p in (getattr(args,'inbound_check_allow_prefix',None) or []) if p]
+    if inbound_check:
+        LOG.warning('--allow-inbound-check is ON: the server will make the outbound HTTP(S) probe a client explicitly '
+                    'asks for. Target must be that session\'s own global IPv6 unicast address:port, once per session, '
+                    '<=5s, single attempt, no redirects/proxies/DNS. It never relays chat/file/voice content.')
+    if inbound_prefixes:
+        LOG.warning('inbound-check allow prefixes: %s — NON-GLOBAL IPv6 targets are accepted inside them. '
+                    'Lab/self-test only; leave unset for global-unicast-only.',','.join(inbound_prefixes))
     data_dir=data_directory(args.data,args.room)
     LOG.info('data directory: %s (--room %s)',data_dir,args.room or '<shared across rooms>')
     app=make_app(str(data_dir),[{'urls':args.stun_url}] if args.stun_url else [],args.origin,
                  allowNoOrigin=bool(getattr(args,'allow_no_origin',False)),
+                 inboundCheckEnabled=inbound_check,
+                 inboundCheckTimeout=float(getattr(args,'inbound_check_timeout',4.0)),
+                 inboundCheckScheme=str(getattr(args,'inbound_check_scheme','http')),
+                 inboundCheckAllowPrefixes=inbound_prefixes,
                  allowLegacyJoin=(True if getattr(args,'allow_legacy_join',False)
                                   else False if getattr(args,'deny_legacy_join',False) else None))
     await serve(app,hosts,args.port,context,args.stun_host,args.stun_port)
@@ -756,7 +1212,34 @@ if __name__=='__main__':
     p.add_argument('--deny-legacy-join',action='store_true',
                    help='Refuse the legacy join (room key on the wire) from every source, including this machine. Use it when '
                         'a local reverse proxy makes remote clients look like loopback, or to be strict everywhere.')
+    p.add_argument('--allow-inbound-check',action='store_true',
+                   help='Enable the client-requested IPv6 inbound reachability probe (default OFF). When ON the server '
+                        'may make ONE outbound HTTP(S) request to the address:port that session declared (global IPv6 '
+                        'unicast only, <=5s, no redirects/proxies/DNS, one per session); it only reports whether the '
+                        'reply carried the one-time token back.')
+    p.add_argument('--inbound-check-timeout',type=float,default=4.0,
+                   help='Per-probe timeout in seconds (default 4.0, hard cap 5.0).')
+    p.add_argument('--inbound-check-scheme',choices=['http','https'],default='http',
+                   help='Scheme the probe uses (default http; operator-chosen, never client-chosen).')
+    p.add_argument('--inbound-check-allow-prefix',action='append',metavar='CIDR',
+                   help='LAB/SELF-TEST ONLY: additionally allow target prefixes that are not global unicast '
+                        '(e.g. ::1/128). Repeatable. Default: global unicast only.')
+    p.add_argument('--export-session',metavar='CLIENTSESSIONID',
+                   help='LOCAL CLI only: export a redacted review timeline for this client session '
+                        '(merges server-side and client-reported events) instead of starting the server.')
+    p.add_argument('--export-attempt',metavar='ATTEMPTID',
+                   help='Export by attemptId instead of (or together with) --export-session.')
+    p.add_argument('--export-out',metavar='FILE',help='Write the export to FILE (default: stdout).')
+    p.add_argument('--export-format',choices=['jsonl','text'],default='jsonl',
+                   help='jsonl (default, machine-readable) or text (human-readable).')
+    p.add_argument('--export-limit',type=int,default=EXPORT_LIMIT_DEFAULT,
+                   help='Max timeline rows before truncating (default %d).'%EXPORT_LIMIT_DEFAULT)
+    p.add_argument('--export-max-bytes',type=int,default=EXPORT_MAX_BYTES_DEFAULT,
+                   help='Max export size in bytes before truncating (default %d).'%EXPORT_MAX_BYTES_DEFAULT)
+    p.add_argument('--export-include-addresses',action='store_true',
+                   help='Keep FULL IPv6/IPv4 addresses in the export. Off by default (prefix only). '
+                        'Only use it when you explicitly accept storing full addresses.')
     p.add_argument('--allow-no-origin',action='store_true',
                    help='Explicitly allow clients that send no Origin header (non-browser clients). '
                         'Off by default: without it, a configured --origin allowlist rejects missing Origin on both transports.')
-    logging.basicConfig(level=logging.INFO);asyncio.run(main(p.parse_args()))
+    logging.basicConfig(level=logging.INFO);sys.exit(asyncio.run(main(p.parse_args())))

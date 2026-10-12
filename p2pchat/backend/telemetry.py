@@ -1,5 +1,15 @@
-"""Allowlisted diagnostics. No data retrieval route exists on the control plane."""
+"""Allowlisted diagnostics. No data retrieval route on the control plane.
+
+客户端环境体检（t49）的汇总结论有一组**专属白名单键**（`netEnv*`，见文件下方
+`NET_ENV_*`），每个键只承载它自己那一件事、闭词表或严格形态；t49 标为 localOnly 的字段
+（原始地址/网关地址/接口名/mapping·filtering 证据/入站 verdict·note/NAT64 signs/UDP bindings/
+errors）**显式拒绝入库**，导出时也一律 [redacted]。
+
+复盘导出（`export_session`）只在本地 CLI 上跑：给定 session/attempt 把服务端与各客户端上报的
+事件合并成一条时间线，默认脱敏、有界、流式；不新增任何 HTTP 路由，也不引入中继/转发路径。
+"""
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -10,7 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
-EVENTS = {'probe.ack','transfer.complete','client.error','client.boot','path.state','path.stats','session.joined','session.error','session.left','signal.sdp','signal.candidate','stun.binding','transfer.sent','transfer.received','chat.received','chat.echo','peer.ack','task.error','receive.error','receive.queue_overflow','datachannel.open','datachannel.closed','rtc.connection','peer.authenticated_channel','server.error','diagnostic.dropped'}
+EVENTS = {'probe.ack','transfer.complete','client.error','client.boot','path.state','path.stats','session.joined','session.error','session.left','signal.sdp','signal.candidate','stun.binding','transfer.sent','transfer.received','chat.received','chat.echo','peer.ack','task.error','receive.error','receive.queue_overflow','datachannel.open','datachannel.closed','rtc.connection','peer.authenticated_channel','server.error','diagnostic.dropped','export.session'}
 ENUMS = {
  'state': {'unsupported','gathering','probing','authenticating','direct','failed','timeout','closed','new','connecting','connected','disconnected','completed','checking'},
  'mechanism': {'webrtc','udp-probe','quic','tcp','tcp-simopen','upnp','pcp','natpmp','stun'},
@@ -24,6 +34,58 @@ ENUMS = {
 NUMBERS = {'bytes','txBytes','rxBytes','rttMs','goodput','loss','lostPackets','packets','elapsedMs','requestBytes','responseBytes','droppedCount','queuedBytes','receivedBytes','nextSequence','rateBps'}
 BOOLS = {'ok','echo','integrityOk','canMessage'}
 
+# ---------------------------------------------------------------------------
+# 客户端环境体检（t49）汇总结论的专属键 —— 净新增，不改动上面任何一项
+# ---------------------------------------------------------------------------
+# 词汇表逐字对齐来源（不发明新词）：
+#   p2pchat/native/net_env.py : STATUSES / RECOMMENDATION_STATUSES / COMPONENTS /
+#                               METHOD_ORDER / UNMEASURED / AddressRecord.stability()
+#   p2pchat/native/nat_behavior.py : MAPPING_* / FILTERING_* / UNDETERMINED
+# 每个键只装它自己那一件事，闭词表或严格形态，**不允许把结论塞进无关字段**。
+NET_ENV_STATUS = ({'determined', 'insufficient-evidence', 'not-tested', 'unavailable', 'not-applicable'} |
+                  # 推荐项的状态词表（net_env.RECOMMENDATION_STATUSES）
+                  {'recommended', 'possible', 'unknown'})
+# 原因码形态（t49 的组件/推荐项原因码，以及 overall 的 `组件:状态:码` 复合形式）：
+# 每段必须字母开头、≤32 字符、最多 3 段。形态上装不下地址（数字开头/点号/空段都不行）、
+# 装不下密钥赋值（没有 '='），自由文本也被挡在外；导出还有 ≥32 位 hex 兜底。
+NET_ENV_TOKEN = re.compile(r'^[A-Za-z][A-Za-z0-9_-]{0,31}(?::[A-Za-z][A-Za-z0-9_-]{0,31}){0,2}$')
+NET_ENV_COMPONENTS = {'addresses', 'routes', 'udpEgress', 'natBehavior', 'inboundReachability',
+                      'ipv6Only', 'nat64'}
+NET_ENV_NAT_BEHAVIOR = {'endpoint-independent', 'address-dependent', 'address-and-port-dependent',
+                        'undetermined'}
+NET_ENV_ADDRESS_STABILITY = {'stable', 'temporary', 'unverified', 'not-global'}   # net_env.AddressRecord.stability()
+NET_ENV_RECOMMENDATION = {'ipv6-direct', 'gateway-mapping', 'port-prediction'}
+NET_ENV_UNMEASURED = {'REAL_NAT_TYPE', 'REAL_IPV6_INBOUND_ALLOWED', 'REAL_PORT_PREDICTION_SUCCESS',
+                      'REAL_MULTIPLE_PATHS'}
+ENUMS.update({
+    'netEnvOverall': NET_ENV_STATUS,
+    'netEnvStatus': NET_ENV_STATUS,
+    'netEnvComponent': NET_ENV_COMPONENTS,
+    'netEnvMapping': NET_ENV_NAT_BEHAVIOR,
+    'netEnvFiltering': NET_ENV_NAT_BEHAVIOR,
+    'netEnvAddressStability': NET_ENV_ADDRESS_STABILITY,
+    'netEnvRecommendation': NET_ENV_RECOMMENDATION,
+    'netEnvUnmeasured': NET_ENV_UNMEASURED,
+})
+# 有界列表 / 单值 token：元素仍受闭词表或严格形态约束（上限 1 = 只收单值、不收数组）。
+#   netEnvReason     —— 组件/推荐项的原因码（大写 token，最多 4 条）
+#   netEnvUnmeasured —— 未测项清单（闭词表，最多 8 条）
+#   netEnvNat64      —— NAT64 结论 token（t49 的 nat64 原因码，单值）
+LIST_KEYS = {
+    'netEnvReason': (4, None, NET_ENV_TOKEN),
+    'netEnvUnmeasured': (8, NET_ENV_UNMEASURED, None),
+    'netEnvNat64': (1, None, NET_ENV_TOKEN),
+}
+# t49 `LOCAL_ONLY_FIELDS` 的叶子名（+ 原样点号形式）：显式拒绝，不做任何降级收集。
+LOCAL_ONLY_KEYS = frozenset({
+    'records', 'gatewayAddress', 'interfaceNames', 'mapping', 'filtering', 'mappingEvidence',
+    'filteringEvidence', 'verdict', 'note', 'signs', 'bindings', 'errors',
+    'addresses.records', 'routes.gatewayAddress', 'routes.interfaceNames',
+    'natBehavior.mapping', 'natBehavior.filtering', 'natBehavior.mappingEvidence',
+    'natBehavior.filteringEvidence', 'inboundReachability.verdict', 'inboundReachability.note',
+    'nat64.signs', 'udpEgress.bindings', 'errors',
+})
+
 def uid(value):
     if not isinstance(value,str): raise ValueError('SCHEMA_INVALID')
     try: uuid.UUID(value)
@@ -34,8 +96,20 @@ def safe_data(data, strict=True):
     if not isinstance(data,dict): raise ValueError('SCHEMA_INVALID')
     result={}
     for key,value in data.items():
+        if str(key) in LOCAL_ONLY_KEYS:
+            # t49 标为 localOnly 的字段：显式拒绝（严格）或丢弃（非严格），绝不入库。
+            if strict: raise ValueError('SCHEMA_INVALID')
+            continue
         good = value is None and key in ENUMS | {k:set() for k in NUMBERS}
-        if key in ENUMS:
+        if key in LIST_KEYS:
+            limit,vocab,pattern = LIST_KEYS[key]
+            values = value if isinstance(value,list) else [value]
+            # 上限 1 的键只收单值：避免把一个结论塞成数组混进去。
+            good = (not (limit == 1 and isinstance(value,list)) and 0 < len(values) <= limit and all(
+                isinstance(item,str) and not isinstance(item,bool) and
+                ((vocab is not None and item in vocab) or (pattern is not None and pattern.match(item)))
+                for item in values))
+        elif key in ENUMS:
             good = value is None or isinstance(value,(str,int)) and not isinstance(value,bool) and value in ENUMS[key]
         elif key in NUMBERS:
             good = value is None or type(value) in (int,float) and math.isfinite(value) and 0 <= value <= 1e15
@@ -224,12 +298,243 @@ class Store:
         for row in rows: self._append(row)
         self._trim()
         return [e['id'] for e in events]
-    def event(self,scope,peer,kind,data,event_id=None,connection_id=None,attempt_id=None):
+    def event(self,scope,peer,kind,data,event_id=None,connection_id=None,attempt_id=None,session=None):
         # Server-generated records undergo the same payload allowlist.
-        session='00000000-0000-0000-0000-000000000000'
+        # session=None ⇒ 服务端行的常规归属（零 uuid，靠 peer 关联）；显式传 clientSessionId
+        # 时把这条服务端记录直接挂到那个会话上（复盘导出要能一眼看到"谁导出过它"）。
+        session=session or '00000000-0000-0000-0000-000000000000'
         event={'v':1,'id':event_id or str(uuid.uuid4()),'clientSessionId':session,'seq':0,'tsWallMs':time.time()*1000,'monoMs':time.monotonic()*1000,'connectionId':connection_id,'attemptId':attempt_id,'event':kind if kind in EVENTS else 'session.error','data':safe_data(data,False)}
         self.ingest(scope,peer,session,[event]); return event['id']
+    SERVER_SESSION='00000000-0000-0000-0000-000000000000'
+    def session_query(self,session=None,attempt=None):
+        """会话/attempt 的行过滤条件（不解包 body：能用列就用列）。
+
+        会话导出 = 该 clientSessionId 上报的行 + 同一 peer（服务端 pid）自己记的行；
+        服务端行在 diagnostics 里 session 列是零 uuid，靠 peer 关联回来。
+        attempt 过滤用 body 里的 "attemptId":"…"（json 是 sort_keys 序列化的，稳定），
+        拿到行之后还会用解析结果复核一次。
+        """
+        clauses=[];params=[]
+        peers=()
+        if session:
+            # 只把**会话自己上报的行**的 peer 当成服务端 pid 展开；审计行（export.session）
+            # 的 peer 是操作者，不能当 pid 用，否则别的会话的导出记录会被串进这条时间线。
+            peers=tuple(row[0] for row in self.db.execute(
+                "SELECT DISTINCT peer FROM diagnostics WHERE session=? AND body NOT LIKE ?",
+                (session,'%"event":"' + EXPORT_EVENT + '"%')))
+            marks=','.join('?'*len(peers)) if peers else "''"
+            clauses.append('(session=? OR (session=? AND peer IN (%s)))'%marks)
+            params.extend([session,self.SERVER_SESSION,*peers])
+        if attempt:
+            clauses.append("body LIKE ?")
+            params.append('%"attemptId":"' + attempt + '"%')
+        return (' AND '.join(clauses) if clauses else '1=1'),params,peers
+    def count_session_rows(self,session=None,attempt=None):
+        where,params,_=self.session_query(session,attempt)
+        return int(self.db.execute('SELECT COUNT(*) FROM diagnostics WHERE %s'%where,params).fetchone()[0])
+    def iter_session_rows(self,session=None,attempt=None):
+        """流式迭代（sqlite 游标逐行）：接收时间 + rowid 稳定序；不把整个会话读进内存。"""
+        where,params,_=self.session_query(session,attempt)
+        cursor=self.db.execute('SELECT received,peer,session,body FROM diagnostics WHERE %s ORDER BY received,rowid'%where,params)
+        for received,peer,session_id,body in cursor:
+            try:record=json.loads(body)
+            except ValueError:continue
+            if attempt and record.get('attemptId')!=attempt:continue     # LIKE 复核
+            yield {'received':received,'peer':peer,'session':session_id,'record':record}
+    def record_export(self,*,state,actor,rows,bytes_written,dropped,scope='',session=None):
+        """导出动作本身入中心日志：谁（peer=actor）何时导出了哪个会话（messageId）/多少。"""
+        data={'state':state,'ok':state=='completed','receivedBytes':int(bytes_written),
+              'droppedCount':int(dropped),'packets':int(rows)}
+        owner=None
+        if session:
+            try:uid(session)
+            except ValueError:pass
+            else:
+                owner=session;data['messageId']=session
+        return self.event(scope or 'export',actor or 'local-cli',EXPORT_EVENT,data,session=owner)
     def close(self): self.db.close()
+
+# ---------------------------------------------------------------------------
+# 复盘导出：把服务端自己与各客户端上报的事件按时间合并成一条时间线，默认脱敏
+# ---------------------------------------------------------------------------
+# 设计要点（为什么这样而不是"读全量再排序"）：
+#   * 只读：只用 SELECT，不在导出过程中改任何事件；导出动作本身另记一条 export.session。
+#   * 流式：用 sqlite 游标逐行吐，先按服务端**接收时间**（单调，只有它可流式），
+#     再按 rowid 稳定排序；事件自报的 tsWallMs/monoMs/seq 原样保留在行里。
+#     跨端时钟可能乱序，所以不拿自报时间去排全局顺序，而是保证：同一来源的 seq 顺序
+#     一定保持、整个导出可重复（两次导出逐字节一致）。会话级条数/字节数上限内截断并标注。
+#   * 默认脱敏：密钥/token/proof/凭据/证书私钥一律替换为 [redacted]（键保留，显式标记），
+#     聊天正文/文件名/显示名等隐私字段同样替换；IPv6/IPv4 只保留前缀（IPv6 /32、IPv4 /24），
+#     要完整地址必须调用方显式 include_addresses=True（对应客户端的 fullAddressShared 同意）。
+EXPORT_EVENT='export.session'
+EXPORT_LIMIT_DEFAULT=5000
+EXPORT_MAX_BYTES_DEFAULT=2*1024*1024
+EXPORT_REDACTED='[redacted]'
+EXPORT_FORMATS=('jsonl','text')
+# 机密类：任何情况下都不出现在导出里
+EXPORT_SECRET_KEYS=frozenset({'secret','roomsecret','room_secret','token','tokens','proof','key','keys',
+                              'password','passwd','credential','credentials','authorization','auth',
+                              'privatekey','private_key','psk','cert','certificate','certificates',
+                              'sessionkey','join_key','joinKey'})
+# 隐私类：聊天正文/文件名/显示名——显式标记并默认排除（键保留为 [redacted]）
+EXPORT_PRIVATE_KEYS=frozenset({'text','body','content','payload','message','messages','transcript',
+                               'filename','file_name','name','mime','sdp','candidate','blob'})
+_IPV6_TOKEN=re.compile(r'(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[0-9A-Za-z_.\-]+)?(?![0-9A-Fa-f:])')
+_IPV4_TOKEN=re.compile(r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])')
+_ADDRESS_TOKEN=re.compile(r'[0-9A-Fa-f:.]{2,45}')
+_HEXISH_SECRET=re.compile(r'^[0-9a-fA-F]{32,}$')
+# t49 的 localOnly 字段即使来自旧版本/外来数据行，导出也一律遮掉（值不出现，键保留=显式标记）。
+EXPORT_LOCAL_ONLY_KEYS=frozenset(name.lower() for name in LOCAL_ONLY_KEYS)   # 导出侧按小写键名比对
+# 允许保留的长 hex 值（这些是**关联用的标签/哈希**，不是凭据；token 一定不在其中）
+EXPORT_HEX_OK_KEYS=frozenset({'endpointtag'})
+
+
+def mask_address(value):
+    """只保留前缀：IPv6 → /32，IPv4 → /24（与客户端默认不记全地址的口径一致）。"""
+    prefix=32 if value.version==6 else 24
+    return str(ipaddress.ip_network('%s/%d'%(value,prefix),strict=False))
+
+
+def mask_text_addresses(text):
+    """把字符串里的 IP 字面量换成前缀形式（best effort：IPv4/IPv6 分开匹配，带端口也不漏）。
+
+    先按 IPv6/IPv4 正则替换；再用宽松候选串兜一层（例如 `203.0.113.9:443` 这种被整体
+    匹配到的形态，试着去掉尾部的 :port 再解析）。遮蔽失败时**原样保留**，但下面的
+    候选兜底会把"看起来像地址"的串交出来，绝不静默通过。
+    """
+    def masked(token):
+        for candidate in (token,token.split('%',1)[0],token.rsplit(':',1)[0] if token.count(':')==1 else token):
+            try:return mask_address(ipaddress.ip_address(candidate))
+            except ValueError:continue
+        return None
+    def replace(match):
+        return masked(match.group(0)) or match.group(0)
+    text=_IPV6_TOKEN.sub(replace,text)
+    text=_IPV4_TOKEN.sub(replace,text)
+    def fallback(match):
+        token=match.group(0)
+        return masked(token) or token
+    return _ADDRESS_TOKEN.sub(fallback,text)
+
+
+def _sanitize_value(value,include_addresses,depth=0,key=None):
+    if depth>6:return EXPORT_REDACTED
+    if value is None or isinstance(value,(bool,int,float)):return value
+    if isinstance(value,str):
+        # 值形态兜底：48/64 位裸 hex 看着就是 token/proof，除非它是显式放行的关联标签。
+        if _HEXISH_SECRET.match(value) and str(key or '').lower() not in EXPORT_HEX_OK_KEYS:
+            return EXPORT_REDACTED
+        if include_addresses:return value[:2048]
+        return mask_text_addresses(value)[:2048]
+    if isinstance(value,list):return [_sanitize_value(v,include_addresses,depth+1) for v in value[:64]]
+    if isinstance(value,dict):
+        out={}
+        for key,item in list(value.items())[:64]:
+            low=str(key).lower()
+            if low in EXPORT_SECRET_KEYS or low in EXPORT_PRIVATE_KEYS or low in EXPORT_LOCAL_ONLY_KEYS:
+                out[key]=EXPORT_REDACTED
+            else:out[key]=_sanitize_value(item,include_addresses,depth+1,low)
+        return out
+    return EXPORT_REDACTED
+
+
+def sanitize_event_data(data,include_addresses=False):
+    """按默认策略脱敏一份事件 data（键保留、值替换，便于复盘时知道"这里被遮了"）。
+
+    两道：敏感/隐私键名一律 [redacted]；32 位以上裸 hex 值也一律 [redacted]（换个字段名
+    也躲不掉），只有 EXPORT_HEX_OK_KEYS 里的关联标签（endpointTag）保留。
+    """
+    return _sanitize_value(data if isinstance(data,dict) else {},include_addresses,key='data')
+
+
+def sanitize_entry(item,include_addresses=False):
+    """一行时间线条目：只带可关联字段 + 脱敏后的 data。"""
+    record=item.get('record') or {}
+    return {'received':round(float(item.get('received',0.0)),3),'peer':item.get('peer'),
+            'event':record.get('event'),'id':record.get('id'),'seq':record.get('seq'),
+            'tsWallMs':record.get('tsWallMs'),'monoMs':record.get('monoMs'),
+            'clientSessionId':record.get('clientSessionId'),
+            'connectionId':record.get('connectionId'),'attemptId':record.get('attemptId'),
+            'data':sanitize_event_data(record.get('data'),include_addresses)}
+
+
+def render_entry(entry,format='jsonl'):
+    if format=='jsonl':return json.dumps(entry,ensure_ascii=False,separators=(',',':'))+'\n'
+    data=entry.get('data') or {}
+    pairs=' '.join('%s=%s'%(k,data[k]) for k in sorted(data) if k in
+                   {'state','reason','error','mechanism','profile','protocol','family','ok','rttMs',
+                    'elapsedMs','droppedCount','receivedBytes','requestBytes','responseBytes',
+                    'lostPackets','packets','loss','goodput','candidateType','address','port'})
+    # text 视图显示**服务端接收时间**（与排序一致）；事件自报的 tsWallMs/monoMs 在 jsonl 里
+    when=time.strftime('%Y-%m-%dT%H:%M:%S',time.gmtime(entry.get('received',0))) if entry.get('received') else '-'
+    return '%s peer=%-24s %-24s %s\n'%(when,entry.get('peer') or '-',entry.get('event') or '-',pairs)
+
+
+def render_note(payload,format='jsonl'):
+    """头/尾（元信息与统计）：jsonl 用带 kind 的对象，text 用 # 注释行。"""
+    if format=='jsonl':return json.dumps(payload,ensure_ascii=False,separators=(',',':'))+'\n'
+    kind=payload.get('kind','note')
+    body=' '.join('%s=%s'%(k,v) for k,v in payload.items() if k!='kind')
+    return '# %s %s\n'%(kind,body)
+
+
+class SessionExport:
+    """复盘导出的共享外壳：既给 CLI 用，也给测试直接调用（纯只读 + 脱敏 + 有界）。"""
+    @staticmethod
+    def store_defaults():return {'limit':EXPORT_LIMIT_DEFAULT,'max_bytes':EXPORT_MAX_BYTES_DEFAULT}
+
+
+def export_session(store,out,*,session=None,attempt=None,limit=EXPORT_LIMIT_DEFAULT,
+                   max_bytes=EXPORT_MAX_BYTES_DEFAULT,format='jsonl',include_addresses=False,
+                   actor='local-cli',clock=time.time,record=True):
+    """把 session/attempt 的跨端事件导出成一条**脱敏、有界、可流式**的时间线。
+
+    * `session`：客户端 clientSessionId（服务端自己记的行按 peer 关联回来）
+    * `attempt`：attemptId（可单独用，两个都给就是交集）
+    * `format`：'jsonl'（一行一个对象，头尾各一条 kind=export-header/export-summary）
+      或 'text'（人读）
+    * `limit`/`max_bytes`：条数与字节数上限，超出就截断并在尾部标注（附精确 totalRows）
+    * `include_addresses`：默认 False ⇒ IPv6 /32、IPv4 /24；True 才保留完整地址
+      （对应客户端 fullAddressShared 的显式同意）
+    失败给稳定原因码：EXPORT_TARGET_REQUIRED / EXPORT_FORMAT_INVALID / NO_SUCH_SESSION /
+    NO_SUCH_ATTEMPT。无论成败都记一条 export.session（可审计）。返回统计 dict。
+    """
+    if not session and not attempt:raise ValueError('EXPORT_TARGET_REQUIRED')
+    if format not in EXPORT_FORMATS:raise ValueError('EXPORT_FORMAT_INVALID')
+    limit=int(limit);max_bytes=int(max_bytes)
+    if limit<1 or max_bytes<1:raise ValueError('EXPORT_LIMIT_INVALID')
+    total=store.count_session_rows(session,attempt)
+    if total==0:
+        store.record_export(state='failed',actor=actor,rows=0,bytes_written=0,dropped=0,
+                            session=session,scope='')
+        raise ValueError('NO_SUCH_SESSION' if session else 'NO_SUCH_ATTEMPT')
+    header={'v':1,'kind':'export-header','session':session,'attempt':attempt,'actor':actor,
+            'generatedAtMs':round(clock()*1000,3),'includeAddresses':bool(include_addresses),
+            'limit':limit,'maxBytes':max_bytes,'order':'received,rowid',
+            'redaction':'secrets/credentials/chat-content replaced by [redacted]; addresses masked to prefix',
+            'note':'时间线条目按服务端接收时间排序；事件自报 tsWallMs/monoMs/seq 原样保留'}
+    out.write(render_note(header,format))
+    written=len(render_note(header,format))
+    emitted=0;truncated=False;by_event={}
+    for item in store.iter_session_rows(session,attempt):
+        entry=sanitize_entry(item,include_addresses)
+        line=render_entry(entry,format)
+        if emitted>=limit or written+len(line)>max_bytes:
+            truncated=True
+            break
+        out.write(line);written+=len(line);emitted+=1
+        kind=str(entry.get('event'))
+        by_event[kind]=by_event.get(kind,0)+1
+    summary={'v':1,'kind':'export-summary','session':session,'attempt':attempt,'rows':emitted,
+             'bytes':written,'totalRows':total,'truncated':truncated,
+             'dropped':max(0,total-emitted),'byEvent':by_event}
+    out.write(render_note(summary,format))
+    written+=len(render_note(summary,format))
+    if record:
+        store.record_export(state='completed',actor=actor,rows=emitted,bytes_written=written,
+                            dropped=max(0,total-emitted),session=session)
+    return {**summary,'rows':emitted,'writtenBytes':written,'byEvent':by_event}
+
 
 class LocalQueue(Store):
     def __init__(self,directory,max_events=2000,max_bytes=20*1024*1024):
