@@ -26,8 +26,11 @@ def allowed(p):
     if parts[0]=='android-native':
         # 原生安卓客户端同样是交付源码：以前这里漏掉整个目录，清单里它 0 个文件，
         # 等于「冻结了但没覆盖」。构建产物由 SKIP('build'/'.gradle') 挡掉；机器相关的
-        # local.properties（含本机 SDK 路径）与 NDK 中间产物 .cxx 不入清单。
-        if r.name=='local.properties' or '.cxx' in parts:return False
+        # local.properties（含本机 SDK 路径）、NDK 中间产物 .cxx、以及 spike 期间抽取出来的
+        # evidence/（如从未跟踪的 AAR 里抽出的 classes.jar）都不入清单——清单必须在干净检出
+        # 上也能复现，所以只收 git 跟踪的源码与 Gradle wrapper 的那一个 jar。
+        if r.name=='local.properties' or '.cxx' in parts or 'evidence' in parts:return False
+        if p.suffix=='.jar':return parts[:2]==('android-native','gradle')
         return (p.suffix in {'.gradle','.kts','.properties','.java','.kt','.xml','.png','.jar','.bat','.pro'}
                 or r.name in {'gradlew','gradlew.bat','.gitignore','gradle-wrapper.properties'})
     return False
