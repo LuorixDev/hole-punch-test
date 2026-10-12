@@ -14,6 +14,29 @@ import json
 import sys
 
 
+def force_utf8_streams() -> None:
+    """Make the console streams able to carry Chinese on every platform.
+
+    A frozen build on Windows inherits the console code page, so when its output is
+    a pipe (CI, a log file, a launcher) the text streams use cp1252 and writing
+    Chinese raised ``UnicodeEncodeError`` before any result could be read — the
+    packaged self-test died on the first line. The streams are pinned to UTF-8, and
+    a stream that cannot be reconfigured falls back to escaping instead of raising,
+    because a desktop program must never die merely because a console cannot print
+    a character.
+    """
+    for stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            try:
+                stream.reconfigure(errors="backslashreplace")
+            except Exception:
+                pass
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="直连聊天 · 纯 Python + Qt(PySide6) 桌面客户端")
     parser.add_argument("--self-test", action="store_true", help="无界面自检：启动服务端+回声+客户端做一次真实 P2P 握手")
@@ -36,6 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    force_utf8_streams()
     args = _build_parser().parse_args(argv)
 
     if args.capabilities:

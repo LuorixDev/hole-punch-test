@@ -1,23 +1,27 @@
 {
   "recordVersion": 1,
-  "generatedAtUtc": "2026-10-12T06:20:58Z",
-  "sourceCommit": "a58943f9d0604c7ecc6ac56f0717884cb30192c9",
+  "generatedAtUtc": "2026-10-12T07:12:14Z",
+  "sourceCommit": "b8302807ce7dbd65969dda373e48313a38349133",
   "worktreeDirtyAtBuild": true,
-  "sourceTree": "sha256:85dfb5816732fa1a6c91bc7b1b772ef5f8f00fa899e91e0fc9df1d303cda23c3",
-  "sourceFiles": 770,
+  "sourceTree": "sha256:aa001fe55dd5a603c933ea66bf3659bbc22f5a8813f100c7327803e177196df6",
+  "sourceFiles": 771,
   "artifact": {
     "bundle": "dist/p2p-desktop",
     "exe": "p2p-desktop",
-    "exeSha256": "053738d965e83ae639ef34fe569395f36800d479e2ec43be9f75b3a12fee742c",
-    "exeBytes": 5247536,
-    "treeSha256": "sha256:a94398bc19f8cf4e5cf5d763868bb0735991642d909f66f9f9560b6ac2c22310",
+    "exeSha256": "412b7d8f8d6cd5b14f6e760584e1514859b69b3db469ed461fe2c0562860e188",
+    "exeBytes": 5261832,
+    "treeSha256": "sha256:6685b17a5a1405f7edac3364b5d4bc19f51aaaa0ee7d337333c3ae9068a48606",
     "treeFiles": 453,
-    "treeBytes": 514588218
+    "treeBytes": 514602514
   },
   "verification": {
     "capabilities": {
       "command": "dist/p2p-desktop/p2p-desktop --capabilities",
-      "exitCode": 0
+      "exitCode": 0,
+      "underCp1252": {
+        "command": "PYTHONIOENCODING=cp1252 dist/p2p-desktop/p2p-desktop --capabilities",
+        "exitCode": 0
+      }
     },
     "selfTest": {
       "command": "dist/p2p-desktop/p2p-desktop --self-test",
@@ -48,6 +52,7 @@
   "notes": [
     "The bundle is not committed; this record binds the built artifact to the sources that produced it.",
     "sourceTree covers p2pchat .py/.spec/.md/.txt excluding releases/, review/, verification/, ci/, dist-web/.",
-    "A connected-state screenshot is not produced here: it needs a real peer session. The preview-state screenshot is evidence/qt-2-attempt-preview.png and is marked as preview only."
+    "A connected-state screenshot is not produced here: it needs a real peer session. The preview-state screenshot is evidence/qt-2-attempt-preview.png and is marked as preview only.",
+    "Rebuilt after pinning stdout/stderr to UTF-8: a packaged Windows build inherited the console code page and died with UnicodeEncodeError before printing anything (CI step: packaged desktop self-test)."
   ]
 }
