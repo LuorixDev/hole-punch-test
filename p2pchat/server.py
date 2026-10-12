@@ -181,6 +181,14 @@ def _errnos(*names):
     """跨平台收集 errno 常量（Windows 用 WSAxxx；缺哪个就跳过哪个）。"""
     return {getattr(errno,name) for name in names if getattr(errno,name,None) is not None}
 REFUSED_ERRNOS=_errnos('ECONNREFUSED','WSAECONNREFUSED')
+def inbound_connector_refusal(errno_value):
+    """连接器错误的 errno 是否表示「目标端口拒绝连接」。
+
+    单独抽成纯函数，才能在任何平台上确定性地测「拒绝 ≠ 超时」：Windows 上连接一个
+    没人监听的回环端口时，真机上观察到的是等不到可用响应（超时），而不是立刻被拒，
+    所以这条映射不能只靠活连接来钉住。
+    """
+    return errno_value in REFUSED_ERRNOS
 NO_ROUTE_ERRNOS=_errnos('ENETUNREACH','EHOSTUNREACH','ENETDOWN','EADDRNOTAVAIL','EAFNOSUPPORT',
                         'WSAENETUNREACH','WSAEHOSTUNREACH','WSAEADDRNOTAVAIL')
 def inbound_result_payload(verdict,port,reason=None,detail=None,rtt_ms=None,
@@ -550,7 +558,7 @@ class Hub:
         except aiohttp.ClientConnectorError as exc:
             code=getattr(exc,'errno',None)
             if code is None:code=getattr(getattr(exc,'os_error',None),'errno',None)
-            if code in REFUSED_ERRNOS:return 'CONNECTION_REFUSED',None
+            if inbound_connector_refusal(code):return 'CONNECTION_REFUSED',None
             return 'UNREACHABLE_NO_ROUTE',('ERRNO_%s'%code if code is not None else type(exc).__name__)
         except aiohttp.ServerTimeoutError:return 'TIMEOUT',None
         except (aiohttp.ServerDisconnectedError,aiohttp.ClientPayloadError,
