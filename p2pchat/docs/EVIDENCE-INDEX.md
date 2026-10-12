@@ -4,11 +4,12 @@
 
 ## 本轮（p2p-delivery-v2）公开结论
 
-- **桌面端换了实现**：删除 Electron 桌面壳，改为纯 Python + Qt(PySide6) + PyInstaller，进程内复用 `peer.py` 与 `native/adapter.py`（不再有 stdio sidecar / asar / 渲染层桥）。Tkinter 壳被 Qt 替换的原因是这个 Tk 运行时不链接 Xft、字体 families 只有 `('fixed',)`、中文测量宽度为 0（界面会显示空白）。**Qt 迁移（t24）在写入本行时仍在收尾、尚未独立复审**；Tk 基线的测试与审查结论只对该基线成立。
+- **桌面端换了实现**：删除 Electron 桌面壳，改为纯 Python + Qt(PySide6) + PyInstaller，进程内复用 `peer.py` 与 `native/adapter.py`（不再有 stdio sidecar / asar / 渲染层桥）。Tkinter 壳被 Qt 替换的原因是这个 Tk 运行时不链接 Xft、字体 families 只有 `('fixed',)`、中文测量宽度为 0（界面会显示空白）。**Qt 迁移已经独立复审通过**：t43 判 needs_revision → t44 修复并重建产物 → **t45 verdict=pass**（基准 HEAD `e60ba0d`，产物 exe `053738d9…`）。Tk 基线的测试与审查结论只对该基线成立；**其后的提交（网络环境体检 t49/t53、可达性结论分发 t62、Windows 控制台 UTF-8 t61 等）同样不在那次审查范围内**。
 - **新增能力（都默认关闭、需显式同意）**：NAT 行为分类（多 STUN 观测）、局域网直连发现（同网段不用打洞）、对称 NAT 端口预测，以及「路由器放行」的真实接线。每项的**最高证据只到 L1/L2**（本机真实套接字、隔离 netns、受控应答端点）；**真实家宽/双 NAT/CGNAT、真实路由器映射、各类实机一律 NOT_RUN**。
-- **本地实跑（Tk 基线，独立复审复跑）**：450 Python passed、`tests/desktop` 67 passed / 0 skipped（含真实 Tk 面板）、55 Node client、6 platform；`--self-test`（源码与打包产物）真实握手通过，独立通道测速两次拿到对端确认（65.52 / 53.58 Mbps，**应用层 goodput，不是线路带宽**）。
-- **本轮暂不出冻结清单的原因（如实）**：写入本行时整套回归在**收集阶段**中止（`ImportError: cannot import name 'ui' from 'p2pchat.python_desktop'`）——Qt 迁移已删除 Tk 的 `ui.py`，而 `tests/desktop/test_ui.py` 尚未跟着改。冻结清单必须建立在一棵稳定且全绿的树上，因此重新生成排在迁移完成之后。细节见矩阵第 8 节 G9 与第 11 节。
-- **仍属缺口（不得写成已完成）**：安卓原生 Kotlin（零源码，仅可行性）、Windows/macOS 桌面实机与打包、网页端只走 WS 信令（服务端 HTTP/SSE 无客户端接入）、真实麦克风采集、磁盘满/断电/七天长跑。
+- **本地实跑（复审基准 HEAD `e60ba0d`）**：t44 推送时 **640 passed、平台门 6/6**；t45 独立复跑并给出 verdict=pass（报告 `p2pchat/review/ux-desktop/REVIEW-QT-T24-R2.md`）。**桌面测速口径**：复审在回环上量到应用层确认速率 **47.02 Mbps**，14:20 冻结产物自检那次是 **75.18 Mbps**——两者都是「回环 + 应用层确认」，**不是线路带宽**，也不能外推成跨 NAT/家宽成绩。（更早 Tk 基线的 450/67 与 65.52/53.58 Mbps 数字只对该基线成立，本文件不再用它们描述 Qt 版。）
+- **冻结清单为什么还没出（如实）**：不是因为测试红——收集阶段的 `ImportError: cannot import name 'ui'` 是 Qt 迁移中间态，早已修掉（现在整套可收集）。真正原因是**代码还在动**（t61 正在修 Windows cp1252 崩溃、t62 已本地提交待推），captain 明确要求等「代码冻结」后才由 t13 重跑 `tools/freeze.py` 生成并与旧清单做差异说明。细节见矩阵第 8 节 G9 与第 11 节。
+- **仍属缺口（不得写成已完成）**：Windows/macOS 桌面实机与打包、网页端只走 WS 信令（服务端 HTTP/SSE 无客户端接入）、真实麦克风采集、磁盘满/断电/七天长跑；**安卓原生已不是「零源码」**——第一阶段 Kotlin 客户端已落地（t46，见 `docs/ANDROID-NATIVE.md`），但**本机编译与真机运行仍是 NOT_RUN**。
+- **仍属缺口（不得写成已完成）**：Windows/macOS 桌面实机与打包、网页端只走 WS 信令（服务端 HTTP/SSE 无客户端接入）、真实麦克风采集、磁盘满/断电/七天长跑。安卓原生 Kotlin 第一阶段已落地（见上一条），但**构建与真机运行 NOT_RUN**，不得写成「安卓原生已验证」。
 
 ## 最新Windows实际结果，不混淆历史失败
 

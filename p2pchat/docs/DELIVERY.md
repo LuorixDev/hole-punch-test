@@ -9,12 +9,12 @@
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 桌面端 Python 化 | **已落地**（Electron 壳与 `desktop/*.cjs`、`electron-builder.yml` 已删除） | 纯 Python + **Qt(PySide6)** + PyInstaller；进程内复用 `peer.py` 与 `native/adapter.py`，无 sidecar/asar。Tk 壳因本机 Tk 不链接 Xft、中文测量宽度为 0 而换成 Qt |
-| Qt 迁移（t24） | **进行中、未独立复审** | `qt_ui.py` 已接线、Tk 的 `ui.py` 已删；Tk 基线的测试/审查结论只对该基线成立 |
+| Qt 迁移（t24） | **已完成并独立复审 pass** | t43 needs_revision → t44 修复并重建产物（14:20，exe `053738d9…`）→ **t45 verdict=pass（基准 HEAD `e60ba0d`）**。其后的提交（t49/t53 网络体检、t62 可达性帧、t61 Windows 控制台 UTF-8）不在该审范围内 |
 | 新增穿透能力 | **已落地（最高 L1/L2）** | NAT 行为分类（多 STUN 观测）、局域网直连发现、对称 NAT 端口预测、网关放行接线；**默认关闭、需显式同意**，真实网络一律 NOT_RUN |
 | 信令/服务端 | 已落地 | 单进程真双栈（每 `--host` 一个 V6ONLY 站点）、加入流程 v2（不再明文发送房间密钥）、HTTP/SSE 传输（**服务端有、网页客户端未接入**） |
 | 本轮冻结清单 | **PENDING（故意）** | 写入本行时整套回归在收集阶段中止（`ImportError: cannot import name 'ui'`，Qt 迁移中间态）。冻结必须建立在稳定且全绿的树上，故重新生成排在迁移完成之后 |
 | 新版桌面 Windows CI | **PENDING** | 待 captain 推送；旧 Electron 版记录不可继承 |
-| 安卓原生 Kotlin | **未实现** | 仅可行性（`android-native/FEASIBILITY.md`），零 `.kt`，本机无 SDK/JDK21 |
+| 安卓原生 Kotlin | **第一阶段已落地（t46）** | 业务逻辑全在 Kotlin（`android-native/app/src/main/java/...`，11 个 `.kt`），协议按 `peer.py`/`core.js` 对齐并有 JVM 单测；**本机无 SDK/JDK21 → 编译 NOT_RUN，真机运行 NOT_RUN**；Capacitor APK 保留 |
 | 真实家宽/双 NAT/CGNAT、真实路由器放行、实机、麦克风、磁盘满/断电/长跑 | **NOT_RUN** | 见 PUNCHING-MATRIX 第 6 节 |
 
 ### 过程留痕（如实记录，不美化）

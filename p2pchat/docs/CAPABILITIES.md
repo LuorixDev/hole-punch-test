@@ -15,7 +15,7 @@
 | 平台 | 实现 | 当前基线构建 | 当前基线本地运行/测试 | 平台实机/现场 |
 |---|---|---|---|---|
 | Linux Chromium | WebRTC聊天/文件/录音/诊断 | Web静态资源已同步 | 真实浏览器↔独立Python echo、文件SHA、独立benchmark、断信令补传通过 | 本机有证据；两条家宽NOT_RUN |
-| Linux桌面（Python + Qt/PySide6，PyInstaller） | 三屏UI + 进程内 `peer.py`/`native` + 隐私开关 | Qt 迁移（t24）进行中；Tk 基线包已重建并启动 | 无界面自检真实握手、文件SHA、独立benchmark（两次拿到对端确认）、断信令补传通过 | 跨设备/家宽/真实网关NOT_RUN；Qt 版本尚未独立复审 |
+| Linux桌面（Python + Qt/PySide6，PyInstaller） | 三屏UI + 进程内 `peer.py`/`native` + 隐私开关 | **Qt 迁移已完成并独立复审 pass（t45，基准 `e60ba0d`）**；14:20 产物重建，无 DISPLAY 下 `--capabilities`/`--self-test` exit 0 | 无界面自检真实握手、文件SHA、独立benchmark（回环应用层确认速率 47.02/75.18 Mbps，非线路带宽）、断信令补传通过 | 跨设备/家宽/真实网关NOT_RUN；**后续提交（t49/t53/t62/t61）不在 t45 审查范围内** |
 | Python Linux（服务端/Echo） | 双栈信令/STUN、中心日志、WebRTC Echo、native API | 源码与本地构建 | 独立进程、v4/v6 socket、隔离v6 stateful/延迟丢包、候选负例通过 | 真实双NAT/公网/CPE兼容NOT_RUN |
 | Windows桌面（Python + Qt/PySide6） | 同一份源码与同一个 spec | **本轮 Windows CI PENDING**；旧 Electron 版无成功包（61b400e关闭正常但elapsed0失败，另有90/600秒超时历史） | 未运行新版Windows | GUI/文件/麦克风/防火墙实机NOT_RUN |
 | Android Capacitor | 共享WebRTC UI、SAF保存、音频权限、pause/resume/切网回调 | 关闭修复同版待CI；旧commit debug APK成功不继承 | lifecycle/旧ACK/track回收仅源码+模拟 | 真机安装、WebView互通、录音、后台/切网NOT_RUN |

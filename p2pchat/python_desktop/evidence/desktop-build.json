@@ -1,16 +1,16 @@
 {
   "recordVersion": 1,
-  "generatedAtUtc": "2026-10-12T07:12:14Z",
-  "sourceCommit": "b8302807ce7dbd65969dda373e48313a38349133",
+  "generatedAtUtc": "2026-10-12T07:41:12Z",
+  "sourceCommit": "4ccbf59627d9c0a084e1fe1ac6ec97279bc53555",
   "worktreeDirtyAtBuild": true,
-  "sourceTree": "sha256:aa001fe55dd5a603c933ea66bf3659bbc22f5a8813f100c7327803e177196df6",
-  "sourceFiles": 771,
+  "sourceTree": "sha256:2fe162434c8a13de80594d811b529b4366442a3ad9053dd26de4ba8d7bb21e1a",
+  "sourceFiles": 142,
   "artifact": {
     "bundle": "dist/p2p-desktop",
     "exe": "p2p-desktop",
     "exeSha256": "412b7d8f8d6cd5b14f6e760584e1514859b69b3db469ed461fe2c0562860e188",
     "exeBytes": 5261832,
-    "treeSha256": "sha256:6685b17a5a1405f7edac3364b5d4bc19f51aaaa0ee7d337333c3ae9068a48606",
+    "treeSha256": "sha256:9b54cc6c8250d74c451f93db1e600b13ed9af33b291e0217b401ea65f4b500ff",
     "treeFiles": 453,
     "treeBytes": 514602514
   },
@@ -32,27 +32,34 @@
   "desktopSources": {
     "p2pchat/python_desktop/__init__.py": "ef7ba700fbbba7271ec6512a7e40a85e023c5b3dff733029365b2f8a497bcfed",
     "p2pchat/python_desktop/__main__.py": "f337ce152dca8bcfb36df3d8f7afff5e372b769c498355ba7eb826e6d1913048",
-    "p2pchat/python_desktop/app.py": "55103964bee40c9e999b5d058abaacd6404790c27477765611974fdc4c649623",
+    "p2pchat/python_desktop/app.py": "7ace3be9b550807f9ae1e56096fe46891f96d119b55e380f08622aa75b30506d",
     "p2pchat/python_desktop/audio.py": "a1c30e4dc012d91e258526e3633f05abdf68b36159748d76ba6fceea38ed08ff",
-    "p2pchat/python_desktop/engine.py": "f84715c7f8c522b6848676e00eafd1cc46fb97d7ea605891d3dac20d5c484922",
-    "p2pchat/python_desktop/evidence/tk_ui_reference.py.txt": "5161440630c57844c63c72ff82f90ca6fccbdb3aa55d19ccf37fdf23cd5e0e10",
+    "p2pchat/python_desktop/engine.py": "e59e8b2a7bc40639d965750ee65b84e8a6c4fa5be00910b97db8a857c34e7ebd",
     "p2pchat/python_desktop/gateway_optin.py": "d4ec03bbb788f9b1e7cf7b86fbfaf692e5cda90a538c88fd6ce0d5538c3e35db",
     "p2pchat/python_desktop/lan_client.py": "1158cf5b8684d546524cd78ef08d71ca93cbdcea4873a90a1f63c3575480544d",
-    "p2pchat/python_desktop/licenses/GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
-    "p2pchat/python_desktop/licenses/LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
-    "p2pchat/python_desktop/licenses/PYSIDE6-NOTICE.txt": "5a8b706593c8fefd476f9ca8f91fc1c17c2a0c928f6ec23e8c7fbc6264ed13ff",
-    "p2pchat/python_desktop/methods.py": "c9de475ce91589bac4f10ff9a1c4105cc13616820e9439077ee01a62f6da5cdf",
+    "p2pchat/python_desktop/methods.py": "d712599404c7a4fefca9684833987ab589fc5f37b7e8f012e2c27b81acfc84af",
     "p2pchat/python_desktop/native_session.py": "32222ed0811a85a09c0b7c5dd38984ba69c003a05ccb55b09f7814d8fd701bfb",
-    "p2pchat/python_desktop/qt_ui.py": "74cfaceca9dcede511d224859aaf21ebbe848723f7a52f0532c31feee3942a01",
+    "p2pchat/python_desktop/qt_ui.py": "6c117d90a34cca5045ca8274cf51382002c54763ec8cd081c769ddc0f3e9f2da",
     "p2pchat/python_desktop/selftest.py": "3bcb585ffcd5e2fceadb7f8e12abc35134b27fe468332470988a2734501d3e9c",
-    "p2pchat/python_desktop/signal_session.py": "a98c4ef18d73c3c0bffbfe2d2a51f4d224355b68aa6af11aaac15df6b0efc95e",
+    "p2pchat/python_desktop/signal_session.py": "75150ce0460eddead5fb10e3d5a824bb2471355cf4327c07061dad9929eda135",
     "p2pchat/python_desktop/version.py": "43d39e5a9eb2b55a0b3ba5813af5816bfc42254aceb70870b92d7522099f7096",
-    "p2pchat/tools/desktop.spec": "1c3bf4cc085239e4d00a1d1ee7f6f2af76e82c05318dd6546d1d8c31b9af96c2"
+    "p2pchat/tools/desktop.spec": "1c3bf4cc085239e4d00a1d1ee7f6f2af76e82c05318dd6546d1d8c31b9af96c2",
+    "p2pchat/tools/desktop_build_record.py": "50901bfa7b9155f7491f5431413ef07377588dbe34ce8f041199c6bfc73ebed1"
   },
   "notes": [
     "The bundle is not committed; this record binds the built artifact to the sources that produced it.",
     "sourceTree covers p2pchat .py/.spec/.md/.txt excluding releases/, review/, verification/, ci/, dist-web/.",
     "A connected-state screenshot is not produced here: it needs a real peer session. The preview-state screenshot is evidence/qt-2-attempt-preview.png and is marked as preview only.",
     "Rebuilt after pinning stdout/stderr to UTF-8: a packaged Windows build inherited the console code page and died with UnicodeEncodeError before printing anything (CI step: packaged desktop self-test)."
-  ]
+  ],
+  "sourceTreeExcludes": [
+    "node_modules",
+    "releases",
+    "review",
+    "verification",
+    "ci",
+    "dist-web",
+    "evidence"
+  ],
+  "recipe": "sourceTree = sha256 of '<rel>  <sha256>' lines joined by \\n (no trailing newline) over p2pchat/** files with suffix in .py/.spec/.md/.txt, excluding paths containing any of: node_modules, releases, review, verification, ci, dist-web, evidence. bundle = same line format over every file in dist/p2p-desktop."
 }

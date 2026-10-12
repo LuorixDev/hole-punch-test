@@ -56,9 +56,9 @@
 | 端 | 形态 | 代码入口 | 能启动的底层机制 | 备注 |
 |---|---|---|---|---|
 | **网页版（保留）** | 浏览器 WebRTC，无任意 UDP/TCP API | `web/index.html` + `web/app.js` / `web/rtc.js` | 仅 WebRTC 三 profile | 无 UDP/QUIC/TCP/网关能力，界面必须显示「不支持」 |
-| **桌面版** | 纯 Python + Qt(PySide6) + PyInstaller，Electron 已删 | `python_desktop/app.py`、`python_desktop/engine.py`、`python_desktop/qt_ui.py`（Tk 版 `ui.py` 已按用户要求移除，原因见 `docs/DESKTOP-PYTHON.md`） | WebRTC 三 profile + `udp-probe` / `quic` / `tcp` / `tcp-simopen` + STUN 观测 + 网关放行（默认关闭）+ 局域网发现（默认关闭）+ 对称 NAT 端口预测（默认关闭） | 进程内直接复用 `peer.py` 与 `native/adapter.py`，不再需要 stdio bridge/asar。**注意：Qt 迁移（t24）在首版取证时仍在进行、尚未复审；最终冻结前须以真实状态为准** |
+| **桌面版** | 纯 Python + Qt(PySide6) + PyInstaller，Electron 已删 | `python_desktop/app.py`、`python_desktop/engine.py`、`python_desktop/qt_ui.py`（Tk 版 `ui.py` 已按用户要求移除，原因见 `docs/DESKTOP-PYTHON.md`） | WebRTC 三 profile + `udp-probe` / `quic` / `tcp` / `tcp-simopen` + STUN 观测 + 网关放行（默认关闭）+ 局域网发现（默认关闭）+ 对称 NAT 端口预测（默认关闭） | 进程内直接复用 `peer.py` 与 `native/adapter.py`，不再需要 stdio bridge/asar。**Qt 迁移已完成并经独立复审 pass（t43→t44→t45，基准 HEAD `e60ba0d`）；其后的提交不在该审范围内** |
 | **安卓版（当前可交付）** | Capacitor WebView 壳 | `android/`（页面资源来自 `web/`） | 仅 WebView 自带的 WebRTC | 无原生网络适配器（见 `PLATFORMS.md` 的「User-facing platform behavior」） |
-| **安卓原生（目标形态）** | Kotlin + WebRTC Android SDK | `android-native/` | **零 Kotlin 源码**，只有 Gradle 骨架与 `android-native/app/src/main/AndroidManifest.xml` | `android-native/FEASIBILITY.md`：manifest 指向不存在的 `.MainActivity`；可行性=可行，功能对等=未开始 |
+| **安卓原生（第一阶段已落地）** | Kotlin + WebRTC Android SDK，无 WebView 承载 | `android-native/app/src/main/java/dev/p2pobservatory/nativeprobe/`（11 个 `.kt`，t46） | 仅 WebRTC（STUN-only ICE 配置）+ v2 加入证明 + 数据通道/限额对齐 | **本机编译 NOT_RUN（无 SDK/JDK21）、真机运行 NOT_RUN**；Capacitor APK 保留至原生对等经实机验证；见 `docs/ANDROID-NATIVE.md` |
 | **服务端（信令+STUN+日志中心）** | 单进程 Python，可多 `--host` 双栈 | `server.py`、`backend/protocol.py`、`backend/telemetry.py` | 信令 WebSocket、STUN Binding、中心日志收集 | **不转发聊天**，不是中继（见第 6.8 条） |
 
 ---
@@ -197,14 +197,14 @@
 | G2 | **NAT 行为分类（多 STUN 观测）** | **已落地（t10）**：`native/nat_behavior.py`；只访问用户显式配置的观测点 | transport-engineer | `ls p2pchat/native/nat_behavior.py` | **L1**（受控多 STUN 应答端点）；真实家宽 = **L4 NOT_RUN** |
 | G3 | **对称 NAT 端口预测** | **已落地（t18）+ 已接入连接流程（t21）**：`native/port_prediction.py`；默认关闭，仅对称型启用 | transport-engineer / traversal-engineer | `ls p2pchat/native/port_prediction.py` | **L1**（受控端点）；真实对称 NAT = **L4 NOT_RUN**；命中率有限，失败是正常结果 |
 | G4 | **网关放行接线到产品** | **已落地（t14）**：适配器 `gateway_capability/map/pinhole/renew/release` + 桌面 `gateway_open_port/close_port` + 设置面板入口；默认关闭 + 显式同意 | platform-engineer | `grep -rn "gateway_map\|gateway_open_port" p2pchat/native/adapter.py p2pchat/python_desktop/` | **L0/L1**（受控回环 mock + 平台能力核对，读出默认网关）；真实路由器 = **L4 NOT_RUN** |
-| G5 | **安卓原生 Kotlin** | **未实现**（只有 Gradle 骨架，零 `.kt`） | platform-engineer | `find p2pchat/android-native -name '*.kt'` | 本机无 SDK/JDK 21：APK 构建与模拟器 DataChannel 均 NOT_RUN |
+| G5 | **安卓原生 Kotlin** | **第一阶段已落地（t46）**：业务逻辑全在 Kotlin（11 个 `.kt`），协议按 `peer.py`/`core.js` 对齐并有 JVM 单测；Capacitor 版保留 | platform-engineer | `find p2pchat/android-native -name '*.kt' \| wc -l` | **构建与真机运行 NOT_RUN**：本机无 SDK/JDK21，CI 只跑 JVM 单测与 AAR 校验；真机 DataChannel 需用户实测 |
 | G6 | **Windows 桌面实机** | **PENDING**（新版 Python+Qt 桌面的 Windows CI 结果待 captain 推送后确认；历史成功记录属于**已删除的 Electron 版**，不可继承） | captain / platform-engineer | `.github/workflows/build.yml` 的 Windows job 结论 | CI runner ≠ 用户机器；GUI/防火墙实机 NOT_RUN |
 | G7 | **macOS 打包** | **未验证** | platform-engineer | `ls p2pchat/tools/build-desktop-macos.sh` | 脚本存在不等于产物可用 |
 | G8 | **TURN / 中继** | **永久禁用（不是缺口）** | — | `grep -rn "turn:" p2pchat/web p2pchat/native p2pchat/peer.py p2pchat/server.py` | 应无 `turn:` 配置；出现即回归 |
-| G9 | **桌面 GUI 的 Qt(PySide6) 迁移** | **进行中（t24）**：`qt_ui.py` 已存在、`app.py` 已接线、Tk 版 `ui.py` 已删；**尚未独立复审**。2026-10-12 取证时整套回归因 `tests/desktop/test_ui.py` 仍 `import ui` 而无法收集（迁移中间态） | desktop-engineer | `ls p2pchat/python_desktop/qt_ui.py; .venv/bin/python -m pytest p2pchat/tests -q` | 迁移完成并复审前，桌面一切证据**只对 Tk 基线成立**；Qt 版本须另行复审 |
+| G9 | **桌面 GUI 的 Qt(PySide6) 迁移** | **已落地并经独立复审 pass（t43 needs_revision → t44 修复+重建产物 → t45 pass，基准 HEAD `e60ba0d`）**；迁移中间态曾让整套回归无法收集，现已修好且可收集 | desktop-engineer | `ls p2pchat/python_desktop/qt_ui.py; .venv/bin/python -m pytest p2pchat/tests -q` | 桌面证据从「只对 Tk 基线成立」升级为**对 Qt 版 `e60ba0d` 成立**；**之后的提交（t49/t53/t62/t61）不在该审范围内**，冻结前仍需复核 |
 | G10 | **网页客户端只支持 WebSocket 信令** | **服务端已实现、客户端未接入**：HTTP/SSE（t15）无客户端使用 | client-engineer | `grep -rn "EventSource\|/events" p2pchat/web/` | 服务端能力已实现不等于产品可用；当前网页端只走 WS |
 
-**不确定性声明（必须这么读）**：G1–G4 的状态取自 **2026-10-12 的源树取证**，并各自给出**最高证据等级**（最高只到 L1/L2，真实网络一律 NOT_RUN）。G5/G6/G7/G9/G10 是**当前真实缺口**，任何汇总文档不得把它们写成已完成。新增或删除一条用户可见方式时，必须同时更新 `docs/METHODS-PLAIN.md`（界面文案唯一来源）、`web/ux.js`、`python_desktop/methods.py` 与本文矩阵——四者不同步即视为文档回归。
+**不确定性声明（必须这么读）**：G1–G4 的状态取自 **2026-10-12 的源树取证**，并各自给出**最高证据等级**（最高只到 L1/L2，真实网络一律 NOT_RUN）。G5 已从「未实现」升级为「第一阶段已落地、构建与真机 NOT_RUN」，G9 已从「进行中」升级为「已复审 pass（基准 `e60ba0d`）」——**升级只对证据覆盖到的那次基准成立**。G6（Windows 桌面实机）、G7（macOS）、G10（网页端只走 WS）仍是**当前真实缺口**，任何汇总文档不得把它们写成已完成。新增或删除一条用户可见方式时，必须同时更新 `docs/METHODS-PLAIN.md`（界面文案唯一来源）、`web/ux.js`、`python_desktop/methods.py` 与本文矩阵——四者不同步即视为文档回归。
 
 ---
 
@@ -247,12 +247,12 @@ sed -n '34,140p' p2pchat/python_desktop/methods.py | grep -c '"title"'   # 9
 grep -n '^METHODS' p2pchat/native/adapter.py         # 43:METHODS = ("udp-probe","quic","tcp","tcp-simopen","upnp","pcp","natpmp")
 grep -n 'PROFILES' p2pchat/backend/protocol.py       # 3 个 ICE profile
 ls p2pchat/native/lan_discovery.py p2pchat/native/nat_behavior.py p2pchat/native/port_prediction.py   # 三个都存在（G1/G2/G3 已落地）
-ls p2pchat/python_desktop/qt_ui.py; ls p2pchat/python_desktop/ui.py   # qt_ui.py 在；ui.py: No such file（G9 进行中）
-find p2pchat/android-native -name '*.kt' | wc -l     # 0（G5 仍未实现）
+ls p2pchat/python_desktop/qt_ui.py; ls p2pchat/python_desktop/ui.py   # qt_ui.py 在；ui.py: No such file（G9 已落地并复审 pass）
+find p2pchat/android-native -name '*.kt' | wc -l     # 11（G5 第一阶段已落地；构建/真机仍 NOT_RUN）
 grep -rn "EventSource\|/events" p2pchat/web/         # NO_SSE_CLIENT（G10 仍是缺口）
 grep -c "turn:" p2pchat/web/* p2pchat/native/*.py p2pchat/peer.py p2pchat/server.py 2>/dev/null | paste -sd' '   # 每个文件计数 0
-.venv/bin/python -m pytest p2pchat/tests/desktop/test_methods_copy.py -q   # 21 passed（首版记录的 3 项失败已修）
-.venv/bin/python -m pytest p2pchat/tests -q          # 取证时在收集阶段中止：ImportError: cannot import name 'ui'（t24 中间态，见第 8 节 G9）
+.venv/bin/python -m pytest p2pchat/tests/desktop/test_methods_copy.py -q   # 21 passed
+.venv/bin/python -m pytest p2pchat/tests -q --collect-only                  # 690 tests collected（收集层已恢复；整套实跑留给代码冻结后的终检）
 ```
 
 注意第 3 节命令的退出码：`grep` 无命中时退出码是 1（这正是「没有中继」的期望结果）。做脚本判断时写成 `if grep -rn "turn:" ...; then echo REGRESSION; else echo NO_TURN; fi`，**不要**把非零退出当成命令失败。
@@ -278,6 +278,7 @@ grep -c "turn:" p2pchat/web/* p2pchat/native/*.py p2pchat/peer.py p2pchat/server
 |---|---|---|---|
 | 2026-10-11 | architect（t11） | `430471c6…07c58` / `36e7e32` | 用户可见 9 条；桌面可启动机制 4 项 native + 3 ICE profile + 观测；网关协议层已实现但**未接线**；局域网发现与 NAT 分类为 PENDING；安卓原生零 Kotlin；真实家宽/网关/实机全部 NOT_RUN |
 | 2026-10-12 | architect（t13 文档轮，冻结延后） | HEAD `b56f507`（**未冻结**：清单在 Qt 迁移 t24 落地后重新生成） | 第 9 条改为「路由器放行（自动开一个端口）」并**已接线但默认关闭**（需显式同意；Linux 可核对时「可用」，其它平台 fail-closed）；G1 局域网发现 / G2 NAT 行为分类 / G3 端口预测 / G4 网关接线 **均已落地，最高证据只到 L1**；新增缺口 G9（Qt 迁移进行中、未复审）与 G10（网页端只有 WS，无 HTTP/SSE 接入）；`test_methods_copy.py` 由 3 failed 变为 **21 passed**；整套回归在收集阶段被 t24 中间态阻断，因此**本轮不生成冻结清单** |
+| 2026-10-12（当晚） | architect（t13 文档轮 2，冻结仍延后） | HEAD `4ccbf59`（**仍未冻结**：captain 要求等「代码冻结」） | **G5 升级**：安卓原生 Kotlin 第一阶段已落地（t46，11 个 `.kt`，`docs/ANDROID-NATIVE.md`），构建与真机仍 NOT_RUN；**G9 升级**：Qt 迁移经 t43 needs_revision → t44 修复重建 → **t45 verdict=pass（基准 `e60ba0d`）**，收集层恢复（690 tests collected），其后的提交不在该审范围内；修正 Qt 证据表中「qt-5/qt-6 来自最终构建」「连接后截图未产出」等过期表述；本轮仍**只做文档、不生成清单** |
 
 > 更新规则：每次改动产品代码后，复制上一行、改日期与依据、只写**本次实际核对过**的内容；不要重写历史行。
 

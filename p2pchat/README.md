@@ -85,7 +85,7 @@ Echo是房间成员，只沿来源的认证WebRTC通道回声，不替两个客�
 | 平台 | 如何运行/构建 | 当前可信状态 |
 |---|---|---|
 | Linux浏览器 | 打开上述本地网页，或已授权部署的HTTPS页面 | 真实本机浏览器↔独立echo验证通过 |
-| Linux桌面（Python + Qt/PySide6） | `.venv/bin/python -m p2pchat.python_desktop.app`；或 `npm --prefix p2pchat run desktop:linux` 后运行 `dist/p2p-desktop/p2p-desktop` | 本机自检真实握手通过、PyInstaller 产物可启动（L1/L3）；**Qt 迁移（t24）仍在收尾、尚未独立复审**，最终冻结前以真实状态为准；本机glibc2.44构建不保证旧发行版 |
+| Linux桌面（Python + Qt/PySide6） | `.venv/bin/python -m p2pchat.python_desktop.app`；或 `npm --prefix p2pchat run desktop:linux` 后运行 `dist/p2p-desktop/p2p-desktop` | 本机自检真实握手通过、PyInstaller 产物可启动（L1/L3）；**Qt 迁移已完成并经独立复审 pass（t43 needs_revision → t44 修复+重建产物 → t45 pass，基准 HEAD `e60ba0d`）**。其后的提交（网络环境体检、可达性结论分发、Windows 控制台 UTF-8 等）**不在该次审查范围内**；最终冻结前以真实状态为准。本机glibc2.44构建不保证旧发行版 |
 | Windows桌面（Python + Qt/PySide6） | 同一份源码与同一个 `tools/desktop.spec`，在 Windows 上用 `.venv\Scripts\python.exe -m PyInstaller` | **未验证**：Windows CI 结果待 captain 推送后确认；旧 Electron 版的成功记录不可继承 |
 | macOS桌面 | 同一个 spec（未验证） | **NOT_RUN**：`.app` 布局、签名与公证均未做 |
 | Android Capacitor | 自备已授权SDK36/build-tools36、JDK21；`npm --prefix p2pchat run android:sync`，再在`p2pchat/android`运行`./gradlew --no-daemon -Pandroid.builder.sdkDownload=false assembleDebug` | 页面来源`http://localhost`（仍是安全上下文，录音可用）+ network security config 放行明文，详见`docs/ANDROID-CLEARTEXT.md`；本机无SDK，APK构建与实机一律NOT_RUN |

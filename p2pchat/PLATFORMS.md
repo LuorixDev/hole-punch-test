@@ -2,7 +2,7 @@
 
 ## Current state (2026-10-12)
 
-**The desktop client is pure Python + PySide6 (Qt) + PyInstaller; the Electron desktop shell has been deleted.** The three ICE profiles are one WebRTC implementation with three address-family filters, not three protocols. The browser client is preserved, the Android client remains a Capacitor WebView app, and the Android native Kotlin client is still **not implemented** (feasibility only). Per-method status, evidence levels and open gaps: [PUNCHING-MATRIX](docs/PUNCHING-MATRIX.md). Public evidence boundaries: [EVIDENCE-INDEX](docs/EVIDENCE-INDEX.md). Current frozen hashes: [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) / [FREEZE](docs/FREEZE.json) — **these are regenerated at the final freeze, after the Qt migration lands and the whole suite is green again**; until then treat them as the previous round's snapshot.
+**The desktop client is pure Python + PySide6 (Qt) + PyInstaller; the Electron desktop shell has been deleted.** The three ICE profiles are one WebRTC implementation with three address-family filters, not three protocols. The browser client is preserved; the Android client remains a Capacitor WebView app; and the Android **native Kotlin client is now a phase-1 implementation** (`android-native/`, Kotlin sources with no WebView hosting, protocol-aligned with `peer.py`/`core.js`, JVM unit tests in CI) whose **local build and on-device run remain NOT_RUN**. Per-method status, evidence levels and open gaps: [PUNCHING-MATRIX](docs/PUNCHING-MATRIX.md). Public evidence boundaries: [EVIDENCE-INDEX](docs/EVIDENCE-INDEX.md). Current frozen hashes: [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) / [FREEZE](docs/FREEZE.json) — **these are regenerated at the final freeze, which awaits the captain's code freeze**; until then treat them as the previous round's snapshot.
 
 ### Ownership map
 
@@ -12,20 +12,20 @@
 | Desktop (Windows / macOS) | same source and same spec | never executed there | **NOT_RUN** — no installer, no device, no CI green for this round yet |
 | Browser | `web/` (loaded by `server.py`) | WebRTC only; WS signalling client | **L1/L3**: real browser ↔ independent Python echo, real files/SHA, isolated benchmark lane |
 | Android (shipping) | `android/` (Capacitor 8.5.3, assets from `web/`) | WebView | source/mock only; **device install = NOT_RUN** |
-| Android native (target) | `android-native/` (Gradle skeleton only, **zero Kotlin sources**) | builds an empty spike project | **NOT_RUN**: feasibility documented in [FEASIBILITY](android-native/FEASIBILITY.md) |
+| Android native (phase 1) | `android-native/app/src/main/java/dev/p2pobservatory/nativeprobe/` (Kotlin, no WebView hosting) — see [ANDROID-NATIVE](docs/ANDROID-NATIVE.md) | Kotlin + WebRTC Android SDK; STUN-only ICE config | **JVM unit tests in CI only**; local build **NOT_RUN** (no Android SDK / JDK 21 here), on-device run **NOT_RUN** |
 | Signalling / STUN / log centre | `server.py`, `backend/` | one process, one `--host` per listening site (V6ONLY), so `--host 0.0.0.0 --host ::` is real dual-stack in one process | **L1/L2**: real sockets, isolated netns topologies; real home broadband NOT_RUN |
 
 ### Why the GUI toolkit changed (Tk → Qt)
 
-The first pure-Python desktop shell used Tkinter. On this host that Tk runtime is **not linked against Xft**, `tkinter.font.families()` returns only `('fixed',)`, and measuring Chinese text yields width 0 — the three-screen UI rendered Chinese as blanks. Qt(PySide6) has proper font handling, so the shell was replaced. The Tk module (`python_desktop/ui.py`) is deleted; `tools/desktop.spec` now collects Qt platform plugins and **excludes** `tkinter`. The migration is tracked as t24 and, at the time of writing, was still in progress and **not yet independently reviewed** — every Tk-era test/review result stays valid only for that baseline.
+The first pure-Python desktop shell used Tkinter. On this host that Tk runtime is **not linked against Xft**, `tkinter.font.families()` returns only `('fixed',)`, and measuring Chinese text yields width 0 — the three-screen UI rendered Chinese as blanks. Qt(PySide6) has proper font handling, so the shell was replaced. The Tk module (`python_desktop/ui.py`) is deleted; `tools/desktop.spec` now collects Qt platform plugins and **excludes** `tkinter`. The migration (t24) has since been **independently reviewed and passed** (t43 needs_revision → t44 repair + artifact rebuild → **t45 pass at HEAD `e60ba0d`**); commits after that baseline (network check, reachability verdict dispatch, Windows console UTF-8) are **not** covered by that review.
 
 ## What each client can actually start
 
 | Capability | Desktop (Python) | Browser | Android WebView | Android native |
 |---|---|---|---|---|
-| WebRTC (3 ICE profiles) | yes | yes | yes (System WebView) | not implemented |
-| UDP probe / QUIC / TCP / TCP simultaneous-open | yes (in-process `native/adapter.py`) | no API → unsupported | no adapter → unsupported | not implemented |
-| STUN mapping observation | yes | via WebRTC gathering only | same as browser | not implemented |
+| WebRTC (3 ICE profiles) | yes | yes | yes (System WebView) | yes, phase 1 (JVM tests only; device NOT_RUN) |
+| UDP probe / QUIC / TCP / TCP simultaneous-open | yes (in-process `native/adapter.py`) | no API → unsupported | no adapter → unsupported | not implemented (phase 1 is WebRTC-only) |
+| STUN mapping observation | yes | via WebRTC gathering only | same as browser | yes (STUN-only ICE config; no TURN) |
 | Gateway mapping (UPnP / PCP / NAT-PMP / IPv6 pinhole) | **wired, default OFF, explicit consent only**; reported "available" only where the platform can be verified read-only (Linux) | no API → unsupported | unsupported | not implemented |
 | LAN direct discovery (same subnet, no hole punching) | implemented, default OFF, consent required | no multicast API → unsupported | unsupported | not implemented |
 | Symmetric-NAT port prediction | implemented, default OFF, only when classified symmetric | no API → unsupported | unsupported | not implemented |
@@ -80,7 +80,7 @@ The debug APK is deliberately unsigned-for-distribution (Android debug key only)
 `.github/workflows/build.yml` defines two jobs, both with private, 14-day-retention artifacts and **no release, signing, deploy or license acceptance**:
 
 1. **Clients (matrix: linux / windows / android)** — Node 24.20.0 + Python 3.12; `npm ci --ignore-scripts`; client and platform gates (`node --test` + two `npm audit` levels); watchdog-bounded Python gates (`unittest` for `p2pchat/ci`, the bounded Windows diagnostic, then the full `pytest` suite under a 600 s watchdog); on desktop targets `PyInstaller` plus the packaged `--self-test`; on android the Capacitor APK build against the preinstalled SDK; then tar + `SHA256SUMS.txt` + per-run `npm audit --json`, uploaded as `p2p-observatory-<target>-<sha>`.
-2. **Android native spike** — Java 21, SDK presence assertion, read-only environment probes, `assembleRtcDebug`, WebRTC AAR verification (sha256 / ABI / 16 KB page alignment / required classes), an explicit `DATA_CHANNEL_RUNTIME_TEST: NOT_RUN` line with its reason, uploaded as `p2p-observatory-android-native-<sha>`.
+2. **Android native (phase 1)** — Java 21, SDK presence assertion, read-only environment probes, **native Kotlin/JVM unit tests (a failure fails the job)**, `assembleRtcDebug` with the APK sha256 recorded together with `sourceCommit`, WebRTC AAR verification (sha256 / ABI / 16 KB page alignment / required classes), and an explicit `DATA_CHANNEL_RUNTIME_TEST: NOT_RUN` line with its reason; uploaded as `p2p-observatory-android-native-<sha>`.
 
 Windows results for the **new Python/Qt desktop** are PENDING a captain push; the historical Windows success/`EXE` records belong to the deleted Electron packaging and must not be inherited. A failed native build fails only its own job; Windows never receives a Linux executable.
 

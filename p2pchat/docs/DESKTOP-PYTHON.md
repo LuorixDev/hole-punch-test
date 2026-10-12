@@ -7,7 +7,7 @@
 
 | 平台 | 实现 | 本机验证 | 说明 |
 |---|---|---|---|
-| Linux x86_64 | 纯 Python + Qt(PySide6) | **Qt 版已在本机实跑**：三条 verify 命令通过、`DISPLAY=:0` 下六张中文截图（见「Qt 中文渲染证据」）、打包产物在无 DISPLAY 环境 `--capabilities` / `--self-test` 通过；**独立复审待 t27** | 无界面自检走引擎层（与界面库无关），两种壳都成立；图形界面的 Qt 版已有截图与实跑证据，但**尚未经过独立复审**，请不要把「已实跑」当成「已复审」 |
+| Linux x86_64 | 纯 Python + Qt(PySide6) | **Qt 版已在本机实跑，并经独立复审 pass**：三条 verify 命令通过、`DISPLAY=:0` 下真实图形会话截图（见「Qt 中文渲染证据」）、打包产物在无 DISPLAY 环境 `--capabilities` / `--self-test` 通过；复审链 t43（needs_revision）→ t44（修复+重建产物）→ **t45 verdict=pass**（基准 HEAD `e60ba0d`） | 无界面自检走引擎层（与界面库无关），两种壳都成立。截图分「源码直跑」与「打包产物」两类，**每张的来源与时间在下表逐张标注**；产物身份以 `desktop-build.json` 的 exe/整包/sourceTree 三重哈希为准 |
 | Windows x64 | 同一份 Python 源码 | **未验证** | 打包命令与 Linux 相同（见第五节），从未在 Windows 主机或 Windows CI 上运行过 |
 | macOS | 同一份 Python 源码 | **未验证** | 打包命令与 Linux 相同（见第五节），`.app` 布局、签名与公证均未验证 |
 
@@ -27,20 +27,21 @@
 
 ### Qt 中文渲染证据（DISPLAY=:0 实拍）
 
-四张截图在 `p2pchat/python_desktop/evidence/`，由真实图形会话（`DISPLAY=:0`，Qt 6.12.0）截取：
+截图在 `p2pchat/python_desktop/evidence/`，由真实图形会话（`DISPLAY=:0`，Qt 6.12.0）截取。**尺寸=实际像素，时间=文件的实际抓取时间，来源逐张标出**（同一张图不会既算源码直跑又算打包产物）：
 
-| 文件 | 尺寸 | 内容 |
-|---|---|---|
-| `qt-1-connect.png` | 1000×697 | 第 1 屏：连接服务器（表单、明文确认框、无中继说明） |
-| `qt-2-attempt.png` | 1000×697 | 第 2 屏：九种方式逐条列出（人话名称 / 一句话说明 / 可行网络 / 状态 / 可用性 / 实测延迟） |
-| `qt-3-chat.png` | 1000×697 | 第 3 屏：聊天（房间成员、消息区、发送/图片/文件/录音） |
-| `qt-4-settings.png` | 1000×720 | 右上角设置：剩余方式、可用性、延迟、测速、诊断暂停开关、「需要你单独同意的三件事」 |
-| `qt-5-frozen-packaged.png` | 1000×722 | **打包产物** `dist/p2p-desktop/p2p-desktop` 的真实窗口（Wayland 平台插件） |
-| `qt-6-frozen-xcb.png` | 1000×721 | **打包产物**用 `QT_QPA_PLATFORM=xcb` 启动的真实窗口，证明包里的 X11 平台插件（`libqxcb.so`）可用 |
+| 文件 | 实际尺寸 | 抓取时间 | 来源 | 内容 |
+|---|---|---|---|---|
+| `qt-1-connect.png` | 1000×697 | 08:11 | 源码直跑 | 第 1 屏：连接服务器（表单、明文确认框、无中继说明） |
+| `qt-2-attempt.png` | 1100×793 | 13:30 | **源码直跑（连接态）** | 第 2 屏：九种方式逐条列出；顶部可见「已打通：双栈直连、IPv4 直连 / 实测延迟：1.0 ms / 剩余方式：5 条」，即这条跑道确实连上了 |
+| `qt-3-chat.png` | 1100×793 | 13:30 | 源码直跑（连接态） | 第 3 屏：聊天（房间成员、消息区、发送/图片/文件/录音） |
+| `qt-4-settings.png` | 1000×720 | 08:11 | 源码直跑 | 右上角设置：剩余方式、可用性、延迟、测速、诊断暂停开关、「需要你单独同意的三件事」 |
+| `qt-2-attempt-preview.png` | 1100×794 | 12:13 | 源码直跑（**预览态**） | 未连上时的第 2 屏；**只作预览用途，不作为流程证据** |
+| `qt-5-frozen-packaged.png` | 1000×722 | 08:24 | **打包产物：08:24 那次构建的 bundle** | 那份 bundle 的真实窗口（Wayland 平台插件）；窗口类 `p2p-desktop`，标题「直连聊天 · 桌面版 0.2.0」 |
+| `qt-6-frozen-xcb.png` | 1000×721 | 08:24 | **打包产物：同一份 08:24 bundle** | 用 `QT_QPA_PLATFORM=xcb` 启动，证明包里的 X11 平台插件（`libqxcb.so`）可用（窗口管理器里 `client_type=x11`） |
+| `qt-7-packaged-connect.jpg` | 1100×794 | 14:22 | **打包产物：14:20 的冻结产物** | 该产物运行时的窗口，内容为**第 1 屏（连接服务器）**：明文确认框已勾选、下方持续显示未加密提示 |
 
-六张合计约 **900 KB**（已压到 1000 px 宽），全部来自**最终**一次 PyInstaller 构建（2026-10-12）对应的代码，其中 1–4 为源码运行、5–6 为 `dist/p2p-desktop/` 里的冻结产物。`qt-1…4` 由源码运行并在 `DISPLAY=:0` 下用 Qt 自绘抓取；
-`qt-5`/`qt-6` 是对**冻结产物**窗口的真实截屏（窗口类 `p2p-desktop`，标题「直连聊天 · 桌面版 0.2.0」，
-后者在窗口管理器里以 `client_type=x11` 出现）。
+`qt-1…qt-4` 与预览态合计约 **1.2 MB**（长边压到 1100 px）。
+**不要把 `qt-5`/`qt-6` 当成最终冻结产物的证据**：它们来自 **08:24 那次构建的 bundle**，之后产物在 14:20 又被重建过一次；`qt-5`/`qt-6` 能证明的只有「打包产物能启动、Qt 平台插件可用」。最终产物的截图是 `qt-7-packaged-connect.jpg`（14:20 构建，`--capabilities`/`--self-test` 均 exit 0）。
 
 复核方式（可复现）：在图形会话里跑下面这段，然后**用眼睛看**截图里的中文是否成字（不是方块/空白）：
 
@@ -199,6 +200,7 @@ WebRTC 依旧完全走 `peer.py`。两个成员身份在界面上会合并成**�
 ### 已知局限
 
 - **测速现在能拿到对端确认**：隔离通道改为**进度型空闲窗口**（空闲 20 秒才算超时，发起方可协商 `drainMs`，桌面端宣告 10000，另设 300 秒硬顶兜底）之后，独立复审在**源码**与**打包产物**上各跑一次 `--self-test`，两次都拿到对端 bench-ack：**65.52 Mbps / 53.58 Mbps**。这是**应用层 goodput（对端实际确认收到的字节 ÷ 单调时间）**，**不是线路带宽**，也不保证跨网络可重复。
+  **速率口径**：独立复审在回环上量到的一次确认速率是 **47.02 Mbps**，产物自检那次是 **75.18 Mbps**——**两者都是「回环 + 应用层确认」速率，不是线路带宽**，也不代表跨 NAT/家宽的成绩；同机不同构建、不同时点会给出不同数值，引用时请连口径一起引。
   对端始终沉默时仍然如实报 `ACK_TIMEOUT`，**不会**编造速度；TCP 通道没有独立 lane，明确不允许测速。
 - 延迟只在有直连、并且打开设置或握手成功时测量；没测到就显示「—」。
 - 录音依赖本机已有的 ALSA/PortAudio 前端（如 `arecord`）；没有的话界面直接说「录音不可用」，不会假装录到。
@@ -284,17 +286,78 @@ CI 不安装锁文件（它装 requirements.txt + constraints.txt），这一点
 - 不把同机或模拟结果当成真实家宽证据；
 - 不静默改走其它通道：直连不成功就是失败，界面按用户能懂的话说明原因。
 
+### 打开设置面板时的网络副作用（如实说明）
+
+界面在**第一次构建设置面板**时会做一次**只在本机回环**的能力探测，用来决定「同网段直连发现」那一行显示可用还是不支持：
+
+- **局域网探测**：短暂创建并关闭 **1 个 loopback UDP socket**（做 `IP_ADD_MEMBERSHIP` 能力自检），**不发送任何报文**、不碰真实网卡、不改宿主防火墙（`python_desktop/lan_client.py` 的 `capability()` → `native/lan_discovery.py` 的 `multicast_available`）。结果会被缓存，此后刷新设置面板不再重探（复审实测：`_refresh_optin` 连做 5 次 = 0 个新 socket）。
+- **网关能力**：**严格 0 个 socket**——只读平台判断与（Linux 上的）只读路由表；没有点「同意」就不会有任何网络请求（`python_desktop/gateway_optin.py` 的 `capability()`）。
+- 真正开始发现/映射必须由你显式同意：`LanDirect.enable(consent=False)` 与网关映射在未同意时都**不创建 socket**（复审已实测）。
+
 ## 构建记录：产物与源码的绑定
 
 打包产物不入库（体积数百 MB），但它的身份写在 `python_desktop/evidence/desktop-build.json` 里，可据此核对任意一份产物或截图：
 
 | 项 | 值 |
 |---|---|
-| sourceCommit | `a58943f9d0604c7ecc6ac56f0717884cb30192c9`（构建时工作树 有未提交改动，故以 sourceTree 为准） |
-| sourceTree | `sha256:85dfb5816732fa1a6c91bc7b1b772ef5f8f00fa899e91e0fc9df1d303cda23c3`（770 个 `.py/.spec/.md/.txt`，排除 releases/review/verification/ci/dist-web） |
-| 可执行文件 sha256 | `053738d965e83ae639ef34fe569395f36800d479e2ec43be9f75b3a12fee742c`（5247536 字节） |
-| 整包树哈希 | `sha256:a94398bc19f8cf4e5cf5d763868bb0735991642d909f66f9f9560b6ac2c22310`（453 个文件 / 514588218 字节） |
-| 产物自检 | `--capabilities` exit 0；`--self-test` exit 0（文本+回显、65536 字节文件校验、数据通道往返 0.5ms、应用层 75.18 Mbps、STUN 观测） |
+| sourceCommit | `4ccbf59627d9c0a084e1fe1ac6ec97279bc53555`（构建时工作树有未提交改动，故以 sourceTree 为准） |
+| sourceTree | `sha256:2fe162434c8a13de80594d811b529b4366442a3ad9053dd26de4ba8d7bb21e1a`（142 个 `.py/.spec/.md/.txt`；排除 `node_modules/`、`releases/`、`review/`、`verification/`、`ci/`、`dist-web/`、`evidence/`） |
+| 可执行文件 sha256 | `412b7d8f8d6cd5b14f6e760584e1514859b69b3db469ed461fe2c0562860e188`（5261832 字节） |
+| 整包树哈希 | `sha256:9b54cc6c8250d74c451f93db1e600b13ed9af33b291e0217b401ea65f4b500ff`（453 个文件） |
+| 产物自检 | `--capabilities` exit 0；`--self-test` exit 0（文本+回显、65536 字节文件校验、数据通道往返 0.5ms、STUN 观测；**回环**上的应用层确认速率随负载在 47.56–75.18 Mbps 之间波动，**不是线路带宽**） |
 
-截图 `evidence/qt-7-packaged-connect.jpg`（sha256 `d90326c2d8e46fab…`）来自**该产物**运行时的窗口，不是源码直跑的窗口。
-连接后的截图未产出：它需要真实对端会话；预览态截图 `evidence/qt-2-attempt-preview.png` 明确标为预览用途，不作为流程证据。
+### `sourceTree` 配方（照算法复算，不要靠「数文件」）
+
+生成器已在仓库里：`p2pchat/tools/desktop_build_record.py`（`--verify` 只核对不写入，`--recipe` 打印配方）。配方就是四条：
+
+1. **文件集**：`p2pchat/**` 下所有后缀 ∈ {`.py`, `.spec`, `.md`, `.txt`} 的文件，**排除**路径中任一目录名命中 `node_modules`、`releases`、`review`、`verification`、`ci`、`dist-web`、`evidence` 的（按路径段判断，不是子串匹配）；
+2. **排序**：按 **POSIX 相对路径字符串**字典序（**不是**按 `Path` 对象排序——`Path` 比较的是路径段，`a-b` 与 `a/b` 的先后与字符串序不同，这一条曾让哈希无法复现）；
+3. **每行**：相对路径 + **两个空格** + 该文件的 `sha256`（小写十六进制）；
+4. **连接与哈希**：行之间用 `\n` 连接、**结尾不留换行**，对整个字节串取一次 `sha256`，写成 `sha256:<hex>`。
+
+```sh
+# 与上面四条等价的独立复算（不调用生成器；在仓库根执行）
+.venv/bin/python - <<'PY'
+import hashlib, os
+from pathlib import Path
+skip = {'node_modules', 'releases', 'review', 'verification', 'ci', 'dist-web', 'evidence'}
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+rows = []
+for dpath, _, files in os.walk('p2pchat'):
+    rel_dir = Path(dpath).as_posix()
+    if any(part in skip for part in rel_dir.split('/')[1:]):
+        continue
+    for name in files:
+        if Path(name).suffix in {'.py', '.spec', '.md', '.txt'}:
+            p = Path(dpath) / name
+            rows.append((p.as_posix(), sha(p)))
+rows.sort()
+text = '\n'.join(f'{r}  {s}' for r, s in rows)
+print('files:', len(rows), 'sourceTree: sha256:' + hashlib.sha256(text.encode()).hexdigest())
+PY
+# 整包树哈希：同一行格式，遍历 dist/p2p-desktop 下每个文件，相对路径同理排序
+```
+
+当前记录值：**142 个文件** → `sha256:2fe162434c8a13de80594d811b529b4366442a3ad9053dd26de4ba8d7bb21e1a`，并且已经用上面这段**独立实现**复算通过（与生成器 `--verify` 的结果逐字一致）。
+该值绑定**当时**的工作树：之后任何一次源码改动都会让它变，所以核对产物身份要同时比对 exe 哈希与整包树哈希，而不是只看 `sourceTree`。
+
+> **旧值 `85dfb58…`（770 文件）为什么复算不出，以及现在为什么可以**
+>
+> 那个值是 captain 首次生成记录时的**临时脚本**写的（脚本当时没进仓库）：它没有排除 `p2pchat/node_modules/`（Electron 时代残留、gitignored、约 550 个 `.md/.txt`，数量随本机状态变），而且按 `Path` 对象排序。两处合起来使该值**无法被第三方复现**。
+>
+> 处置（已完成）：生成器纳入仓库、在代码里显式排除那些目录、排序改为相对路径字符串，并**重生成记录**（142 文件 → `2fe16243…`）。旧值仅作为历史留痕，**不要再引用**。
+>
+> 顺带记一条同类差异，避免混淆：`android-native/tools/apk_identity.py:79` 的 `source_tree_hash()` 用的是**另一套**行格式（`rel\0sha256\n`，无后缀过滤、按路径段跳过 SKIP_DIRS/SKIP_FILES），与上表的两空格格式**不是**同一个算法；两处不要互相引用为“同一个哈希”。
+
+### 连接态截图到底来自哪里（消除互相矛盾的读法）
+
+- **源码直跑的连接态截图** = `evidence/qt-2-attempt.png`（13:30）：第 2 屏顶部写着「已打通：双栈直连、IPv4 直连 / 实测延迟：1.0 ms / 剩余方式：5 条」。
+- **打包产物的窗口截图** = `evidence/qt-7-packaged-connect.jpg`（14:22，来自 14:20 的冻结产物），内容是该产物的**第 1 屏（连接服务器）**。
+- **「打包产物 + 真实对端」的连接态截图：确实未产出**——它需要一次真实对端会话；当时用的是契约允许的**预览态**替代（`qt-2-attempt-preview.png`，明确标为预览、不作流程证据）。
+
+所以正确读法是：**连接态证据来自源码直跑；打包产物证据来自第 1 屏窗口截图；两者不能互相冒充。** 不要把它读成「已用打包产物和真实对端连过」。
