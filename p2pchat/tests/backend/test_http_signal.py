@@ -264,7 +264,7 @@ async def test_two_http_clients_join_see_each_other_forward_signal_and_disconnec
             a.close()
             b.close()
         assert await wait_empty(hub) == EMPTY
-        journal = (tmp_path / 'server.jsonl').read_text()
+        journal = (tmp_path / 'server.jsonl').read_text(encoding='utf-8', errors='replace')
         assert SECRET not in journal and 'http-a' not in journal
     finally:
         await runner.cleanup()
@@ -366,7 +366,7 @@ async def test_http_rejects_relay_shapes_with_same_codes_as_ws(tmp_path, payload
             assert body == {'v': 1, 'type': 'error', 'code': expected}
             assert status in {400, 401, 403}
             assert await wait_empty(app['hub']) == EMPTY   # 出错即断开，和 WS 一致
-            journal = (tmp_path / 'server.jsonl').read_text()
+            journal = (tmp_path / 'server.jsonl').read_text(encoding='utf-8', errors='replace')
             assert expected in journal
             assert 'never relay me' not in journal
             peer.close()
@@ -394,7 +394,7 @@ async def test_http_rejects_turn_candidates_with_relay_forbidden(tmp_path):
             await other.open_events()
             status, body = await peer.post(signal_body(other.id, sdp=relay_sdp))
             assert (status, body['code']) == (403, 'RELAY_FORBIDDEN')
-            assert 'typ relay' not in (tmp_path / 'server.jsonl').read_text()
+            assert 'typ relay' not in (tmp_path / 'server.jsonl').read_text(encoding='utf-8', errors='replace')
             peer.close()
             other.close()
         assert await wait_empty(app['hub']) == EMPTY
@@ -529,7 +529,7 @@ async def test_http_oversize_body_is_rejected(tmp_path):
                 response.close()
             except (ClientConnectionError, ConnectionResetError):
                 pass  # 服务器拒绝后立刻关闭；下面用日志与状态确认确实按 LIMIT_EXCEEDED 处理
-            await wait_for(lambda: 'LIMIT_EXCEEDED' in (tmp_path / 'server.jsonl').read_text())
+            await wait_for(lambda: 'LIMIT_EXCEEDED' in (tmp_path / 'server.jsonl').read_text(encoding='utf-8', errors='replace'))
             peer.close()
         assert await wait_empty(app['hub']) == EMPTY
     finally:
@@ -628,7 +628,7 @@ async def test_slow_consumer_overflow_disconnects_and_logs_reason(tmp_path):
             assert sent[-1][0] in {404, 429}                    # 目标已被拆掉：明确失败
             assert sent[-1][1] == 'PEER_UNAVAILABLE'
             await wait_for(lambda: slow.id not in hub.peers)
-            journal = (tmp_path / 'server.jsonl').read_text()
+            journal = (tmp_path / 'server.jsonl').read_text(encoding='utf-8', errors='replace')
             assert 'session.error' in journal and 'LIMIT_EXCEEDED' in journal
             status, body = await slow.post({'v': 1, 'type': 'ping'})
             assert status == 401 and body['code'] == 'AUTH_FAILED'   # token 已失效：明确失败

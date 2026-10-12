@@ -245,6 +245,15 @@ class Budget:
     attempts: int = 16
     candidates: int = 64
     queued_bytes: int = 512 * 1024
+    # Bounded wait for ACK-driven drain of the QUIC retransmit buffer. A momentary
+    # full buffer must not fail a healthy burst (Windows ACK cadence is slower than
+    # Linux loopback); a peer that never drains still fails loudly after this bound.
+    drain_timeout: float = 5.0
+
+
+# aioquic keeps retransmittable copies, so its buffer is larger than the payload.
+QUIC_RETRANSMIT_FACTOR = 1.4
+QUIC_DRAIN_INTERVAL = 0.005
 
 
 class MutualQuicConnection(QuicConnection):
@@ -1198,6 +1207,31 @@ class Attempt:
             self.writer.write(wire)
             await self.writer.drain()
 
+    async def quic_pending_bytes(self):
+        """Bytes aioquic still holds for retransmission; drops as the peer's ACKs arrive."""
+        if not self.quic:
+            return 0
+        return sum(s.sender._buffer_stop - s.sender._buffer_start for s in self.quic._streams.values())
+
+    async def wait_for_quic_drain(self, needed):
+        """Wait (bounded) for ACK-driven drain of the QUIC retransmit buffer.
+
+        Returns as soon as the buffer plus this frame fits the budget. Only a peer
+        that keeps not acknowledging reaches the bound, and then this raises
+        BACKPRESSURE: nothing is buffered without limit and no timeout is relaxed.
+        """
+        if not self.quic:
+            return
+        budget = self.adapter.budget
+        deadline = time.monotonic() + max(0.0, float(budget.drain_timeout))
+        while True:
+            if await self.quic_pending_bytes() + needed <= budget.queued_bytes:
+                return
+            if time.monotonic() >= deadline:
+                raise ValueError("BACKPRESSURE")
+            # Yielding is what lets this attempt's UDP task process the peer's ACKs.
+            await asyncio.sleep(QUIC_DRAIN_INTERVAL)
+
     async def send(self, lane, data):
         if self.state != "direct" or self.mechanism == "udp-probe":
             raise ValueError("NOT_MESSAGE_CAPABLE")
@@ -1208,10 +1242,11 @@ class Attempt:
         if self.queued + len(data) > self.adapter.budget.queued_bytes:
             raise ValueError("BACKPRESSURE")
         # QUIC internal retransmit storage needs ACK backpressure, not just the UDP socket.
+        # Wait (bounded) for the peer's ACKs to drain it instead of failing instantly:
+        # a momentary full buffer used to abort a healthy file/benchmark burst, which is
+        # exactly what Windows loopback ACK cadence produced.
         if self.quic:
-            pending = sum(s.sender._buffer_stop - s.sender._buffer_start for s in self.quic._streams.values())
-            if pending + len(data) * 1.4 > self.adapter.budget.queued_bytes:
-                raise ValueError("BACKPRESSURE")
+            await self.wait_for_quic_drain(int(len(data) * QUIC_RETRANSMIT_FACTOR))
         self.queued += len(data)
         try:
             async with self.send_lock:

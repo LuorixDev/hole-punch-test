@@ -248,7 +248,7 @@ def test_encrypted_private_key_is_rejected(tmp_path):
 
 def test_garbage_certificate_is_rejected(tmp_path):
     cert = tmp_path / 'bad.pem'
-    cert.write_text('this is not a certificate')
+    cert.write_text('this is not a certificate', encoding='utf8')
     _, key = _write_cert(tmp_path)
     result = pre.check_tls(cert, key, 'p2p.example')
     assert result.status == pre.FAIL and result.code == 'CERT_PARSE_FAILED'
@@ -405,7 +405,7 @@ def test_data_dir_owner_and_mode_semantics_are_honest(tmp_path):
 
 def test_data_dir_file_instead_of_directory_blocks(tmp_path):
     target = tmp_path / 'data'
-    target.write_text('x')
+    target.write_text('x', encoding='utf8')
     assert pre.check_data_dir(target).code == 'DATA_DIR_NOT_DIRECTORY'
 
 
@@ -914,7 +914,7 @@ def test_cli_text_output_is_human_readable(tmp_path, capsys):
 def test_text_output_never_contains_key_material(tmp_path, capsys):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     cert, key_path = _write_cert(tmp_path, key=key)
-    key_body = key_path.read_text().splitlines()[1][:24]  # 私钥正文的一小段
+    key_body = key_path.read_text(encoding='utf8').splitlines()[1][:24]  # 私钥正文的一小段
     pre.main(['--host', '0.0.0.0', '--port', '18088', '--stun-port', '13478',
               '--cert', str(cert), '--key', str(key_path), '--domain', 'p2p.example',
               '--origin', 'https://p2p.example', '--data', str(tmp_path)])

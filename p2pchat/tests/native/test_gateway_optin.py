@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 from p2pchat.native import adapter as adapter_module
 from p2pchat.native.adapter import NativeAdapter, gateway_platform_capability
@@ -107,18 +108,34 @@ def test_non_linux_reports_unsupported_without_silent_fallback(monkeypatch) -> N
         assert str(error) == "PLATFORM_VALIDATION_UNAVAILABLE"
 
 
+# 平台真实原因码：Linux 只读路由表可用 / 无路由表 / 无默认网关；其它平台核对未实现。
+# 不能用假的“不可用”糊弄，也不能把某个平台的原因码当成所有平台都必须出现的值。
+REAL_PLATFORM_REASONS = {"EXPLICIT_OPT_IN_REQUIRED", "PLATFORM_VALIDATION_UNAVAILABLE",
+                         "NO_LOCAL_ROUTING_TABLE", "NO_DEFAULT_GATEWAY"}
+
+
 def test_linux_reports_available_and_still_requires_consent() -> None:
     adapter = NativeAdapter()
     capability = adapter.gateway_capability()
     entries = asyncio.run(adapter.capabilities())["methods"]
     gateway_entries = [entry for entry in entries if entry["mechanism"] in {"upnp", "pcp", "natpmp"}]
+    assert gateway_entries, "网关方式必须如实出现在能力表里"
+    assert capability["consentRequired"] is True
+    assert capability["reason"] in REAL_PLATFORM_REASONS and capability["reason"], capability
     if capability["status"] == "available":
+        # Linux 的只读路由表核对可用：仍然必须显式同意才会去请求映射。
+        assert sys.platform.startswith("linux"), "只有 Linux 的只读路由表核对被验证过"
         assert capability["gateway"], "Linux 上应该能读只读路由表拿到默认网关"
         assert all(entry["status"] == "available" and entry["requiresExplicitConsent"] for entry in gateway_entries)
         assert all(entry["reason"] == "EXPLICIT_OPT_IN_REQUIRED" for entry in gateway_entries)
     else:
-        assert capability["reason"] in {"NO_LOCAL_ROUTING_TABLE", "NO_DEFAULT_GATEWAY"}
-        assert all(entry["status"] == "unsupported" for entry in gateway_entries)
+        # Linux 无路由表 / Windows / macOS：如实报不支持，原因码必须是平台真实原因。
+        if not sys.platform.startswith("linux"):
+            assert capability["reason"] == "PLATFORM_VALIDATION_UNAVAILABLE", capability
+        else:
+            assert capability["reason"] in {"NO_LOCAL_ROUTING_TABLE", "NO_DEFAULT_GATEWAY"}, capability
+        assert all(entry["status"] == "unsupported" and entry["canMessage"] is False for entry in gateway_entries)
+        assert all(entry["reason"] == capability["reason"] for entry in gateway_entries)
 
 
 def test_authorized_mock_completes_map_renew_close_lifecycle() -> None:
@@ -207,32 +224,74 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]  # p2pchat/ 包目录；下面路径相对它
 
+# 纯逻辑模块：不允许出现任何界面库导入，也不允许构造控件。
 LOGIC_MODULES = (
     "python_desktop/gateway_optin.py",
     "python_desktop/lan_client.py",
     "python_desktop/engine.py",
     "python_desktop/signal_session.py",
     "python_desktop/native_session.py",
-    "python_desktop/app.py",
     "native/adapter.py",
 )
 
-GUI_MARKERS = ("tkinter", "PySide", "PyQt", "from . import fonts", "import fonts")
+GUI_TOOLKIT_IMPORTS = (
+    "import tkinter", "from tkinter", "import _tkinter",
+    "import PySide6", "from PySide6", "import PyQt", "from PyQt",
+)
+WIDGET_CONSTRUCTION = (
+    "QtWidgets.Q", "QApplication(", "QDialog(", "QLabel(", "QMainWindow(",
+    "Tk(", "tk.Label", "ttk.",
+)
+
+# Qt 迁移后的薄界面层：只有它可以 import 界面库并构造控件。
+UI_MODULE = "python_desktop/qt_ui.py"
+UI_MODULE_IMPORT = "from PySide6 import QtCore"
+OLD_TK_MODULE = "python_desktop/ui.py"
+# 例外：version.py 允许在函数体里做“本机能力探测”式导入（必须缩进，不能顶格 import）。
+RUNTIME_PROBE_ALLOWLIST = {"version.py"}
 
 
 def test_logic_layer_is_free_of_gui_toolkits() -> None:
+    """逻辑层（能力查询 / opt-in 状态机 / native 调用）不依赖任何界面库。"""
     offenders = []
     for relative in LOGIC_MODULES:
         source = (ROOT / relative).read_text(encoding="utf-8")
-        for marker in GUI_MARKERS:
+        for marker in GUI_TOOLKIT_IMPORTS + WIDGET_CONSTRUCTION:
             if marker in source:
                 offenders.append(f"{relative}: {marker}")
     assert offenders == [], f"逻辑层不应依赖界面库：{offenders}"
 
 
-def test_ui_layer_is_the_only_place_that_touches_the_toolkit() -> None:
-    ui = (ROOT / "python_desktop/ui.py").read_text(encoding="utf-8")
-    assert "import tkinter as tk" in ui, "ui.py 是薄界面层，界面库只应出现在这里"
-    for relative in LOGIC_MODULES:
-        source = (ROOT / relative).read_text(encoding="utf-8")
-        assert "tk.Label" not in source and "ttk." not in source, f"{relative} 不应包含界面控件代码"
+def test_ui_layer_is_the_only_place_that_imports_the_toolkit() -> None:
+    """界面库只允许出现在薄界面层；旧的 Tk 模块必须已经移除。"""
+    ui = ROOT / UI_MODULE
+    assert ui.is_file(), f"薄界面层应当是 {UI_MODULE}"
+    assert UI_MODULE_IMPORT in ui.read_text(encoding="utf-8"), "qt_ui.py 应当 import Qt 控件层"
+    assert not (ROOT / OLD_TK_MODULE).exists(), "旧的 Tk 界面模块必须移除"
+
+    offenders = []
+    for path in sorted((ROOT / "python_desktop").glob("*.py")):
+        if path.name == Path(UI_MODULE).name:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for marker in GUI_TOOLKIT_IMPORTS:
+            if marker not in text:
+                continue
+            indented = all(line[:1].isspace() or not line.strip()
+                           for line in text.splitlines() if marker in line)
+            if path.name in RUNTIME_PROBE_ALLOWLIST and indented:
+                continue  # 运行时能力探测：只在函数体里 import，不参与界面渲染
+            offenders.append(f"{path.name}: {marker}")
+    assert offenders == [], f"界面库只应出现在 {UI_MODULE}：{offenders}"
+
+
+def test_only_the_thin_ui_layer_builds_widgets() -> None:
+    offenders = []
+    for path in sorted((ROOT / "python_desktop").glob("*.py")):
+        if path.name == Path(UI_MODULE).name:
+            continue
+        text = path.read_text(encoding="utf-8")
+        found = [marker for marker in WIDGET_CONSTRUCTION if marker in text]
+        if found:
+            offenders.append(f"{path.name}: {found}")
+    assert offenders == [], f"只有 {UI_MODULE} 可以构造控件：{offenders}"

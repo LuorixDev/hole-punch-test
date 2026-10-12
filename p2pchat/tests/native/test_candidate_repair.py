@@ -15,7 +15,7 @@ import pytest
 from p2pchat.native.adapter import NativeAdapter, Budget
 from p2pchat.native.auth import Auth, packed
 from p2pchat.native.bridge import stun_config
-from .test_transport import params, wait_states
+from .test_transport import bridge_frames, cli_env, params, run_bridge, wait_states
 
 
 class Translation(asyncio.DatagramProtocol):
@@ -153,7 +153,8 @@ async def test_stdio_explicit_stun_emits_same_socket_srflx():
     transport, protocol = await endpoint(MockGateway('stun'))
     process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'p2pchat.native.bridge',
         '--stun-address', '127.0.0.1', '--stun-port', str(transport.get_extra_info('sockname')[1]),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=cli_env())
     try:
         p = params('quic', 'offerer', str(uuid.uuid4()), str(uuid.uuid4()))
         process.stdin.write((json.dumps(dict(v=1, id=1, method='start', params=p))+'\n').encode())
@@ -212,9 +213,10 @@ def test_stun_cli_and_capability_contract():
     for address, port in [('localhost', 3478), ('224.0.0.1', 3478), ('0.0.0.0', 3478), ('169.254.1.1', 3478), ('127.0.0.1', 0), ('127.0.0.1', None)]:
         with pytest.raises(ValueError, match='INVALID_STUN_CONFIG'):
             stun_config(address, port)
-    result = subprocess.run([sys.executable, '-m', 'p2pchat.native.bridge', '--stun-address', '127.0.0.1', '--stun-port', '3478'],
-        input=json.dumps(dict(v=1, id=1, method='capabilities', params={}))+'\n', text=True, capture_output=True, timeout=10)
-    assert result.returncode == 0, result.stderr
-    methods = json.loads(result.stdout)['result']['methods']
+    # 显式 utf-8 两端契约：Windows 代码页既编码不了能力文案，也会让父进程拿到空输出。
+    result = run_bridge(args=['--stun-address', '127.0.0.1', '--stun-port', '3478'],
+                        requests=[dict(v=1, id=1, method='capabilities', params={})])
+    frames = bridge_frames(result)
+    methods = frames[-1]['result']['methods']
     assert {m['mechanism']: m['limits']['independentBenchmark'] for m in methods} == {
         'udp-probe': False, 'quic': True, 'tcp': False, 'tcp-simopen': False, 'upnp': False, 'pcp': False, 'natpmp': False}

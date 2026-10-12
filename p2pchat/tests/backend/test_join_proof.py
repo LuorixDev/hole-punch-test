@@ -9,6 +9,7 @@
 """
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -30,6 +31,21 @@ SECRET_HEX_MARK = '746869732d69732d6e6f742d612d6b6579'  # 仅用于确证“不�
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def subprocess_env():
+    """子进程固定用 UTF-8 输出。
+
+    Windows 默认码页是 charmap（cp1252 之类）：服务端启动时那句中文警告既写不进
+    stderr（编码错），读回来也会炸（解码错）。这里把子进程的 stdout/stderr 钉死成
+    UTF-8，测试侧再按 UTF-8 读，两边都不依赖平台默认编码。
+    """
+    return {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
+
+
+def read_log(path):
+    """日志按 UTF-8 读；极端情况下用 replace 保证不抛错，内容断言仍然照常生效。"""
+    return Path(path).read_text(encoding='utf-8', errors='replace')
+
 
 async def start(tmp_path, **kwargs):
     kwargs.setdefault('origins', [ORIGIN])
@@ -119,6 +135,41 @@ def data_dir_text(path):
         if item.is_file():
             blob += item.read_bytes()
     return blob
+
+
+# ---------------------------------------------------------------------------
+# 编码回归守卫：不允许再依赖平台默认编码
+# ---------------------------------------------------------------------------
+
+def test_read_log_handles_non_ascii_bytes_on_any_platform(tmp_path):
+    """服务端日志是 UTF-8 字节；读日志必须显式 UTF-8，否则 Windows(charmap) 会解码失败。"""
+    path = tmp_path / 'server.log'
+    payload = '警告：信令未加密，链路可被观察/干扰；房间密钥不再在链路上传输'
+    path.write_bytes(payload.encode('utf-8'))
+    assert payload in read_log(path)
+
+
+def test_read_log_asks_for_utf8_explicitly(tmp_path, monkeypatch):
+    """回归守卫：read_log 必须显式传 encoding（不能依赖平台默认编码）。"""
+    recorded = {}
+    real = Path.read_text
+
+    def spy(self, encoding=None, errors=None):
+        recorded['encoding'] = encoding
+        return real(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, 'read_text', spy)
+    (tmp_path / 'x.log').write_bytes(b'ok')
+    read_log(tmp_path / 'x.log')
+    assert recorded['encoding'] == 'utf-8'
+
+
+def test_subprocess_env_pins_utf8_streams():
+    """子进程必须被钉死成 UTF-8 输出，否则 Windows 上那句中文警告根本写不进日志。"""
+    env = subprocess_env()
+    assert env['PYTHONIOENCODING'] == 'utf-8'
+    assert env['PYTHONUTF8'] == '1'
+    assert os.environ.get('PATH') == env.get('PATH')      # 只是加约束，不丢原有环境
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +416,7 @@ async def test_plaintext_mode_keeps_the_secret_out_of_the_data_dir(tmp_path):
     process = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'p2pchat.server', '--host', '0.0.0.0', '--port', str(port),
         '--stun-port', '0', '--stun-host', '127.0.0.1', '--data', str(data_dir),
-        '--origin', ORIGIN, '--allow-plaintext', stdout=log, stderr=log)
+        '--origin', ORIGIN, '--allow-plaintext', stdout=log, stderr=log, env=subprocess_env())
     try:
         async with asyncio.timeout(15):
             while True:
@@ -395,11 +446,11 @@ async def test_allow_and_deny_legacy_join_conflict_is_rejected(tmp_path):
     process = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'p2pchat.server', '--host', '127.0.0.1', '--port', str(port),
         '--stun-port', '0', '--data', str(tmp_path / 'conflict'), '--allow-legacy-join', '--deny-legacy-join',
-        stdout=log, stderr=log)
+        stdout=log, stderr=log, env=subprocess_env())
     try:
         assert await asyncio.wait_for(process.wait(), 20) != 0
         log.flush()
-        assert 'not both' in (tmp_path / 'conflict.log').read_text()
+        assert 'not both' in read_log(tmp_path / 'conflict.log')
     finally:
         await _stop(process, log)
 
@@ -565,11 +616,11 @@ async def test_plaintext_flag_default_off_and_on(tmp_path):
     refused = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'p2pchat.server', '--host', '0.0.0.0', '--port', str(port),
         '--stun-port', '0', '--data', str(tmp_path / 'refused'), '--origin', ORIGIN,
-        stdout=refused_log, stderr=refused_log)
+        stdout=refused_log, stderr=refused_log, env=subprocess_env())
     try:
         assert await asyncio.wait_for(refused.wait(), 20) != 0
         refused_log.flush()
-        assert 'public signaling requires TLS' in (tmp_path / 'refused.log').read_text()
+        assert 'public signaling requires TLS' in read_log(tmp_path / 'refused.log')
     finally:
         await _stop(refused, refused_log)
 
@@ -578,7 +629,7 @@ async def test_plaintext_flag_default_off_and_on(tmp_path):
     allowed = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'p2pchat.server', '--host', '0.0.0.0', '--port', str(port),
         '--stun-port', '0', '--data', str(tmp_path / 'allowed'), '--origin', ORIGIN,
-        '--allow-plaintext', stdout=allowed_log, stderr=allowed_log)
+        '--allow-plaintext', stdout=allowed_log, stderr=allowed_log, env=subprocess_env())
     try:
         async with asyncio.timeout(15):
             while True:
@@ -591,7 +642,7 @@ async def test_plaintext_flag_default_off_and_on(tmp_path):
                 except OSError:
                     await asyncio.sleep(0.05)
         allowed_log.flush()
-        text = (tmp_path / 'allowed.log').read_text()
+        text = read_log(tmp_path / 'allowed.log')
         assert '信令未加密，链路可被观察/干扰；房间密钥不再在链路上传输' in text
         async with ClientSession() as session:
             status, welcome = await http_join(session, f'http://127.0.0.1:{port}', 'plain-flag', name='plain')
@@ -609,7 +660,7 @@ async def test_deny_legacy_flag_refuses_even_loopback(tmp_path):
     process = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'p2pchat.server', '--host', '127.0.0.1', '--port', str(port),
         '--stun-port', '0', '--data', str(tmp_path / 'deny'), '--origin', ORIGIN,
-        '--deny-legacy-join', stdout=log, stderr=log)
+        '--deny-legacy-join', stdout=log, stderr=log, env=subprocess_env())
     try:
         async with asyncio.timeout(15):
             while True:
@@ -631,6 +682,6 @@ async def test_deny_legacy_flag_refuses_even_loopback(tmp_path):
             status, welcome = await http_join(session, f'http://127.0.0.1:{port}', 'deny-room', name='v2')
             assert status == 200 and welcome['type'] == 'welcome'
         log.flush()
-        assert '--deny-legacy-join is ON' in (tmp_path / 'deny.log').read_text()
+        assert '--deny-legacy-join is ON' in read_log(tmp_path / 'deny.log')
     finally:
         await _stop(process, log)
