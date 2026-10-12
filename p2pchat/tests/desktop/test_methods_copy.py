@@ -156,3 +156,34 @@ def test_document_has_a_trailing_newline_and_no_zero_width_characters() -> None:
     assert raw.endswith("\n"), "METHODS-PLAIN.md 缺少末尾换行"
     for bad in ("\u200b", "\u200c", "\u200d", "\ufeff"):
         assert bad not in raw, f"METHODS-PLAIN.md 出现不可见零宽字符 {bad!r}"
+
+
+def test_gateway_row_is_an_action_and_is_never_called_a_probe() -> None:
+    """第 9 条是「开端口动作」，不能与探测/观测共用同一句话。
+
+    METHODS-PLAIN.md 第 6 列对第 4、8 条写「否，只能探测/观测」，对第 9 条写
+    「否，它只开端口」——界面必须说得不一样，否则就是对用户说错话。"""
+    gateway = plain.METHOD_BY_ID["gateway"]
+    assert plain.carries(gateway) == plain.ACTION
+    note = plain.non_chat_note(gateway)
+    assert note == "只开端口，不传内容"
+    assert "探测" not in note and "观测" not in note
+    assert plain.is_probe(gateway) is False
+
+    for method_id in ("udp-probe", "stun-observation"):
+        method = plain.METHOD_BY_ID[method_id]
+        assert plain.carries(method) in (plain.PROBE, plain.OBSERVATION)
+        assert plain.is_probe(method) is True
+        assert plain.non_chat_note(method) == "仅探测，不传内容"
+
+
+def test_non_chat_notes_follow_the_declaration_not_a_hardcoded_sentence() -> None:
+    """反向验证：把第 9 条错误地声明成 probe，派生文案必须随之改变。
+
+    这同时证明两件事：界面文案来自声明（而不是渲染端写死的句子），以及上一条测试
+    真能拦住「把开端口说成探测」的回归。"""
+    gateway = plain.METHOD_BY_ID["gateway"]
+    spoofed = dict(gateway, carries=plain.PROBE)
+    assert plain.non_chat_note(spoofed) == "仅探测，不传内容", "派生必须跟随声明"
+    assert plain.non_chat_note(spoofed) != plain.non_chat_note(gateway)
+    assert plain.is_probe(spoofed) is True

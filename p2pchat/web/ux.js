@@ -6,17 +6,29 @@
 const STATUS={WAITING:'等待中',TRYING:'尝试中',DIRECT:'已打通',OBSERVED:'已观测',UNAVAILABLE:'不可用',UNSUPPORTED:'不支持'};
 const AVAILABILITY={[STATUS.DIRECT]:'可用',[STATUS.OBSERVED]:'可用',[STATUS.TRYING]:'可用',[STATUS.WAITING]:'可用',[STATUS.UNAVAILABLE]:'不可用',[STATUS.UNSUPPORTED]:'不支持'};
 const SLUG={[STATUS.WAITING]:'waiting',[STATUS.TRYING]:'trying',[STATUS.DIRECT]:'direct',[STATUS.OBSERVED]:'observed',[STATUS.UNAVAILABLE]:'unavailable',[STATUS.UNSUPPORTED]:'unsupported'};
+/* 「能否传消息」声明，与 docs/METHODS-PLAIN.md 第 6 列、python_desktop/methods.py 同源：
+   message 打通后能聊天；probe 只探测；observation 只观测；action 只开端口。
+   界面文案一律由 carries 派生，渲染端不允许自己写「仅探测」这类字符串。 */
+const MESSAGE='message',PROBE='probe',OBSERVATION='observation',ACTION='action';
+const NON_CHAT_NOTES={[PROBE]:'仅探测，不传内容',[OBSERVATION]:'仅探测，不传内容',[ACTION]:'只开端口，不传内容'};
 const methods=[
- {order:1,id:'ice-dual',profile:'ice-dual',chatCapable:true,title:'双栈直连',explain:'同时用 IPv6 和 IPv4 两种地址去找对方，谁先通就用谁',worksWhen:'双方都有可用公网地址（大多数家宽）',commonFailure:'两边 NAT 都严格、或运营商拦截 UDP',badges:['这一条和下面两条是同一套网页直连（WebRTC）的三种地址选择，不是三个独立协议']},
- {order:2,id:'ice-v6',profile:'ice-v6',chatCapable:true,title:'IPv6 直连',explain:'只用 IPv6 地址直连',worksWhen:'两台设备都有可用公网 IPv6，且入站防火墙放行',commonFailure:'一方没有 IPv6；或路由器/防火墙挡了入站',badges:[]},
- {order:3,id:'ice-v4',profile:'ice-v4',chatCapable:true,title:'IPv4 直连',explain:'只用 IPv4 地址直连',worksWhen:'至少一方有公网 IPv4，或双方 NAT 容易打洞',commonFailure:'双方都在大内网/CGNAT 后面',badges:[]},
- {order:4,id:'udp-probe',mechanisms:['udp-probe'],chatCapable:false,title:'UDP 探测',explain:'互相发加密小包，确认「这个地址端口能不能直达」',worksWhen:'只要能出去 UDP 就能探测',commonFailure:'UDP 被运营商限制',badges:['仅探测，不传内容：这条通了也不能用来聊天']},
- {order:5,id:'quic',mechanisms:['quic'],chatCapable:true,title:'QUIC 加密直连',explain:'用同一个 UDP 端口建立一条加密通道来传数据',worksWhen:'双方 UDP 可达',commonFailure:'UDP 被挡；或中间设备干扰',badges:[]},
- {order:6,id:'tcp',mechanisms:['tcp'],chatCapable:true,title:'TCP 加密直连',explain:'用 TCP 建立一条互相验证身份的加密连接',worksWhen:'UDP 被限制但 TCP 能出去的网络',commonFailure:'一方无法被动接受连接',badges:[]},
- {order:7,id:'tcp-simopen',mechanisms:['tcp-simopen'],chatCapable:true,title:'TCP 同时打开',explain:'双方同时主动向对方发起连接，谁都不当「服务器」',worksWhen:'只允许主动外连、不允许被动监听的网络',commonFailure:'双方时序错开，或中间设备重置连接',badges:[]},
- {order:8,id:'observation',mechanisms:['observation'],chatCapable:false,title:'STUN 映射观测',explain:'问外网「我在你眼里是什么地址和端口」，用来判断能不能直连；它不是中继，只观察地址，不转发任何数据',worksWhen:'所有能上网的环境',commonFailure:'服务器不可达；对称 NAT 下观测结果无用',badges:['只观察地址、不转发任何数据：它不是中继，看见地址也不等于能聊天']},
- {order:9,id:'gateway',mechanisms:['upnp','pcp','natpmp','gateway'],chatCapable:true,title:'路由器放行（自动开一个端口）',explain:'向你自己家的路由器申请开一个端口',worksWhen:'路由器支持该协议且已开启',commonFailure:'路由器关闭了这类功能；运营商光猫拦截',badges:['默认关闭，必须你明确同意才会尝试','只有桌面 Python 版支持，安卓显示为「不支持」']}
+ {order:1,id:'ice-dual',profile:'ice-dual',carries:MESSAGE,title:'双栈直连',explain:'同时用 IPv6 和 IPv4 两种地址去找对方，谁先通就用谁',worksWhen:'双方都有可用公网地址（大多数家宽）',commonFailure:'两边 NAT 都严格、或运营商拦截 UDP',badges:['这一条和下面两条是同一套网页直连（WebRTC）的三种地址选择，不是三个独立协议']},
+ {order:2,id:'ice-v6',profile:'ice-v6',carries:MESSAGE,title:'IPv6 直连',explain:'只用 IPv6 地址直连',worksWhen:'两台设备都有可用公网 IPv6，且入站防火墙放行',commonFailure:'一方没有 IPv6；或路由器/防火墙挡了入站',badges:[]},
+ {order:3,id:'ice-v4',profile:'ice-v4',carries:MESSAGE,title:'IPv4 直连',explain:'只用 IPv4 地址直连',worksWhen:'至少一方有公网 IPv4，或双方 NAT 容易打洞',commonFailure:'双方都在大内网/CGNAT 后面',badges:[]},
+ {order:4,id:'udp-probe',mechanisms:['udp-probe'],carries:PROBE,title:'UDP 探测',explain:'互相发加密小包，确认「这个地址端口能不能直达」',worksWhen:'只要能出去 UDP 就能探测',commonFailure:'UDP 被运营商限制',badges:['这条通了也不能用来聊天']},
+ {order:5,id:'quic',mechanisms:['quic'],carries:MESSAGE,title:'QUIC 加密直连',explain:'用同一个 UDP 端口建立一条加密通道来传数据',worksWhen:'双方 UDP 可达',commonFailure:'UDP 被挡；或中间设备干扰',badges:[]},
+ {order:6,id:'tcp',mechanisms:['tcp'],carries:MESSAGE,title:'TCP 加密直连',explain:'用 TCP 建立一条互相验证身份的加密连接',worksWhen:'UDP 被限制但 TCP 能出去的网络',commonFailure:'一方无法被动接受连接',badges:[]},
+ {order:7,id:'tcp-simopen',mechanisms:['tcp-simopen'],carries:MESSAGE,title:'TCP 同时打开',explain:'双方同时主动向对方发起连接，谁都不当「服务器」',worksWhen:'只允许主动外连、不允许被动监听的网络',commonFailure:'双方时序错开，或中间设备重置连接',badges:[]},
+ {order:8,id:'observation',mechanisms:['observation'],carries:OBSERVATION,title:'STUN 映射观测',explain:'问外网「我在你眼里是什么地址和端口」，用来判断能不能直连；它不是中继，只观察地址，不转发任何数据',worksWhen:'所有能上网的环境',commonFailure:'服务器不可达；对称 NAT 下观测结果无用',badges:['只观察地址、不转发任何数据：它不是中继，看见地址也不等于能聊天']},
+ {order:9,id:'gateway',mechanisms:['upnp','pcp','natpmp','gateway'],carries:ACTION,title:'路由器放行（自动开一个端口）',explain:'向你自己家的路由器申请开一个端口',worksWhen:'路由器支持该协议且已开启',commonFailure:'路由器关闭了这类功能；运营商光猫拦截',badges:['默认关闭，必须你明确同意才会尝试','只有桌面 Python 版支持，安卓显示为「不支持」']}
 ];
+/* 非聊天方式的行内提示由 carries 派生一次：探测/观测「仅探测，不传内容」；只开端口「只开端口，不传内容」。 */
+for(const method of methods){
+ method.chatCapable=method.carries===MESSAGE;
+ const note=NON_CHAT_NOTES[method.carries];
+ method.nonChatNote=note||'';
+ if(note)method.badges=[note,...method.badges];
+}
 const reasons={AUTH_FAILED:'双方身份校验未通过，请确认房间密码相同。',INTEGRITY_FAILED:'收到的文件校验不一致，已拒绝交付，请重新发送。',RELAY_FORBIDDEN:'发现了被禁止的转发路径，已拒绝使用。',SIGNAL_OFFLINE:'与服务器的连接已断开，正在等待恢复；已有直连可继续使用。',SIGNAL_SOCKET_ERROR:'无法连接服务器，请检查地址、网络和服务器证书。',PEER_UNAVAILABLE:'对方当前不在线，请等待对方重新加入。',NO_PEER:'房间里还没有其他人，请让对方加入同一房间。',NO_DIRECT_PATH:'还没有可聊天的直连，请等待连接成功或重新尝试。',NATIVE_BRIDGE_UNAVAILABLE:'此客户端没有可用的桌面网络组件（浏览器和安卓默认没有，桌面 Python 版才有）。',UNSUPPORTED:'此设备不支持这种方式。',OPT_IN_GATEWAY_API_ONLY:'需要在桌面 Python 侧显式开启；此界面不会自动修改路由器。',PROBE_ONLY:'这种方式只能探测连通性，不能用来传消息。',EXPERIMENTAL_PLATFORM_UNVERIFIED:'这个平台还没有经过真机验证，可能失败；不会把模拟结果当成成功。',ATTEMPT_TIMEOUT:'在等待时间内没有收到对方确认，可能被路由器或防火墙阻断。',TIMEOUT:'等待对方响应超时，请检查网络后重试。',ICE_FAILED:'浏览器没找到能互通的地址（没有可用的直连路径），请检查双方网络和防火墙。',PROBE_TIMEOUT:'对方已一段时间没有回应，连接可能已断开。',PEER_LOST:'与对方的连接中断了。',CHANNEL_CLOSED:'发送通道已关闭，请重新连接。',CHANNEL_ERROR:'发送通道出错，已停止使用这条连接。',START_FAILED:'这次连接未能启动，请检查本机网络组件后重试。',FAMILY_MISMATCH:'实际地址类型与所选方式不符，已拒绝把它算作成功。',LIMIT_EXCEEDED:'已达到本机或对方的安全限额，请稍后再试。',BENCH_UNSUPPORTED_NO_ISOLATED_LANE:'这条连接没有独立测速通道，因此不能测速。',BENCH_BUSY:'已有测速正在进行，请先停止或等待结束。',ACK_TIMEOUT:'没有按时收到接收确认；未报告发送成功。',REMOTE_RETRY_BUDGET_OR_NO_RESPONSE:'对方没有在 12 秒内建立新连接，可能已用完自动重试次数。',RETRY_REPLACED:'对方已开始新的连接尝试。',SESSION_RECONNECTED_OR_CLOSED:'会话已重新建立或关闭，旧连接已回收。',SUPERSEDED:'已由新的连接尝试替代。',RETRY_REQUESTED:'正在等待对方重新连接。',CLOSED:'连接已关闭。',INTERNAL_ERROR:'操作未能完成，请重试；详细记录可在设置中导出。',SCHEMA_INVALID:'对方发送的连接信息格式不符合要求，已拒绝。',UNSUPPORTED_VERSION:'双方软件版本不兼容，请使用相同版本。',SAVE_FAILED:'保存失败，请检查存储权限后重试。',EXPORT_FAILED:'诊断记录导出失败，请检查保存权限。',RECORDING_LIMIT:'录音已达到大小限制，请缩短录音。',RECORDING_FAILED:'录音失败，请检查麦克风权限后重试。',FILE_LIMIT_32_MIB:'文件太大，请选择不超过 32 MiB 的文件。',TEXT_LIMIT:'文字太长，请分成几条发送。',SEND_BUSY:'同时发送的文件过多，请等待当前文件发送完毕。',PEER_LEFT:'对方已离开房间。'};
 const STATE_HELP=[
  {state:STATUS.WAITING,meaning:'还没轮到它，或正在排队。'},
@@ -37,11 +49,14 @@ function reason(code){if(!code)return '';const key=String(code).split(' ')[0];re
 function methodFor(p){if(!p)return null;return methods.find(m=>m.profile?p.mechanism==='webrtc'&&m.profile===p.profile:(m.mechanisms||[]).includes(p.mechanism))||null;}
 function labelFor(idOrMechanism){const m=methods.find(x=>x.id===idOrMechanism||(x.mechanisms||[]).includes(idOrMechanism));return m?m.title:'桌面网络组件';}
 function canBench(p){return !!p&&p.state==='direct'&&p.canMessage&&(p.mechanism==='webrtc'||p.limits?.independentBenchmark===true);}
-function pathState(p,chatCapable){
+function pathState(p,kind){
  if(p.state==='direct'){
   if(p.canMessage)return {state:STATUS.DIRECT,detail:'双方已经完成安全校验，可以直接传消息。'};
-  if(chatCapable)return {state:STATUS.UNAVAILABLE,detail:'连接虽然建立，但没有完成「可以传消息」的校验，所以不算打通。'};
-  return {state:STATUS.OBSERVED,detail:'探测成功：这个地址端口能直达；但它只能探测，不传内容。'};
+  if(kind===MESSAGE)return {state:STATUS.UNAVAILABLE,detail:'连接虽然建立，但没有完成「可以传消息」的校验，所以不算打通。'};
+  // 非聊天方式的成功：状态词仍然是「已观测」，括号里说清是探测、观测还是只开端口。
+  if(kind===ACTION)return {state:STATUS.OBSERVED,detail:`${NON_CHAT_NOTES[ACTION]}：路由器已经接受了这次申请；它不传消息，也不算打通。`};
+  if(kind===OBSERVATION)return {state:STATUS.OBSERVED,detail:`${NON_CHAT_NOTES[OBSERVATION]}：已经看到本机在外网眼中的地址形态；它只观测，不传消息。`};
+  return {state:STATUS.OBSERVED,detail:`${NON_CHAT_NOTES[PROBE]}：这个地址端口能直达；但它只能探测，不能用来聊天。`};
  }
  if(['gathering','probing','authenticating','connecting','negotiating','starting'].includes(p.state))return {state:STATUS.TRYING,detail:'正在探测，通常几秒内出结果。'};
  if(p.state==='unsupported')return {state:STATUS.UNSUPPORTED,detail:reason(p.failureCode)||'当前设备/配置用不了这种方式。'};
@@ -59,7 +74,7 @@ function rows(paths,caps,peerId,webRTC,ctx){
  return methods.map(m=>{
   const mine=list.filter(p=>p.peerId===peerId&&(m.profile?p.mechanism==='webrtc'&&p.profile===m.profile:(m.mechanisms||[]).includes(p.mechanism)));
   const path=mine.find(p=>p.state==='direct'&&p.canMessage)||mine.find(p=>p.state==='direct')||mine.at(-1)||null;
-  const row={order:m.order,id:m.id,title:m.title,explain:m.explain,worksWhen:m.worksWhen,commonFailure:m.commonFailure,badges:m.badges.slice(),chatCapable:!!m.chatCapable,path,state:STATUS.WAITING,detail:'',latencyMs:null,availabilityNote:''};
+  const row={order:m.order,id:m.id,title:m.title,explain:m.explain,worksWhen:m.worksWhen,commonFailure:m.commonFailure,badges:m.badges.slice(),carries:m.carries,nonChatNote:m.nonChatNote||'',chatCapable:!!m.chatCapable,path,state:STATUS.WAITING,detail:'',latencyMs:null,availabilityNote:''};
   const whenIdle=()=>joined?(hasPeers?'本机支持，正在排队等待开始尝试。':'服务器已连接，等待对方加入同一房间。'):'连接服务器后开始。';
   let fromPath=null;
   if(m.id==='observation'){
@@ -71,16 +86,16 @@ function rows(paths,caps,peerId,webRTC,ctx){
   }else if(m.id==='gateway'){
    if(platform==='android'){row.state=STATUS.UNSUPPORTED;row.detail='安卓版不支持路由器放行；需要时请改用桌面 Python 版。';}
    else if(!(m.mechanisms||[]).some(nativeReady)){row.state=STATUS.UNSUPPORTED;const cap=(m.mechanisms||[]).map(capOf).find(Boolean);row.detail=`${reason(cap?.reason||'OPT_IN_GATEWAY_API_ONLY')}（默认关闭，只会在桌面 Python 版里经你明确同意后尝试；这个界面不会自动修改路由器）`;}
-   else if(path){fromPath=pathState(path,row.chatCapable);}
+   else if(path){fromPath=pathState(path,row.carries);}
    else{row.state=STATUS.WAITING;row.detail='需要在桌面版里明确同意后才会尝试；默认关闭。';}
   }else if(m.profile){
    if(!webRTC){row.state=STATUS.UNSUPPORTED;row.detail='这个浏览器或设备没有网页直连（WebRTC）能力。';}
-   else if(path){fromPath=pathState(path,row.chatCapable);}
+   else if(path){fromPath=pathState(path,row.carries);}
    else{row.detail=whenIdle();}
   }else{
    const ready=(m.mechanisms||[]).some(nativeReady);
    if(!ready){row.state=STATUS.UNSUPPORTED;const cap=(m.mechanisms||[]).map(capOf).find(Boolean);row.detail=`${reason(cap?.reason||'NATIVE_BRIDGE_UNAVAILABLE')}`;}
-   else if(path){fromPath=pathState(path,row.chatCapable);}
+   else if(path){fromPath=pathState(path,row.carries);}
    else{row.detail=whenIdle();}
   }
   if(fromPath){row.state=fromPath.state;row.detail=fromPath.detail;}

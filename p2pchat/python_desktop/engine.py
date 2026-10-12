@@ -165,6 +165,7 @@ class MethodState:
     attempt: str | None = None
     capability: dict | None = None
     probe_only: bool = False
+    carries: str = plain.MESSAGE
     detail: str = ""
 
 
@@ -676,6 +677,7 @@ class DesktopEngine:
                 mechanism=method["mechanism"],
                 capability=capability,
                 probe_only=plain.probe_only(method),
+                carries=plain.carries(method),
             )
             if self._is_gateway_method(method):
                 state = self._apply_gateway_capability(state)
@@ -730,16 +732,21 @@ class DesktopEngine:
                         "availability": availability,
                         "availabilityNote": self.availability_note_for(availability, "pending"),
                         "detail": self.method_detail_hint(method, availability),
-                        "probeOnly": bool(method.get("probe_only")),
+                        "carries": plain.carries(method),
+                        "nonChatNote": plain.non_chat_note(method),
+                        # probeOnly 只表示「探测/观测类」；只开端口类由 carries=action 表达，
+                        # 不能借 probeOnly 说成探测（视图只允许读这两个声明）。
+                        "probeOnly": plain.is_probe(method),
                         "canMessage": False,
                         **self.consent_fields(method),
                     }
                 )
                 continue
             # METHODS-PLAIN.md: only a message-capable path may read 已打通; a
-            # successful probe/observation reads 已观测 and says so.
+            # successful probe/observation reads 已观测 and says so. 只开端口类
+            # （路由器放行）既不借「已观测」也不写「已打通」，直接说清动作。
             if state.probe_only and state.state == "direct":
-                status = f"{plain.STATUS['observed']}（仅探测，不传内容）"
+                status = plain.non_chat_status(method)
                 state_note = "observed"
             else:
                 status = plain.STATUS.get(state.state, "等待中")
@@ -764,7 +771,10 @@ class DesktopEngine:
                     "availabilityNote": self.availability_note_for(availability, state_note),
                     "detail": detail or self.method_detail_hint(method, availability, state),
                     "probeRtt": measured if (measured is not None and not can_message) else None,
-                    "probeOnly": state.probe_only,
+                    "carries": plain.carries(method),
+                    "nonChatNote": plain.non_chat_note(method),
+                    # 只有探测/观测类才配这个标记；路由器放行是开端口动作，不是探测。
+                    "probeOnly": plain.is_probe(method),
                     "canMessage": can_message,
                     **self.consent_fields(method),
                 }
@@ -1093,8 +1103,10 @@ class DesktopEngine:
             "probeRtt": min(probe_rtts) if probe_rtts else None,
             "probeRttLabel": "仅探测/观测方式的往返时间（不是聊天延迟）",
             "canSend": bool(direct),
-            "probeOnly": [row["title"] for row in rows if row["state"] == "observed"],
-            "observed": [row["title"] for row in rows if row["state"] == "observed"],
+            # 探测/观测类与只开端口类分开列：路由器放行不是探测，不混进「仅探测」。
+            "probeOnly": [row["title"] for row in observed if row.get("carries") in {plain.PROBE, plain.OBSERVATION}],
+            "actionOnly": [row["title"] for row in observed if row.get("carries") == plain.ACTION],
+            "observed": [row["title"] for row in observed],
             "direct": [row["title"] for row in direct],
             "webRtcProfileNote": plain.WEBRTC_PROFILE_NOTE,
             # 面板文案只在数据层决定一次：暂停优先于"已开启"，两个界面（以及 Qt 版）
@@ -1430,7 +1442,10 @@ class DesktopEngine:
         if event == "state":
             state = params.get("state")
             if state == "direct":
-                detail = None if session.capable else "仅探测，不传内容"
+                # 不能传消息的方式：由声明决定说哪句话——探测/观测「仅探测，不传内容」，
+                # 只开端口「只开端口，不传内容」；这里不再写死探测那句话。
+                method = plain.method_for(session.mechanism)
+                detail = None if session.capable else (plain.non_chat_note(method) if method else None)
                 self._native_state(target, session, "direct", None, detail=detail)
                 if session.capable:
                     self.spawn(self._measure(session))

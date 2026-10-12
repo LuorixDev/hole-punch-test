@@ -141,3 +141,17 @@ test('UX-FLOW.md 记录三屏状态机与状态语义',()=>{
  for(const anchor of ['第 1 屏','第 2 屏','第 3 屏','已观测','并行','METHODS-PLAIN.md'])
   assert.ok(doc.includes(anchor),`UX-FLOW.md 缺少 ${anchor}`);
 });
+
+test('第9条「路由器放行」是开端口动作，不能被说成探测',()=>{
+ const rows=UX.rows(paths,caps,'b',true,ctx());
+ const gateway=rowOf(rows,'gateway'), probe=rowOf(rows,'udp-probe'), observation=rowOf(rows,'observation');
+ assert.equal(gateway.carries,'action');
+ assert.equal(gateway.nonChatNote,'只开端口，不传内容');
+ assert.ok(!/探测|观测/.test(gateway.nonChatNote),`第9条文案不得写成探测或观测：${gateway.nonChatNote}`);
+ for(const row of [probe,observation])assert.equal(row.nonChatNote,'仅探测，不传内容');
+ // 反向验证：三行都「不能传消息」，但文案必须由声明决定——如果渲染端只是按
+ // 「不能聊天」写死一句话，这三个值就会相同，这条断言会立刻变红。
+ assert.notEqual(gateway.nonChatNote,probe.nonChatNote,
+  '同样不能传消息，开端口与探测必须说不同的话（证明文案来自 carries 声明）');
+ assert.notEqual(gateway.carries,probe.carries);
+});

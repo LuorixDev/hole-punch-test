@@ -33,6 +33,22 @@ AVAILABILITY = {
 MESSAGING_STATES = {"direct"}
 OBSERVED_STATES = {"observed"}
 
+# 「能否传消息」列（METHODS-PLAIN.md 的第 6 列）就是这份声明的唯一来源：
+#   是                → message     （打通后能聊天）
+#   否，只能探测       → probe       （只确认能不能直达，不传内容）
+#   否，只能观测       → observation （只观察自己的出口地址，不传内容）
+#   否，它只开端口     → action      （只是个开端口动作，不传内容）
+MESSAGE, PROBE, OBSERVATION, ACTION = "message", "probe", "observation", "action"
+CARRIES = (MESSAGE, PROBE, OBSERVATION, ACTION)
+
+# 非聊天方式的行内提示。界面文案一律由 carries 派生到这里，不允许在渲染端另写字符串：
+# 探测和观测本来就都是「只看不传」，所以共用一句话；开端口是动作，必须说清它不开聊天。
+NON_CHAT_NOTES = {
+    PROBE: "仅探测，不传内容",
+    OBSERVATION: "仅探测，不传内容",
+    ACTION: "只开端口，不传内容",
+}
+
 # Nine methods in the fixed order documented in METHODS-PLAIN.md:
 # 1 双栈直连, 2 IPv6 直连, 3 IPv4 直连, 4 UDP 探测, 5 QUIC 加密直连,
 # 6 TCP 加密直连, 7 TCP 同时打开, 8 STUN 映射观测, 9 路由器放行
@@ -44,6 +60,7 @@ METHODS = [
         "explain": "同时用 IPv6 和 IPv4 两种地址去找对方，谁先通就用谁",
         "works": "双方都有可用公网地址（大多数家宽）",
         "failure": "两边 NAT 都严格、或运营商拦截 UDP",
+        "carries": MESSAGE,
         "retryable": True,
     },
     {
@@ -53,6 +70,7 @@ METHODS = [
         "explain": "只用 IPv6 地址直连",
         "works": "两台设备都有可用公网 IPv6，且入站防火墙放行",
         "failure": "一方没有 IPv6；或路由器/防火墙挡了入站",
+        "carries": MESSAGE,
         "retryable": True,
     },
     {
@@ -62,6 +80,7 @@ METHODS = [
         "explain": "只用 IPv4 地址直连",
         "works": "至少一方有公网 IPv4，或双方 NAT 容易打洞",
         "failure": "双方都在大内网/CGNAT 后面",
+        "carries": MESSAGE,
         "retryable": True,
     },
     {
@@ -71,7 +90,7 @@ METHODS = [
         "explain": "互相发加密小包，确认「这个地址端口能不能直达」",
         "works": "只要能出去 UDP 就能探测",
         "failure": "UDP 被运营商限制",
-        "probe_only": True,
+        "carries": PROBE,
         "retryable": True,
     },
     {
@@ -81,6 +100,7 @@ METHODS = [
         "explain": "用同一个 UDP 端口建立一条加密通道来传数据",
         "works": "双方 UDP 可达",
         "failure": "UDP 被挡；或中间设备干扰",
+        "carries": MESSAGE,
         "retryable": True,
     },
     {
@@ -90,6 +110,7 @@ METHODS = [
         "explain": "用 TCP 建立一条互相验证身份的加密连接",
         "works": "UDP 被限制但 TCP 能出去的网络",
         "failure": "一方无法被动接受连接",
+        "carries": MESSAGE,
         "retryable": True,
     },
     {
@@ -99,6 +120,7 @@ METHODS = [
         "explain": "双方同时主动向对方发起连接，谁都不当「服务器」",
         "works": "只允许主动外连、不允许被动监听的网络",
         "failure": "双方时序错开，或中间设备重置连接",
+        "carries": MESSAGE,
         "retryable": True,
     },
     {
@@ -108,7 +130,7 @@ METHODS = [
         "explain": "问外网「我在你眼里是什么地址和端口」，用来判断能不能直连；它不是中继，只观察地址，不转发任何数据",
         "works": "所有能上网的环境",
         "failure": "服务器不可达；对称 NAT 下观测结果无用",
-        "probe_only": True,
+        "carries": OBSERVATION,
         "retryable": True,
     },
     {
@@ -118,6 +140,7 @@ METHODS = [
         "explain": "向你自己家的路由器申请开一个端口",
         "works": "路由器支持该协议且已开启",
         "failure": "路由器关闭了这类功能；运营商光猫拦截",
+        "carries": ACTION,
         "opt_in": True,
         "retryable": False,
     },
@@ -225,13 +248,56 @@ def method_for(mechanism: str, profile: str = "") -> dict | None:
     return METHOD_BY_ID.get(mechanism)
 
 
+def carries(method: dict) -> str:
+    """METHODS-PLAIN.md 的「能否传消息」列，转成界面可以派生的声明。
+
+    返回 message / probe / observation / action 之一；未声明的老数据按 message 处理，
+    绝不默认成「探测」——不能传消息必须由声明明说。
+    """
+    kind = method.get("carries") or MESSAGE
+    return kind if kind in CARRIES else MESSAGE
+
+
 def probe_only(method: dict) -> bool:
-    """True when a method can never carry a message itself.
+    """True when a method can never carry a chat message itself.
 
     METHODS-PLAIN.md's 能否传消息 column marks UDP 探测, STUN 映射观测 and
-    路由器放行 as 否; the first two are probes, the third only opens a port.
+    路由器放行 as 否. This stays the "cannot chat" predicate; use
+    ``non_chat_note()`` when the interface has to say *why* (a probe/observation
+    looks, a port-opening action only opens a port).
     """
-    return bool(method.get("probe_only") or method.get("opt_in"))
+    return carries(method) != MESSAGE
+
+
+def is_probe(method: dict) -> bool:
+    """True only for the 探测/观测 kinds (UDP 探测, STUN 映射观测)."""
+    return carries(method) in (PROBE, OBSERVATION)
+
+
+def is_action_only(method: dict) -> bool:
+    """True only for the 只开端口 kind (路由器放行)."""
+    return carries(method) == ACTION
+
+
+def non_chat_note(method: dict) -> str:
+    """行内提示，由 ``carries`` 派生：探测/观测 →「仅探测，不传内容」；开端口 →「只开端口，不传内容」。"""
+    return NON_CHAT_NOTES.get(carries(method), "")
+
+
+def non_chat_status(method: dict) -> str:
+    """非聊天方式成功时显示的整句状态，同样由声明派生。
+
+    * 探测/观测类借状态词「已观测」，因为 METHODS-PLAIN.md 把「已观测」定义成
+      「只用于探测或观测的方式成功了」。
+    * 开端口类**不借**「已观测」（它不是观测），更不写「已打通」（它不能聊天），
+      而是直接说清自己的动作：「只开端口，不传内容」。
+    """
+    kind = carries(method)
+    if kind in (PROBE, OBSERVATION):
+        return f"{STATUS['observed']}（{NON_CHAT_NOTES[kind]}）"
+    if kind == ACTION:
+        return NON_CHAT_NOTES[ACTION]
+    return STATUS["direct"]
 
 
 def availability(mechanism: str, capability: dict | None) -> str:
