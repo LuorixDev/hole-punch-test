@@ -64,6 +64,67 @@ jobs:
             python -u p2pchat/ci/watchdog.py --timeout 90 -- python -u p2pchat/ci/windows-analysis/diagnostic_runner.py p2pchat/tests/backend/test_data_limits.py -vv -s --tb=short -o faulthandler_timeout=60 2>&1 | tee p2pchat/releases/windows-peer-diagnostic.log
           fi
           python -u p2pchat/ci/watchdog.py --timeout 600 -- python -u -m pytest p2pchat/tests -vv -s -o faulthandler_timeout=120 --durations=20 2>&1 | tee p2pchat/releases/python-tests.log
+      - name: Python encoding gate (implicit encoding fails here, not on the next Windows run)
+        if: matrix.target != 'android'
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p p2pchat/releases
+          LOG=p2pchat/releases/encoding-gate.log
+          # 如实记录本 runner 实际生效的默认编码；Windows 的默认码页（cp1252）本身即非 UTF-8。
+          {
+            echo "RUNNER_OS=${RUNNER_OS:-unknown} RUNNER_ARCH=${RUNNER_ARCH:-unknown}"
+            python -c "import sys, locale; print('python', sys.version.split()[0]); print('default=%s preferred=%s fs=%s' % (sys.getdefaultencoding(), locale.getpreferredencoding(False), sys.getfilesystemencoding()))"
+            if [ "${RUNNER_OS:-}" = "Windows" ]; then
+              python -c "import locale; enc=(locale.getpreferredencoding(False) or '').lower(); print('WINDOWS_DEFAULT_CODE_PAGE', enc); print('EFFECTIVE_NON_UTF8_DEFAULT', 'NO' if enc.replace('_','-') in ('utf-8','utf8') else 'YES')"
+            fi
+          } | tee "$LOG"
+          # 任何未指定 encoding 的 open()/read_text()/write_text() 在这里直接失败，不靠人记得。
+          # 范围是整套 p2pchat/tests（t35 起：4 处根因清掉后从 backend 扩到全域）。
+          PYTHONWARNDEFAULTENCODING=1 python -u p2pchat/ci/watchdog.py --timeout 600 -- \
+            python -u -X warn_default_encoding -W error::EncodingWarning \
+            -m pytest p2pchat/tests -q -o faulthandler_timeout=60 2>&1 | tee -a "$LOG"
+      - name: Non-UTF-8 default encoding scan (LC_ALL=C, ASCII-only paths)
+        if: matrix.target == 'linux'
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p p2pchat/releases
+          LOG=p2pchat/releases/non-utf8-encoding-scan.log
+          PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+          rm -rf /tmp/enc-scan
+          mkdir -p /tmp/enc-scan
+          # 仓库路径可能含非 ASCII 字符（本机目录名是中文）。在 LC_ALL=C（文件系统编码 ascii）下，
+          # 解释器前缀/site-packages 里的非 ASCII 路径会让 C 扩展导入直接抛
+          # "UnicodeEncodeError: ... surrogates not allowed"（本机 import multidict 即可复现；
+          # 从真实路径跑 backend 会先得到 14 个 collection error）——那是环境噪声，与被测代码无关。
+          # 所以只从 /tmp 下的纯 ASCII 符号链接进入，使 sys.executable / sys.prefix 都是 ASCII。
+          ln -sfn "$GITHUB_WORKSPACE" /tmp/enc-scan/repo
+          ln -sfn "$PREFIX" /tmp/enc-scan/pyprefix
+          ASCII_PY=/tmp/enc-scan/pyprefix/bin/python
+          cd /tmp/enc-scan/repo
+          {
+            echo "repo_ascii=/tmp/enc-scan/repo prefix_ascii=/tmp/enc-scan/pyprefix"
+            "$ASCII_PY" -c "import sys, os; print('executable', sys.executable); print('prefix', sys.prefix); print('cwd_real', os.getcwd())"
+            LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 "$ASCII_PY" -c "import sys, locale; print('default=%s preferred=%s fs=%s' % (sys.getdefaultencoding(), locale.getpreferredencoding(False), sys.getfilesystemencoding()))"
+          } | tee "$LOG"
+          # 双重钳制：C locale 的非 UTF-8 默认编码 + EncodingWarning 当错误。
+          # 范围=整套 p2pchat/tests，唯一排除 tests/desktop/test_engine.py：该文件里
+          # 4 条用例（test_real_webrtc_handshake_text_and_file / test_no_direct_path_is_reported_not_faked /
+          # test_gateway_methods_report_real_capability_but_never_message / test_udp_probe_reports_probe_only）
+          # 用中文标签拼出数据目录（如 lab.config("网关回声")），在 LC_ALL=C（fs=ascii）下
+          # p2pchat/backend/telemetry.py:67 的 directory.mkdir() 必然 UnicodeEncodeError ——
+          # 那是"ASCII 文件系统无法创建这个文件名"的结构性限制，与被测代码的隐式编码无关，
+          # 且这 4 条仍被上面步骤 8（整套 p2pchat/tests 的 EncodingWarning 门）覆盖。
+          # 待 tests/desktop 归属人把标签改成 ASCII（或标注需要 UTF-8 文件系统）后删掉这个 --ignore。
+          LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 PYTHONWARNDEFAULTENCODING=1 \
+            "$ASCII_PY" -u p2pchat/ci/watchdog.py --timeout 600 -- \
+            "$ASCII_PY" -u -X warn_default_encoding -W error::EncodingWarning \
+            -m pytest p2pchat/tests -q --ignore=p2pchat/tests/desktop/test_engine.py \
+            -o faulthandler_timeout=60 2>&1 | tee -a "$LOG"
+          test -s "$LOG"
       - name: Build desktop client with PyInstaller (one-folder bundle)
         if: matrix.target != 'android'
         shell: bash

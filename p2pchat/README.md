@@ -1,14 +1,17 @@
 # P2P Observatory：严格无中继聊天与测速实验台
 
-**当前交付：已独立验证的 Linux 本地实验源码与本地构建；不是全平台/任意网络可用产品。** 小房间最多12人、逐对端mesh，支持文本、图片、文件和录制完成后的语音文件；不做实时通话或语音识别。TURN永久禁用，信令/日志不代转聊天；无可用直连就明确失败。
+**当前交付：Linux 本机已实测的源码与本地构建；不是全平台/任意网络可用产品。** 小房间最多12人、逐对端mesh，支持文本、图片、文件和录制完成后的语音文件；不做实时通话或语音识别。TURN永久禁用，信令/日志不代转聊天；无可用直连就明确失败。
 
-**当前状态：STUN窗口与native IPv6/网关平台修复已审，Windows待新commit CI确认。** 最新78a2050原双echo/计时2 passed，但完整suite70 passed/6 failed/1 skipped；六失败对应t30双栈STUN窗口假设及t31三项native IPv6/一项网关差异，不再是旧挂起或零计时。公开结论见 [脱敏证据索引](docs/EVIDENCE-INDEX.md)。以下61b400e仅历史。
+**本轮状态（p2p-delivery-v2）：桌面端已改为纯 Python + Qt(PySide6) + PyInstaller，Electron 桌面壳已删除。** 新增并接入：NAT 行为分类（多 STUN 观测）、局域网直连发现（同网段不用打洞）、对称 NAT 端口预测、以及「路由器放行」的真实接线——后三者**默认关闭、必须显式同意**。**每条打洞方式到底实现了什么、能传消息还是只能探测、证据到哪一级（L0–L4）与还剩哪些缺口，以 [打洞方式全量对照矩阵](docs/PUNCHING-MATRIX.md) 为准**；不要再凭印象判断「集成了没有」。
 
-**此前计时修复历史：** 最新源码/包哈希以 [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) 和 [FREEZE](docs/FREEZE.json) 为准；本轮整合t27+t28性能计时/未知提示修复并重新sync和Linux构建，不改已审产品。最近61b400e的Linux/Android成功，Windows4000B已收到但elapsedMs=0断言失败；关闭正常完成，约4.937秒exit1，**不是旧关闭挂起/超时124**。新commit/run待captain推送，详见 [计时修复集成](docs/TIMING-INTEGRATION.md)。
+- **仍待确认（PENDING）**：新版 Python/Qt 桌面的 Windows CI 结果，以及最终冻结清单。`docs/SOURCE-MANIFEST.json` / `docs/FREEZE.json` 在 Qt 迁移落地、整套回归恢复全绿之后重新生成，**在那之前它们仍是上一轮的快照**。
+- **真实家宽 / 双 NAT / CGNAT、真实路由器放行、Windows/macOS 与安卓实机、真实麦克风录音全部 NOT_RUN**，详见矩阵第 6 节与 [脱敏证据索引](docs/EVIDENCE-INDEX.md)。
+
+**历史（不要当作当前状态）**：旧 Electron 桌面版与更早跨平台轮次的 CI 记录（`78a2050` 全套 70 passed/6 failed/1 skipped、`61b400e` 计时断言失败但关闭正常、`a1c6e7e` 诊断 90 秒 exit124、`855c19c` watchdog 600 秒 exit124 等）只属于**已删除的桌面壳与旧树**，不能继承到本轮 Python/Qt 桌面。历史版本表、失败留痕与上传边界见 [交付清单](docs/DELIVERY.md)。
 
 历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`（129文件）的 VERIFICATION-R2（本地私有证据，不随GitHub交付）（t15）/ROUND3（本地私有证据，不随GitHub交付）（t19）仅对应旧版；[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已终态：Linux/Android成功，Windows90秒诊断exit124未打包。挂起链已定位至Peer.close→RTCPeerConnection.close→ICE.stop→aioice StunProtocol.close；新版本必须重跑原双echo诊断、完整测试与打包门，不能继承旧成功包。差异与边界见 [Windows修复集成](docs/WINDOWS-INTEGRATION.md)。
 
-快速导航：[平台/机制矩阵](docs/CAPABILITIES.md) · [交付状态与产物哈希](docs/DELIVERY.md) · [协议](docs/PROTOCOL.md) · [验收定义](docs/ACCEPTANCE.md) · [家宽服务器部署手册](docs/DEPLOY-HOME-SERVER.md)。
+快速导航：[打洞方式全量对照矩阵](docs/PUNCHING-MATRIX.md) · [平台/机制矩阵](docs/CAPABILITIES.md) · [交付状态与产物哈希](docs/DELIVERY.md) · [协议](docs/PROTOCOL.md) · [验收定义](docs/ACCEPTANCE.md) · [家宽服务器部署手册](docs/DEPLOY-HOME-SERVER.md) · [桌面端](docs/DESKTOP-PYTHON.md)。
 
 ## 1. 安装依赖（仓库根目录）
 
@@ -19,14 +22,14 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install -r p2pchat/requirements-lock.txt
 ```
 
-[精确依赖记录](requirements-lock.txt)对应已测Linux环境；跨平台wheel可用性不保证。需要桌面构建时另装Node24，使用 [npm锁文件](package-lock.json)，不要盲目`audit fix --force`：
+[精确依赖记录](requirements-lock.txt)对应已测Linux环境；跨平台wheel可用性不保证。桌面端另需 PyInstaller 6.20.0 与 PySide6（见 [platform/build-requirements.txt](platform/build-requirements.txt)）；网页版与安卓工程另需Node24与 [npm锁文件](package-lock.json)，不要盲目`audit fix --force`：
 
 ```sh
 npm --prefix p2pchat ci --ignore-scripts
-node p2pchat/node_modules/electron/install.js
+.venv/bin/python -m PyInstaller --noconfirm --clean p2pchat/tools/desktop.spec   # 桌面打包
 ```
 
-当前已知构建链残留8个moderate节点（单一sprintf-js问题），0 high/critical为此前审计快照，不等于永远无漏洞。依赖/构建细节见 [PLATFORMS](PLATFORMS.md)；最终状态以本次交付文档为准。
+**Electron 与 electron-builder 已从依赖中移除，不再有 `node node_modules/electron/install.js` 这一步**；`tools/build-native.cjs` 已标注废弃（只保留「单独构建原生 CLI」的用途，不接回桌面）。历史上那条「8 moderate、单一 sprintf-js 链」来自已删除的 Electron 构建工具链，**不能当作当前依赖审计结论**：仓库里 `platform/npm-audit.json` 是移除前的快照，需由 owner 重新生成或退役；每次 CI 会在私有产物里重跑两级 `npm audit`。依赖/构建细节见 [PLATFORMS](PLATFORMS.md)。
 
 ## 2. 启动IPv4信令、双栈STUN与日志中心
 
@@ -58,7 +61,7 @@ node p2pchat/node_modules/electron/install.js
 
 - `--host`与`--stun-host`一样可重复：每个值一个独立监听站点（各自`V6ONLY`），所以`--host 0.0.0.0 --host ::`是**单进程真双栈**、同端口、共享同一Store/数据目录（无跨进程SQLite写锁）。只写一个`--host`时另一族会被拒绝（不做隐式双栈）。默认仍是`127.0.0.1`。双栈行为目前**只在Linux实测**，Windows/macOS未实测。
 - 远程使用 `wss://signal.example.test:8443/ws`，证书必须受信任，不跳过验证；端口443代理亦仅控制面，绝不是数据回退路径。
-- Origin必须精确allowlist。Electron本地页面Origin是`null`，仅在**明确允许桌面客户端**时另加`--origin null`；Android的WebView页面来源是`http://localhost`（APK默认构建，`androidScheme: http`），因此加`--origin http://localhost`；若你把`androidScheme`改回`https`，则对应`--origin https://localhost`。Origin不是身份认证，仍需房间secret和数据面HMAC。
+- Origin必须精确allowlist。**桌面端是纯 Python 进程（不再有 Electron 页面），不会带浏览器那种 `null` Origin**：按实际客户端分别配——浏览器用它的页面来源；Android 的 WebView 页面来源是`http://localhost`（APK默认构建，`androidScheme: http`），因此加`--origin http://localhost`；若你把`androidScheme`改回`https`，则对应`--origin https://localhost`。Origin不是身份认证，仍需房间secret和数据面HMAC。
 - 仅按需开放控制端口及UDP3478；P2P数据连接仍需端点网络允许。IPv6可路由地址不表示stateful firewall允许入站。STUN不能保证对称NAT/CGNAT/UDP阻断网络成功。
 - 网关UPnP/PCP/NAT-PMP操作需要单独opt-in，不能因启动中心或导入STUN配置而默认开端口。
 
@@ -82,11 +85,12 @@ Echo是房间成员，只沿来源的认证WebRTC通道回声，不替两个客�
 | 平台 | 如何运行/构建 | 当前可信状态 |
 |---|---|---|
 | Linux浏览器 | 打开上述本地网页，或已授权部署的HTTPS页面 | 真实本机浏览器↔独立echo验证通过 |
-| Linux Electron | `npm --prefix p2pchat run dist:linux`；运行`p2pchat/releases/linux-unpacked/p2p-observatory-chat` | 本基线本地构建+sandbox启动通过；需保留完整目录而非单独launcher；本机glibc2.44构建不保证旧发行版 |
-| Windows Electron | 在Windows配置Python3.12、Node24后，执行`npm --prefix p2pchat run dist:windows`；将来仅安装对应最终commit的portable包 | 源码存在；当前最终同版成功包未取得。旧CI测试超时，未打包；不能声称可安装已测 |
+| Linux桌面（Python + Qt/PySide6） | `.venv/bin/python -m p2pchat.python_desktop.app`；或 `npm --prefix p2pchat run desktop:linux` 后运行 `dist/p2p-desktop/p2p-desktop` | 本机自检真实握手通过、PyInstaller 产物可启动（L1/L3）；**Qt 迁移（t24）仍在收尾、尚未独立复审**，最终冻结前以真实状态为准；本机glibc2.44构建不保证旧发行版 |
+| Windows桌面（Python + Qt/PySide6） | 同一份源码与同一个 `tools/desktop.spec`，在 Windows 上用 `.venv\Scripts\python.exe -m PyInstaller` | **未验证**：Windows CI 结果待 captain 推送后确认；旧 Electron 版的成功记录不可继承 |
+| macOS桌面 | 同一个 spec（未验证） | **NOT_RUN**：`.app` 布局、签名与公证均未做 |
 | Android Capacitor | 自备已授权SDK36/build-tools36、JDK21；`npm --prefix p2pchat run android:sync`，再在`p2pchat/android`运行`./gradlew --no-daemon -Pandroid.builder.sdkDownload=false assembleDebug` | 页面来源`http://localhost`（仍是安全上下文，录音可用）+ network security config 放行明文，详见`docs/ANDROID-CLEARTEXT.md`；本机无SDK，APK构建与实机一律NOT_RUN |
 
-Windows构建可用构建环境变量`PYTHON`指定本机虚拟环境解释器；不是renderer可传命令。Android debug APK仅调试签名、不是正式发行签名；不上传任何签名私钥，不代用户接受SDK许可。Android的WebView页面来源是`http://localhost`（安全上下文，录音不受影响），配合`res/xml/network_security_config.xml`后APK**具备**连明文`ws://`信令的能力：明文会被同一路径上的人窃听和篡改（房间密钥、SDP/ICE候选都在里面），你的服务器有受信任证书时就用`wss://`，服务端TLS路径完整保留。另需注意：网页客户端目前仍只允许`ws://`的目标是loopback（`web/app.js`），所以拿手机连`ws://`到你自己的服务器地址会被前端拦下；细节与取舍见`docs/ANDROID-CLEARTEXT.md`。
+桌面端是**纯 Python 进程**，自己建套接字：非回环 `ws://` 默认拒绝，只有操作者显式确认本次会话才放行，并在会话期间持续提示未加密（没有 trust-all）。Android debug APK仅调试签名、不是正式发行签名；不上传任何签名私钥，不代用户接受SDK许可。Android的WebView页面来源是`http://localhost`（安全上下文，录音不受影响），配合`res/xml/network_security_config.xml`后APK**具备**连明文`ws://`信令的能力：明文会被同一路径上的人窃听和篡改（房间密钥、SDP/ICE候选都在里面），你的服务器有受信任证书时就用`wss://`，服务端TLS路径完整保留。另需注意：网页客户端目前仍只允许`ws://`的目标是loopback（`web/app.js`），所以拿手机连`ws://`到你自己的服务器地址会被前端拦下；细节与取舍见`docs/ANDROID-CLEARTEXT.md`。
 
 ## 5. 加入、消息、路径、测速
 
@@ -101,7 +105,9 @@ Windows构建可用构建环境变量`PYTHON`指定本机虚拟环境解释器�
 
 ### 桌面原生配置
 
-原生默认loopback。菜单**原生网络绑定**确认后选本机接口，改变配置会关闭旧路径。STUN菜单可导入一个≤1024B JSON `{"address":"已授权STUN的数字IPv4","port":3478}`，核对实际端点再确认；会话级、默认关闭，不接受DNS/URL或任意命令。网关映射不同于STUN：目前只有Python显式opt-in API，客户端桥显示`OPT_IN_GATEWAY_API_ONLY`，没有自动授权入口。原生QUIC/TCP须配另一支持native的客户端，不能用WebRTC-only echo判这些机制失败。
+桌面版**在同一个 Python 进程内**直接调用 `p2pchat/native/*`（没有 stdio 桥、没有 sidecar、没有菜单里的「原生网络绑定」）。原生套接字默认只绑 loopback，不做隐式网络切换；需要别的本机接口时用显式参数重启，不接受渲染层/远端传入的任意绑定地址。原生 STUN 观测点必须显式配置（会话级、默认关闭），核对实际端点后才使用，不接受 DNS/URL 或任意命令。
+
+**三件「默认关闭、必须你单独同意」的事**（都在设置面板里，各自有人话解释）：路由器放行（申请一个端口映射）、同网段直连发现（组播，生产模式拒绝回环）、对称 NAT 端口预测。它们**都不是聊天路径**：路由器放行只开端口（`canMessage=false`），另外两项成功后也仍走既有认证通道。**真实路由器映射 = NOT_RUN**——本仓库从未改动宿主路由/防火墙，只在受控回环 mock 上测过协议。原生 QUIC/TCP 须配另一支持 native 的客户端，不能用 WebRTC-only 的 echo 判这些机制失败。
 
 ## 6. 诊断、隐私与排障
 
@@ -113,19 +119,22 @@ Windows构建可用构建环境变量`PYTHON`指定本机虚拟环境解释器�
 |---|---|
 | 403/无法加入 | 核对WSS证书、精确Origin、房间key；不要关TLS校验或使用通配Origin |
 | ICE timeout/unknown | 查看真实候选和网络限制；IPv6/UDP被阻断可正常失败，绝无TURN回退 |
-| NATIVE_BRIDGE_UNAVAILABLE | 使用包含sidecar的完整桌面包；浏览器/Android原生能力本就受限 |
+| NATIVE_BRIDGE_UNAVAILABLE / 原生「不支持」 | 浏览器与安卓本来就没有原生网络适配器（UDP/QUIC/TCP/网关只在桌面 Python 版进程内）；桌面版若报此错，检查本机是否装全 aiortc/aioquic/cryptography/PySide6 |
 | BACKPRESSURE_TIMEOUT | 本地发送队列/拥塞超预算（benchmark2秒、chat10秒），不是NAT分类结果 |
 | 中心记录不完整 | 恢复自动汇集/控制连接，检查本地存储；淘汰事件不能凭空补回 |
 | 麦克风失败 | 检查是否在localhost安全上下文（`http://localhost`与`https://localhost`都算）、音频权限与平台支持；不静默绕过权限 |
-| Windows CI超时 | 旧IOCP关闭挂起链已定位，窄运行时补丁待同版Windows确认；不能跳过诊断/测试/打包门后称成功 |
+| Windows桌面结果 | 新版 Python/Qt 桌面的 Windows CI 结果 **PENDING**（待 captain 推送）；旧 Electron 版的 90/600 秒记录不适用于新版。不能跳过诊断/测试/打包门后称成功 |
 
 ## 7. 开发验证
 
 ```sh
-.venv/bin/python -m pytest p2pchat/tests -q
+.venv/bin/python -m pytest p2pchat/tests -q          # 必须能收集且全绿；收集报错时不能声称可冻结
+.venv/bin/python -m p2pchat.python_desktop.app --self-test   # 同进程真实握手（服务端+回声+客户端）
 node --test p2pchat/tests/client/*.test.cjs p2pchat/tests/platform/*.test.cjs
 node --test p2pchat/tests/integration/*.test.cjs
 npm --prefix p2pchat run sync:web
 ```
 
-旧8687adf独立复验：58 Python、34客户端/平台Node、4真实native应用集成通过；关闭修复后实现者Linux全套72通过、独立T26 backend/core/负例33通过，Windows原生CI仍待确认；含真实独立进程断信令超过60秒、同socket候选切换、跨tuple完整proof重放拒绝、移动生命周期模拟。**真实IPv4双家宽/NAT成功、真实网关、Windows/Android实机均未验证**；IPv6隔离netns stateful/延迟丢包成功也不是运营商现场证据。完整版本、历史失败及上传边界见 [DELIVERY](docs/DELIVERY.md)。
+本轮本地实跑（**Tk 基线**，Qt 迁移落地后必须整套重跑）：**450 Python passed**、`tests/desktop` 67 passed / 0 skipped（含真实 Tk 面板）、**55 Node client**、**6 platform** passed / 0 skipped；`--self-test`（源码与打包产物）真实握手通过，独立通道测速两次都拿到对端确认（65.52 / 53.58 Mbps，标注为**应用层 goodput、不是线路带宽**）。**取证时（2026-10-12）整套回归因 Qt 迁移中间态在收集阶段中止（`ImportError: cannot import name 'ui'`），所以本轮不生成冻结清单**——原因与处置见 [PUNCHING-MATRIX](docs/PUNCHING-MATRIX.md) 第 8 节 G9 与第 11 节。
+
+**真实IPv4双家宽/NAT成功、真实路由器放行、Windows/macOS/Android实机、真实麦克风采集、磁盘满/断电/七天长跑均未验证（NOT_RUN）**；IPv6隔离netns stateful与延迟丢包成功也不是运营商现场证据。完整版本、历史失败及上传边界见 [DELIVERY](docs/DELIVERY.md)。

@@ -99,7 +99,7 @@ async def test_scheduler_parallel_network_rebuild():
 def test_stdio_malformed_and_oversize():
     for data in ["not json\n", "x" * 131073 + "\n"]:
         result = subprocess.run([sys.executable, "-m", "p2pchat.native.bridge"], input=data,
-                                text=True, capture_output=True, timeout=10)
+                                text=True, encoding="utf-8", capture_output=True, timeout=10)
         assert result.returncode == 0
         output = json.loads(result.stdout)
         assert output["error"]["code"] in {"LINE_LIMIT", "INVALID_REQUEST"}
@@ -113,7 +113,7 @@ def test_isolated_simultaneous_open_positive():
     if check.returncode:
         pytest.skip("user/network namespaces forbidden; not simultaneous-open positive evidence")
     script = Path(__file__).with_name("netns_simopen.py")
-    result = subprocess.run(["unshare", "-Urn", sys.executable, str(script)], capture_output=True, text=True, timeout=40)
+    result = subprocess.run(["unshare", "-Urn", sys.executable, str(script)], capture_output=True, text=True, encoding="utf-8", timeout=40)
     assert result.returncode == 0, result.stderr
     evidence = json.loads(result.stdout)
     assert evidence["listeningFallback"] is False

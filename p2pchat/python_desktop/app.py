@@ -1,6 +1,6 @@
 """Desktop client entry point.
 
-    python -m p2pchat.python_desktop.app                 # Tkinter client
+    python -m p2pchat.python_desktop.app                 # Qt (PySide6) client
     python -m p2pchat.python_desktop.app --self-test     # headless verification
     python -m p2pchat.python_desktop.app --capabilities  # version + capability list
 
@@ -15,7 +15,7 @@ import sys
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="直连聊天 · 纯 Python + Tkinter 桌面客户端")
+    parser = argparse.ArgumentParser(description="直连聊天 · 纯 Python + Qt(PySide6) 桌面客户端")
     parser.add_argument("--self-test", action="store_true", help="无界面自检：启动服务端+回声+客户端做一次真实 P2P 握手")
     parser.add_argument("--capabilities", action="store_true", help="输出版本与本机能力清单后退出")
     parser.add_argument("--json", action="store_true", help="自检或能力清单以 JSON 输出")
@@ -59,7 +59,7 @@ def main(argv=None) -> int:
     import os
 
     from .engine import EngineConfig
-    from .ui import run
+    from .qt_ui import run
 
     secret = ""
     if args.secret_file:

@@ -2,7 +2,8 @@
 /**
  * 废弃（DEPRECATED）：仅用于单独构建原生 CLI 二进制，与桌面端无关。
  *
- * 理由：Electron 桌面壳已删除，桌面端改为纯 Python + Tkinter（Qt 迁移见 t24），
+ * 理由：Electron 桌面壳已删除，桌面端为纯 Python，界面层用 Qt(PySide6)（Tk 因该运行时
+ * 未链接 Xft、中文 measure==0 而被替换；见 docs/DESKTOP-PYTHON.md），
  * 直接进程内调用 `p2pchat/native/*`。因此不再需要 stdio sidecar 二进制、也不需要
  * 把它塞进 asar 或随 Electron 分发——`npm run build:native` 不再是任何构建/CI 步骤
  * 的一部分（CI 已无 build-native/native_entry 调用点）。

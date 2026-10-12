@@ -125,7 +125,7 @@ def _reserve_port():
 def _listening(port):
     """ss -lnt 里该端口的所有监听套接字 {addr}:{port}；ss 不可用则返回 None。"""
     try:
-        result = subprocess.run(['ss', '-lnt'], capture_output=True, text=True, check=False)
+        result = subprocess.run(['ss', '-lnt'], capture_output=True, text=True, encoding='utf-8', errors='replace', check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
@@ -160,7 +160,7 @@ def _has_ipv6_listener(entries):
 
 async def _start_server(tmp_path, extra, port=None, key='dual-stack-room-secret'):
     key_file = tmp_path / 'room.key'
-    key_file.write_text(key)
+    key_file.write_text(key, encoding='utf-8')
     key_file.chmod(0o600)
     port = port or _reserve_port()
     scheme = 'ws'
@@ -269,7 +269,7 @@ def _needs_tls(extra):
 async def test_real_dual_stack_ws_upgrade_and_join_from_both_families(tmp_path):
     process, port, key_file, log, scheme = await _start_server(
         tmp_path, ['--host', '0.0.0.0', '--host', '::', *COMMON])
-    secret = key_file.read_text()
+    secret = key_file.read_text(encoding='utf-8')
     channel_v4 = f'{scheme}://{LOOPBACK_V4}:{port}/ws'
     channel_v6 = f'{scheme}://[{LOOPBACK_V6}]:{port}/ws'
     try:
@@ -358,7 +358,7 @@ async def test_default_host_is_still_loopback_only(tmp_path):
     origin = f'http://{LOOPBACK_V4}:{port}'
     process, port, key_file, log, scheme = await _start_server(
         tmp_path, ['--origin', origin], port=port)
-    secret = key_file.read_text()
+    secret = key_file.read_text(encoding='utf-8')
     try:
         await _wait_ready(process, LOOPBACK_V4, port)
         with pytest.raises(OSError):
@@ -395,7 +395,7 @@ async def test_shared_store_and_no_relay_semantics_unchanged(tmp_path):
     """两个站点共享同一 Store：聊天仍然被拒绝，且不进中心日志（无服务端转发）。"""
     process, port, key_file, log, scheme = await _start_server(
         tmp_path, ['--host', '0.0.0.0', '--host', '::', *COMMON])
-    secret = key_file.read_text()
+    secret = key_file.read_text(encoding='utf-8')
     never_relay = 'never relay me over dual stack'
     try:
         await _wait_ready(process, LOOPBACK_V4, port)
@@ -415,9 +415,9 @@ async def test_shared_store_and_no_relay_semantics_unchanged(tmp_path):
         await asyncio.sleep(0.2)
         journal = (tmp_path / 'central' / 'server.jsonl')
         assert journal.exists(), '中心日志应当存在（行为未变）'
-        assert never_relay not in journal.read_text()
+        assert never_relay not in journal.read_text(encoding='utf-8', errors='replace')
         # 两个站点都写进同一份日志文件，说明共享同一数据目录
-        events = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+        events = [json.loads(line) for line in journal.read_text(encoding='utf-8', errors='replace').splitlines() if line.strip()]
         scopes = {event.get('peerId') for event in events}
         assert scopes, events
     finally:

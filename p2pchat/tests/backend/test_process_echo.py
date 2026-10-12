@@ -26,7 +26,7 @@ async def until(peer,predicate):
 
 @pytest.mark.asyncio
 async def test_separate_signaling_and_echo_processes(tmp_path):
-    port=reserve_port();key=tmp_path/'room.key';key.write_text('process-test-room-secret');key.chmod(0o600)
+    port=reserve_port();key=tmp_path/'room.key';key.write_text('process-test-room-secret', encoding='utf-8');key.chmod(0o600)
     server_log=(tmp_path/'server.stderr').open('wb');echo_log=(tmp_path/'echo.stderr').open('wb')
     server=await asyncio.create_subprocess_exec(sys.executable,'-m','p2pchat.server','--port',str(port),'--stun-port','0','--data',str(tmp_path/'central'),'--origin','https://p2p.example',stdout=server_log,stderr=server_log)
     echo=None;peer=None;task=None
@@ -40,7 +40,7 @@ async def test_separate_signaling_and_echo_processes(tmp_path):
                     except OSError:pass
                     await asyncio.sleep(.05)
         echo=await asyncio.create_subprocess_exec(sys.executable,'-m','p2pchat.peer','--server',f'ws://127.0.0.1:{port}/ws','--secret-file',str(key),'--room','process-test','--logs',str(tmp_path/'echo'),'--origin','https://p2p.example',stdout=echo_log,stderr=echo_log)
-        peer=Peer(f'ws://127.0.0.1:{port}/ws','process-test',key.read_text(),'client',tmp_path/'client',False,origin='https://p2p.example')
+        peer=Peer(f'ws://127.0.0.1:{port}/ws','process-test',key.read_text(encoding='utf-8'),'client',tmp_path/'client',False,origin='https://p2p.example')
         task=asyncio.create_task(peer.run());await asyncio.wait_for(peer.ready.wait(),30)
         path=next(p for p in peer.paths.values() if p['hello'])
         text='independent local process P2P';mid=str(uuid.uuid4());peer.send(path,{'kind':'text','id':mid,'text':text})
@@ -52,8 +52,8 @@ async def test_separate_signaling_and_echo_processes(tmp_path):
             assert answer['ok'] and answer['sha256']==hashlib.sha256(data).hexdigest()
             results.append({'mime':mime,'bytes':len(data),'integrityOk':True})
         assert server.pid!=echo.pid!=os.getpid()
-        assert text not in (tmp_path/'central'/'server.jsonl').read_text()
-        (tmp_path/'evidence.json').write_text(json.dumps({'scope':'same-host independent processes; NOT residential/NAT evidence','serverPid':server.pid,'echoPid':echo.pid,'clientPid':os.getpid(),'actual':path['actual'],'textEcho':True,'fileEcho':results},indent=2))
+        assert text not in (tmp_path/'central'/'server.jsonl').read_text(encoding='utf-8', errors='replace')
+        (tmp_path/'evidence.json').write_text(json.dumps({'scope':'same-host independent processes; NOT residential/NAT evidence','serverPid':server.pid,'echoPid':echo.pid,'clientPid':os.getpid(),'actual':path['actual'],'textEcho':True,'fileEcho':results},indent=2),encoding='utf-8')
     finally:
         if peer:await peer.close()
         if task:task.cancel();await asyncio.gather(task,return_exceptions=True)

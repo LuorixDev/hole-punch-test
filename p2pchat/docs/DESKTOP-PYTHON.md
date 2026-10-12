@@ -1,13 +1,13 @@
-# 桌面客户端（纯 Python + Tkinter + PyInstaller）
+# 桌面客户端（纯 Python + Qt(PySide6) + PyInstaller）
 
 本文档说明 p2pchat 桌面端的实现、运行方式与打包方式。
-**网页版保留，Electron 桌面壳已删除。**
+**网页版保留，Electron 桌面壳已删除。** 界面工具包是 **Qt(PySide6)**（`qt_ui.py`）；早期那版 Tkinter 壳（`ui.py`）已按用户要求移除，原因见下文「为什么从 Tk 换成 Qt」。
 
 ## 一、验证状态（先看这里）
 
 | 平台 | 实现 | 本机验证 | 说明 |
 |---|---|---|---|
-| Linux x86_64 | 纯 Python + Tkinter | **已实测** | 无界面自检真实握手通过；PyInstaller 产物已构建并启动；本机 `DISPLAY=:0` 下 GUI 可启动 |
+| Linux x86_64 | 纯 Python + Qt(PySide6) | **Qt 版已在本机实跑**：三条 verify 命令通过、`DISPLAY=:0` 下六张中文截图（见「Qt 中文渲染证据」）、打包产物在无 DISPLAY 环境 `--capabilities` / `--self-test` 通过；**独立复审待 t27** | 无界面自检走引擎层（与界面库无关），两种壳都成立；图形界面的 Qt 版已有截图与实跑证据，但**尚未经过独立复审**，请不要把「已实跑」当成「已复审」 |
 | Windows x64 | 同一份 Python 源码 | **未验证** | 打包命令与 Linux 相同（见第五节），从未在 Windows 主机或 Windows CI 上运行过 |
 | macOS | 同一份 Python 源码 | **未验证** | 打包命令与 Linux 相同（见第五节），`.app` 布局、签名与公证均未验证 |
 
@@ -15,12 +15,58 @@
 它**不能**证明任何家庭宽带、跨 NAT、跨运营商或跨设备场景可用，也**不能**代表 Windows / 安卓。
 自检里的所有套接字都在同一台主机上。
 
+### 为什么从 Tk 换成 Qt（用户要求，2026-10-11）
+
+早期那版是 Tkinter。本机这个 Tk 运行时**没有链接 Xft**，`tkinter.font.families()` 只返回 `('fixed',)`，
+中文文本测量宽度是 0 —— 三屏界面里的中文会渲染成空白。Qt(PySide6) 有正常的字体处理，因此界面壳改为 Qt：
+`python_desktop/ui.py`（Tk）已删除，`app.py` 调用 `qt_ui.run`，`tools/desktop.spec` 收集 Qt 平台插件并**显式排除** `tkinter`。
+旧实现作为**不可导入的参考**留在 `python_desktop/evidence/tk_ui_reference.py.txt`（产品路径下没有 `ui.py`），
+`python_desktop/*.py` 中不再出现任何 `import tkinter`；`tests/desktop/test_ui.py` 的
+`test_product_code_no_longer_imports_tkinter` 会静态断言这一点，`tests/native/test_gateway_optin.py`
+另有「界面库只允许出现在薄界面层」的守门用例。
+
+### Qt 中文渲染证据（DISPLAY=:0 实拍）
+
+四张截图在 `p2pchat/python_desktop/evidence/`，由真实图形会话（`DISPLAY=:0`，Qt 6.12.0）截取：
+
+| 文件 | 尺寸 | 内容 |
+|---|---|---|
+| `qt-1-connect.png` | 1000×697 | 第 1 屏：连接服务器（表单、明文确认框、无中继说明） |
+| `qt-2-attempt.png` | 1000×697 | 第 2 屏：九种方式逐条列出（人话名称 / 一句话说明 / 可行网络 / 状态 / 可用性 / 实测延迟） |
+| `qt-3-chat.png` | 1000×697 | 第 3 屏：聊天（房间成员、消息区、发送/图片/文件/录音） |
+| `qt-4-settings.png` | 1000×720 | 右上角设置：剩余方式、可用性、延迟、测速、诊断暂停开关、「需要你单独同意的三件事」 |
+| `qt-5-frozen-packaged.png` | 1000×722 | **打包产物** `dist/p2p-desktop/p2p-desktop` 的真实窗口（Wayland 平台插件） |
+| `qt-6-frozen-xcb.png` | 1000×721 | **打包产物**用 `QT_QPA_PLATFORM=xcb` 启动的真实窗口，证明包里的 X11 平台插件（`libqxcb.so`）可用 |
+
+六张合计约 **900 KB**（已压到 1000 px 宽），全部来自**最终**一次 PyInstaller 构建（2026-10-12）对应的代码，其中 1–4 为源码运行、5–6 为 `dist/p2p-desktop/` 里的冻结产物。`qt-1…4` 由源码运行并在 `DISPLAY=:0` 下用 Qt 自绘抓取；
+`qt-5`/`qt-6` 是对**冻结产物**窗口的真实截屏（窗口类 `p2p-desktop`，标题「直连聊天 · 桌面版 0.2.0」，
+后者在窗口管理器里以 `client_type=x11` 出现）。
+
+复核方式（可复现）：在图形会话里跑下面这段，然后**用眼睛看**截图里的中文是否成字（不是方块/空白）：
+
+```sh
+PYTHONPATH=. DISPLAY=:0 .venv/bin/python - <<'PY'
+from PySide6 import QtWidgets
+from p2pchat.python_desktop import qt_ui
+app = QtWidgets.QApplication([])
+w = qt_ui.DesktopApp(app=app); w.resize(1120, 780); w.show()
+w._refresh_paths()                      # 连接前的第 2 屏也会列出九种方式
+app.processEvents(); w.grab().save("/tmp/qt-check.png")
+print("font:", w.font_family)
+PY
+```
+
+字体是按**字形覆盖率**挑的（`pick_cjk_font()` 用 `QFontMetrics.inFontUcs4('中文渲染')` 逐个测量候选家族），
+不是按名字猜。本机选中 `Noto Sans CJK SC`。如果系统一个能画中文的字体都没有，界面会在底部**持续显示**
+「⚠ 本机没有找到能渲染中文的字体…请安装中文字体（例如 fonts-noto-cjk / fonts-wqy-zenhei）」，
+而不是给出一片空白。
+
 ## 二、三屏流程
 
 | 屏 | 内容 |
 |---|---|
 | 1 / 3 连接服务器 | 服务器地址、房间、你的名字、房间密码；填完点「连接并寻找对方」才开始连接 |
-| 2 / 3 逐条尝试打洞 | 每种方式的**人话名称**、一句话说明、当前状态、实测延迟 |
+| 2 / 3 逐条尝试打洞 | 按 `METHODS-PLAIN.md` 的固定顺序逐条列出**九种方式**：人话名称、一句话说明、**什么网络下可行**、失败最常见原因、状态、可用性、实测延迟。还没连上/还没对端时也会列出来（状态=等待中、可用性与延迟显示「—」，绝不猜） |
 | 3 / 3 聊天 | 左侧选人，右侧聊天；文字、图片、文件、录音语音 |
 
 右上角「设置」随时可打开（连接不会中断），里面有：
@@ -31,6 +77,7 @@
 - **测速**：手动按钮，在独立通道上测，并注明「这是应用层速度，不是线路带宽」
 - **查看我这台机器的出口地址**：STUN 映射观测，只观测地址，不转发任何数据
 - **本机支持哪些功能**：版本与能力清单
+- **三件默认关闭、必须你单独同意的事**：「让路由器开一个端口」（只申请映射，不传数据）、「同网段直连发现」（组播，生产模式拒绝回环）、「对称 NAT 端口预测」。每件都先给人话解释再问你要不要同意；不同意就什么都不做
 
 ### 文案来源
 
@@ -55,7 +102,7 @@
 
 1. UDP 探测（第 4 项）标注「仅探测，不传内容」——它通了也**不能**聊天。
 2. STUN 映射观测（第 8 项）不是中继，只观察地址；整个产品**没有中继、没有 TURN，也不通过服务器转发聊天**。
-3. 路由器放行（第 9 项）默认关闭，需要操作者单独显式授权；本客户端**不会**自动修改路由器，界面上显示为「不支持」。
+3. 路由器放行（第 9 项）默认关闭，需要操作者单独显式授权；本客户端**不会**自动修改路由器。它的可用性按平台如实显示：能在本机只读核对路由表的平台（当前实测是 Linux）显示「**可用，但需要你点同意**」，其它平台显示「不支持」并给出平台原因（Windows/macOS fail-closed）。它**只申请端口映射，不能传消息**。
 
 ## 三、复用而不是重写
 
@@ -97,8 +144,8 @@ WebRTC 依旧完全走 `peer.py`。两个成员身份在界面上会合并成**�
 
 ### 没有的依赖
 
-`asar`、`preload`、`contextBridge`、stdio sidecar、Node/Electron 主进程——删除 Electron 之后**一个都不剩**。
-`p2pchat/tests/desktop/test_electron_removed.py` 会检查这一点。
+`asar`、`preload`、`contextBridge`、stdio sidecar、Node/Electron 主进程——删除 Electron 之后**一个都不剩**；Tk 界面壳（`ui.py`）也已在 Qt 迁移中删除。
+`p2pchat/tests/desktop/test_electron_removed.py` 会检查 Electron 相关文件确实不存在。
 
 ## 四、运行
 
@@ -130,7 +177,7 @@ WebRTC 依旧完全走 `peer.py`。两个成员身份在界面上会合并成**�
 
 退出码 0 = 通过，1 = 未通过。失败时它会明确说「失败就是失败，不会改走服务器转发」。
 
-实测输出样例（本机 Linux，2026-10-11）：
+历史输出样例（本机 Linux，2026-10-11，**Tk 基线、测速修复之前**；保留作对照，其中的 `测速未完成：ACK_TIMEOUT` 已不代表当前行为）：
 
 ```
 桌面客户端自检（无界面模式）
@@ -151,17 +198,15 @@ WebRTC 依旧完全走 `peer.py`。两个成员身份在界面上会合并成**�
 
 ### 已知局限
 
-- **应用层测速在 WebRTC 数据通道上还没有成功取到对方的确认**（报告为 `ACK_TIMEOUT`），
-  原因是被复用的 `peer.py` 隔离测速通道在高吞吐突发下会先于确认超时关闭。
-  界面因此只显示「未完成 + 已发送字节数」，**不显示速度**。原生 QUIC 通道上的测速是另一条实现，不受此影响。
-  这是如实报告失败，不是静默降级。
+- **测速现在能拿到对端确认**：隔离通道改为**进度型空闲窗口**（空闲 20 秒才算超时，发起方可协商 `drainMs`，桌面端宣告 10000，另设 300 秒硬顶兜底）之后，独立复审在**源码**与**打包产物**上各跑一次 `--self-test`，两次都拿到对端 bench-ack：**65.52 Mbps / 53.58 Mbps**。这是**应用层 goodput（对端实际确认收到的字节 ÷ 单调时间）**，**不是线路带宽**，也不保证跨网络可重复。
+  对端始终沉默时仍然如实报 `ACK_TIMEOUT`，**不会**编造速度；TCP 通道没有独立 lane，明确不允许测速。
 - 延迟只在有直连、并且打开设置或握手成功时测量；没测到就显示「—」。
 - 录音依赖本机已有的 ALSA/PortAudio 前端（如 `arecord`）；没有的话界面直接说「录音不可用」，不会假装录到。
 
 ## 五、打包（PyInstaller）
 
 ```sh
-# Linux（已验证）
+# Linux（Qt 版已在本机实跑；独立复审待 t27 —— 见第一节的验证状态与截图）
 .venv/bin/python -m PyInstaller --noconfirm --clean p2pchat/tools/desktop.spec
 
 # 产物
@@ -182,17 +227,31 @@ dist/p2p-desktop/p2p-desktop --self-test      # 打包产物里的自检
 - `collect_submodules` 收集 `aiortc`、`aioice`、`aioquic`、`aiohttp`、`cryptography` 与 `p2pchat` 自身的子模块
   （这些包的隐式导入静态分析跟不到）；
 - `collect_dynamic_libs` 收集 `av`、`cryptography`、`aioquic`、`aiortc`、`pylibsrtp` 的动态库；
-- 显式收集 `_tkinter` 与 `libtcl*.so*` / `libtk*.so*`：`_tkinter` 是动态加载的扩展，
-  它对 Tcl/Tk 是**按名字**链接的（`ldd` 在 Tcl 初始化前显示 `not found`），不显式带上就会 `ImportError`；
+- 收集 Qt/PySide6 的平台插件（`PySide6/Qt/plugins/platforms/libqxcb.so` 等），并在 COLLECT 之后**断言平台插件真的进了包**，不盲信 hook；同时**显式排除** `tkinter` / `_tkinter`（Tk 壳已被 Qt 替换）；
 - 只打包 `p2pchat` 的源码模块，**排除** `node_modules/`、`releases/`、`verification/`、`review/`、
   `dist-web/`、`android*/`、`tests/` 等构建产物与研究证据；
-- 数据只带 `p2pchat/web/`（保留的网页版）与 `docs/METHODS-PLAIN.md`（界面文案来源）。
+- 数据只带 `p2pchat/web/`（保留的网页版）、`docs/METHODS-PLAIN.md`（界面文案来源）与 `python_desktop/licenses/`（LGPL/GPL 文本）。
 
-Linux 实测：产物目录约 181 MiB，`--capabilities` 与 `--self-test` 都能在打包后运行。
+本机 Linux 实测（Qt 版，2026-10-12）：产物目录 `dist/p2p-desktop` 约 **350 MiB**（Tk 基线是 181 MiB，
+**增量约 +169 MiB / +93%**），其中 Qt 部分约 84 MiB（`libQt6Core/Gui/Widgets`、`libQt6XcbQpa`、平台插件与
+`PySide6/*.abi3.so`），加上 ICU 数据约 32 MiB —— 这是「中文能渲染」和「不依赖宿主 Tk」的直接代价。
+打包产物在**没有 DISPLAY**的环境里 `--capabilities` 与 `--self-test` 都通过（GUI 起不来时 `--self-test` 本来就走引擎层）。
+
+### LGPL 合规（Qt / PySide6）
+
+`PySide6-Essentials==6.12.0` + `shiboken6==6.12.0`（LGPL-3.0-only；wheel 元数据写作
+`LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`，本项目选 LGPL），版本与 wheel 校验值记在
+`p2pchat/requirements-lock.txt`，合规说明在 `p2pchat/python_desktop/licenses/PYSIDE6-NOTICE.txt`：
+
+- **动态链接**：Qt 库与 PySide6/shiboken6 扩展模块以独立 `.so` 放在包里（`_internal/PySide6/…`），没有静态链接、没有包装改许可；
+- **不改二进制**：包里的 Qt/PySide6 与上面两个 wheel 一致，构建过程不 patch 它们；
+- **许可证文本随包**：`licenses/LGPL-3.0.txt`、`licenses/GPL-3.0.txt`（LGPL-3.0 引用 GPL-3.0 条款）由 spec 复制进包，源码树里也有一份；
+- **不引入 WebEngine**：只 import `QtCore/QtGui/QtWidgets`，没有 Qt WebEngine/Quick/商业组件或静态插件。
 
 ## 六、不做什么
 
-- 不部署公网服务、不改宿主防火墙、不申请路由器端口映射；
+- 不部署公网服务、不改宿主防火墙；
+- 路由器放行**默认关闭**：不会在启动/连接/后台时申请任何端口映射，也**不会自动修改路由器**；只有你点「让路由器开一个端口」并在弹出的同意说明里确认后，才会尝试**一次**映射（`docs/GATEWAY-OPTIN.md` 是这条的完整规则：只申请映射、用完可撤销、失败如实说明、不能传消息）。同网段直连发现同样默认关闭、需要单独同意，且生产模式拒绝回环地址（回环只用于测试并会标注「不算局域网证据」）；
 - 不把 ICE 的三种地址组合说成三种独立协议（它们是同一个 WebRTC 协议的地址族策略）；
 - 不把同机或模拟结果当成真实家宽证据；
 - 不静默改走其它通道：直连不成功就是失败，界面按用户能懂的话说明原因。

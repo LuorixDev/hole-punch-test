@@ -220,3 +220,16 @@ def test_stun_cli_and_capability_contract():
     methods = frames[-1]['result']['methods']
     assert {m['mechanism']: m['limits']['independentBenchmark'] for m in methods} == {
         'udp-probe': False, 'quic': True, 'tcp': False, 'tcp-simopen': False, 'upnp': False, 'pcp': False, 'natpmp': False}
+
+
+def test_capability_cli_is_parseable_utf8_under_a_cp1252_parent():
+    """生产侧自己钉住 UTF-8：父进程代码页敌意时中文能力文案也不得被截断或替换。"""
+    hostile = {**os.environ, 'PYTHONIOENCODING': 'cp1252', 'PYTHONUTF8': '0'}
+    result = run_bridge(args=['--stun-address', '127.0.0.1', '--stun-port', '3478'],
+                        requests=[dict(v=1, id=1, method='capabilities', params={})], env=hostile)
+    frames = bridge_frames(result)  # 空输出或非 UTF-8 都会在这里明确失败
+    methods = frames[-1]['result']['methods']
+    assert {m['mechanism']: m['limits']['independentBenchmark'] for m in methods} == {
+        'udp-probe': False, 'quic': True, 'tcp': False, 'tcp-simopen': False, 'upnp': False, 'pcp': False, 'natpmp': False}
+    note = frames[-1]['result']['prediction']['hitRateNote']
+    assert note and not note.isascii() and '?' not in note and '\ufffd' not in note

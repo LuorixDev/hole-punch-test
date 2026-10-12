@@ -96,7 +96,7 @@ def test_telemetry_strict_whitelist_bounds_and_restart(tmp_path):
     assert s.ingest('scope','new-peer',q.session,[e])==[e['id']]
     for _ in range(100):s.event('scope','bound','path.stats',{'bytes':10})
     assert sum(p.stat().st_size for p in (tmp_path/'s').iterdir())<64000
-    assert 'SECRET' not in (tmp_path/'q'/'server.jsonl').read_text()
+    assert 'SECRET' not in (tmp_path/'q'/'server.jsonl').read_text(encoding='utf-8', errors='replace')
     q.close();s.close()
 
 def test_signal_ssrf_candidate_invalid_end_and_spoofing():
@@ -139,7 +139,7 @@ async def test_real_udp_stun_and_abuse_rate(tmp_path,address,family):
         assert n==19 and protocol.buckets[address]==26 and protocol.total==26
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(loop.sock_recvfrom(sock,1024),.05)
-        (tmp_path/'stun-arrivals.json').write_text(json.dumps(protocol.trace))
+        (tmp_path/'stun-arrivals.json').write_text(json.dumps(protocol.trace), encoding='utf-8')
         bad=struct.pack('!HHI',1,4,0x2112A442)+b'123456789012'+struct.pack('!HH',0x8022,100)
         assert stun_binding(bad,(address,1234)) is None
     finally:sock.close();transport.close();store.close()

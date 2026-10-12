@@ -1,8 +1,10 @@
 # 最终能力矩阵与限制
 
-**t34最新：STUN窗口、native IPv6规范化与网关平台分支修复待新commit Windows CI。** 78a2050原双echo/计时2pass，完整70pass6fail1skip；不是旧关闭挂起/elapsed0。六失败与t30/t31及t32/t33审查对应见 [公开脱敏索引](EVIDENCE-INDEX.md)。本轮native字节已变，不能沿用下文历史“native未变”作为当前断言。最新hash见FREEZE。
+**本轮（p2p-delivery-v2，2026-10-12）：桌面端已删除 Electron 壳，改为纯 Python + Qt(PySide6) + PyInstaller；新增 NAT 行为分类、局域网直连发现、对称 NAT 端口预测与「路由器放行」的真实接线（后三者默认关闭、需显式同意）。** 逐条方式的状态/证据等级/缺口以 [打洞方式全量对照矩阵](PUNCHING-MATRIX.md) 为准；本轮 Windows 结果与最终冻结清单仍 PENDING。下面的 t34/t29 段落与「Linux Electron / Windows Electron」行属于**已删除的旧桌面壳与旧树**，保留作历史。
 
-**当前状态：高分辨率计时修复已审，Windows待当前commit CI确认。** 61b400e的Linux/Android成功，Windows收到4000B但elapsedMs=0导致断言失败；关闭正常完成、约4.937秒exit1，不是旧挂起。t27改perf_counter_ns测量及JS未知计时提示，t28独立25 Python+17 Node通过；本轮按新前端字节重建Linux，详见 [TIMING-INTEGRATION](TIMING-INTEGRATION.md)。下面关闭修复描述为此前t24边界，仍保留但不能覆盖本轮计时变更。 最新完整源码和Linux包哈希见 [SOURCE-MANIFEST](SOURCE-MANIFEST.json)、[FREEZE](FREEZE.json)，已合并t22+t25关闭修复及交付文档。该补丁仅精确win32/Python3.12.10/aiortc1.15.0/aioice0.10.2的本Peer Proactor UDP；Linux模拟/全套72项与 T26（本地私有证据，不随GitHub交付） 独立33项通过，不表示Windows IOCP已通过。
+**（历史）t34：STUN窗口、native IPv6规范化与网关平台分支修复待当时commit Windows CI。** 78a2050原双echo/计时2pass，完整70pass6fail1skip；不是旧关闭挂起/elapsed0。六失败与t30/t31及t32/t33审查对应见 [公开脱敏索引](EVIDENCE-INDEX.md)。
+
+**（历史）t29：高分辨率计时修复已审。** 61b400e的Linux/Android成功，Windows收到4000B但elapsedMs=0导致断言失败；关闭正常完成、约4.937秒exit1。该补丁仅精确win32/Python3.12.10/aiortc1.15.0/aioice0.10.2的本Peer Proactor UDP；Linux模拟/全套72项与独立33项通过，不表示Windows IOCP已通过。
 
 下表L1/L2证据来自历史基线`8687adf15b114380747308b43d78df29dd0634bc006a3e4d16215abeb4062388`的 VERIFICATION-R2（本地私有证据，不随GitHub交付） 与 ROUND3（本地私有证据，不随GitHub交付）；77个旧安全域文件及native字节未变，但Python Peer关闭逻辑已变，不能把旧全套报告直接套新整树。[旧a1c6e7e run38124339483](https://github.com/LuorixDev/hole-punch-test/actions/runs/38124339483)已Linux/Android成功、Windows90秒exit124未打包。当前新版需同commit重跑原双echo诊断+全套测试+打包，详见 [WINDOWS-INTEGRATION](WINDOWS-INTEGRATION.md)。
 
@@ -13,9 +15,9 @@
 | 平台 | 实现 | 当前基线构建 | 当前基线本地运行/测试 | 平台实机/现场 |
 |---|---|---|---|---|
 | Linux Chromium | WebRTC聊天/文件/录音/诊断 | Web静态资源已同步 | 真实浏览器↔独立Python echo、文件SHA、独立benchmark、断信令补传通过 | 本机有证据；两条家宽NOT_RUN |
-| Linux Electron x64 | 共享UI+安全IPC+内置Python sidecar | 本地最终包已重建 | sandbox启动、sidecar来源hash；JS业务→platform桥→双Python native测试通过 | Electron完整GUI跨设备/网关NOT_RUN；本机glibc2.44包不保证旧Linux |
-| Python Linux | 双栈信令/STUN、中心日志、WebRTC Echo、native API | 源码与本地sidecar构建 | 独立进程、v4/v6 socket、隔离v6 stateful/延迟丢包、候选负例通过 | 真实双NAT/公网/CPE兼容NOT_RUN |
-| Windows Electron | 同源封装/sidecar配置 | **计时修复待当前commit CI确认，无成功包**；61b400e关闭正常但elapsed0失败，旧版另有90/600秒超时 | 未运行当前版Windows | GUI/文件/麦克风/防火墙实机NOT_RUN |
+| Linux桌面（Python + Qt/PySide6，PyInstaller） | 三屏UI + 进程内 `peer.py`/`native` + 隐私开关 | Qt 迁移（t24）进行中；Tk 基线包已重建并启动 | 无界面自检真实握手、文件SHA、独立benchmark（两次拿到对端确认）、断信令补传通过 | 跨设备/家宽/真实网关NOT_RUN；Qt 版本尚未独立复审 |
+| Python Linux（服务端/Echo） | 双栈信令/STUN、中心日志、WebRTC Echo、native API | 源码与本地构建 | 独立进程、v4/v6 socket、隔离v6 stateful/延迟丢包、候选负例通过 | 真实双NAT/公网/CPE兼容NOT_RUN |
+| Windows桌面（Python + Qt/PySide6） | 同一份源码与同一个 spec | **本轮 Windows CI PENDING**；旧 Electron 版无成功包（61b400e关闭正常但elapsed0失败，另有90/600秒超时历史） | 未运行新版Windows | GUI/文件/麦克风/防火墙实机NOT_RUN |
 | Android Capacitor | 共享WebRTC UI、SAF保存、音频权限、pause/resume/切网回调 | 关闭修复同版待CI；旧commit debug APK成功不继承 | lifecycle/旧ACK/track回收仅源码+模拟 | 真机安装、WebView互通、录音、后台/切网NOT_RUN |
 
 新关闭修复各平台运行结论/产物链接由captain推送新commit后按实际终态补充，目前Windows修复不预判成功；上述a1c6e7e仅旧版历史。旧`855c19ceed67d6ae23cbf52c61131dd6d637ea8d` / run`38122604055`：Linux、Android成功；Windows watchdog600秒exit124，未打包。详情见 [交付版本表](DELIVERY.md#版本与ci状态)。
@@ -35,20 +37,23 @@
 | QUIC同UDP socket | 浏览器无API | 探测/候选保持fd/port；host黑洞→srflx可控转换+双向64KiB；业务benchmark ACK L1；v6 stateful和40ms/5%loss L2通过 | 源码U | 原生未实现 | 转换shim不是内核双NAT/CPE成功；独立stream共享拥塞 |
 | TCP直连 | 浏览器无API | mutual TLS、v4/v6 socket完整性通过 | 源码U | 原生未实现 | 不支持独立benchmark；不得回退控制面443传正文 |
 | TCP simultaneous open | 浏览器无API | 真双端bind/connect；t3双netns正例；零延迟可失败 | 源码U | 原生未实现 | 不是普通listener/connect；OS/NAT依赖，现场U |
-| UPnP IGD IPv4映射 | 无API | Python opt-in API实现+受控服务测试 | 源码；网关验证受限 | 未实现 | 桌面桥没有映射授权入口，OPT_IN_GATEWAY_API_ONLY |
-| UPnP IPv6 firewall pinhole | 无API | Python API+受控IPv6服务测试 | 源码U | 未实现 | 不能由IPv4映射成功推断；link-local scope受限 |
-| PCP MAP | 无API | 编码/nonce/lease/续租删除API+受控服务测试 | 源码U | 未实现 | 真实网关NOT_RUN |
-| NAT-PMP | 无API | IPv4协议/API+受控服务测试 | 源码U | 未实现 | 协议本身无密码学认证，须可信本地网关与外部验证 |
+| UPnP IGD IPv4映射 | 无API | **已接线**：`adapter.gateway_map()` 生产入口 + 桌面设置面板按钮；默认关闭、需显式同意 | 平台可核对时报「可用，需同意」；实机未做 | 未实现 | Linux 可只读核对路由表（本机实测网关 10.8.1.254）；其它平台 fail-closed；**只开端口，canMessage=false** |
+| UPnP IPv6 firewall pinhole | 无API | 同上（`gateway_pinhole()`） | 同上 | 未实现 | 不能由IPv4映射成功推断；link-local scope受限 |
+| PCP MAP | 无API | 同上（编码/nonce/lease/续租删除） | 同上 | 未实现 | 真实网关NOT_RUN |
+| NAT-PMP | 无API | 同上（IPv4协议/API） | 同上 | 未实现 | 协议本身无密码学认证，须可信本地网关与外部验证 |
+| 局域网直连发现 | 无组播API | 已实现，默认关闭、需同意；生产模式拒绝回环 | 未验证 | 原生未实现 | L1：受限回环组播 + **真实第二进程**发现并直连；真实双设备同Wi-Fi NOT_RUN |
+| NAT 行为分类（多STUN观测） | 无API | 已实现：只访问用户显式配置的观测点；观测不足明确「无法判定」 | 未验证 | 原生未实现 | L1受控应答端点；真实家宽 NAT 行为 NOT_RUN |
+| 对称NAT端口预测 | 无API | 已实现并接入连接流程；**默认关闭**，仅分类为「地址+端口相关」时 | 未验证 | 原生未实现 | L1受控端点；真实对称NAT NOT_RUN；命中率有限，失败是正常结果 |
 | TURN / 信令数据中继 | 永久禁用 | 永久禁用 | 永久禁用 | 永久禁用 | 配置、候选、实际pair、控制面schema均拒绝 |
 
-网关映射是不同机制/候选来源，不是STUN变种或传输成功证明。调用 [gateway.py](../native/gateway.py) 需显式opt-in、可信路由网关、外部peer验证、有限lease/续租/close；本产品没有替用户操作真实路由器。Python Echo只支持WebRTC，native QUIC/TCP应连另一个native客户端，不把“无法向Echo使用native”隐藏成所有机制均已回声。
+网关映射是不同机制/候选来源，不是STUN变种或传输成功证明。调用 [gateway.py](../native/gateway.py) 需显式opt-in、可信路由网关、外部peer验证、有限lease/续租/close；桌面端已经接线（设置面板的「让路由器开一个端口」，默认关闭、需同意），但**本产品没有替用户操作真实路由器**，真实映射与设备兼容性 = NOT_RUN。Python Echo只支持WebRTC，native QUIC/TCP应连另一个native客户端，不把“无法向Echo使用native”隐藏成所有机制均已回声。
 
 ## 3. 传输与诊断
 
 - 文本UTF-8≤16KiB；文件/图片/录音≤32MiB；16KiB非尾块，严格sequence/最终SHA256 ACK；空文件仅start/end。预算≤64MiB且计对象开销、块数有界，超限明确失败。
 - 录音是完成后的文件，非实时通话。t6历史Linux浏览器实际录音566865B并回声播放；**t15最终独立复验只生成合法WAV，真实麦克风未重测**，不覆盖Windows/Android麦克风。
 - Android暂停停止已登记及迟到stream，关闭旧path/ACK；resume/切网合并且有界重建。没有后台服务、wake-lock或系统回收保证；真实锁屏/Doze仍NOT_RUN。
-- WebRTC与QUIC允许独立lane手动测速；TCP禁用。goodput来自实际接收ACK与单调时间，不是线路带宽；共享链路/拥塞仍可能影响聊天。
+- WebRTC与QUIC允许独立lane手动测速；TCP禁用。测速时长是**进度型空闲窗口**（空闲20秒才算超时，发起方可协商 `drainMs` ≤60秒，另有300秒硬顶兜底）；goodput来自**对端实际确认接收的字节**与单调时间，**不是线路带宽**，共享链路/拥塞仍可能影响聊天。本轮独立复审在源码与打包产物上各跑一次自检，两次都拿到对端确认（65.52 / 53.58 Mbps）；对端沉默时仍如实报 `ACK_TIMEOUT`，不编造速率。
 - 日志IndexedDB/SQLite持久化、session/connection/attempt关联、中心ACK去重补传、白名单脱敏、限额。自动汇集当前确认中心已获授权；暂停/淘汰显示“中心记录不完整”。磁盘满/断电/真实7天长跑未验。
 - 底层包头、STUN重传/TCP flags/MTU等API不暴露字段返回null/unknown；Python selected pair是明确声明的aiortc私有只读观察。
 

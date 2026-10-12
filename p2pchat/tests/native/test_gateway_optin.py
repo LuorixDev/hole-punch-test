@@ -243,12 +243,39 @@ WIDGET_CONSTRUCTION = (
     "Tk(", "tk.Label", "ttk.",
 )
 
-# Qt 迁移后的薄界面层：只有它可以 import 界面库并构造控件。
-UI_MODULE = "python_desktop/qt_ui.py"
-UI_MODULE_IMPORT = "from PySide6 import QtCore"
-OLD_TK_MODULE = "python_desktop/ui.py"
+# 薄界面层唯一：不变量与 Tk→Qt 迁移状态无关。迁移前是 ui.py(Tk)，迁移后是 qt_ui.py(Qt)。
+# 断言只认「恰好一个模块构造控件 + app.py 导入它」，不认文件名，也不依赖尚未推送的迁移改动。
+UI_DIR = ROOT / "python_desktop"
 # 例外：version.py 允许在函数体里做“本机能力探测”式导入（必须缩进，不能顶格 import）。
 RUNTIME_PROBE_ALLOWLIST = {"version.py"}
+
+
+def widget_building_modules():
+    """所有构造控件（Tk 或 Qt 都算）的模块名，按文件名排序返回。"""
+    builders = []
+    for path in sorted(UI_DIR.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if any(marker in text for marker in WIDGET_CONSTRUCTION):
+            builders.append(path.name)
+    return builders
+
+
+def toolkit_import_offenders(ui_name):
+    """import 了界面库却不是薄界面层的模块（缩进的运行时探测按白名单豁免）。"""
+    offenders = []
+    for path in sorted(UI_DIR.glob("*.py")):
+        if path.name == ui_name:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for marker in GUI_TOOLKIT_IMPORTS:
+            if marker not in text:
+                continue
+            indented = all(line[:1].isspace() or not line.strip()
+                           for line in text.splitlines() if marker in line)
+            if path.name in RUNTIME_PROBE_ALLOWLIST and indented:
+                continue  # 运行时能力探测：只在函数体里 import，不参与界面渲染
+            offenders.append(f"{path.name}: {marker}")
+    return offenders
 
 
 def test_logic_layer_is_free_of_gui_toolkits() -> None:
@@ -262,36 +289,23 @@ def test_logic_layer_is_free_of_gui_toolkits() -> None:
     assert offenders == [], f"逻辑层不应依赖界面库：{offenders}"
 
 
-def test_ui_layer_is_the_only_place_that_imports_the_toolkit() -> None:
-    """界面库只允许出现在薄界面层；旧的 Tk 模块必须已经移除。"""
-    ui = ROOT / UI_MODULE
-    assert ui.is_file(), f"薄界面层应当是 {UI_MODULE}"
-    assert UI_MODULE_IMPORT in ui.read_text(encoding="utf-8"), "qt_ui.py 应当 import Qt 控件层"
-    assert not (ROOT / OLD_TK_MODULE).exists(), "旧的 Tk 界面模块必须移除"
-
-    offenders = []
-    for path in sorted((ROOT / "python_desktop").glob("*.py")):
-        if path.name == Path(UI_MODULE).name:
-            continue
-        text = path.read_text(encoding="utf-8")
-        for marker in GUI_TOOLKIT_IMPORTS:
-            if marker not in text:
-                continue
-            indented = all(line[:1].isspace() or not line.strip()
-                           for line in text.splitlines() if marker in line)
-            if path.name in RUNTIME_PROBE_ALLOWLIST and indented:
-                continue  # 运行时能力探测：只在函数体里 import，不参与界面渲染
-            offenders.append(f"{path.name}: {marker}")
-    assert offenders == [], f"界面库只应出现在 {UI_MODULE}：{offenders}"
-
-
 def test_only_the_thin_ui_layer_builds_widgets() -> None:
-    offenders = []
-    for path in sorted((ROOT / "python_desktop").glob("*.py")):
-        if path.name == Path(UI_MODULE).name:
-            continue
-        text = path.read_text(encoding="utf-8")
-        found = [marker for marker in WIDGET_CONSTRUCTION if marker in text]
-        if found:
-            offenders.append(f"{path.name}: {found}")
-    assert offenders == [], f"只有 {UI_MODULE} 可以构造控件：{offenders}"
+    """薄界面层唯一：恰好一个模块构造控件，且 app.py 导入的正是它（ui.py/qt_ui.py 任一）。"""
+    builders = widget_building_modules()
+    assert len(builders) == 1, (
+        f"必须恰好一个模块构造控件（ui.py 或 qt_ui.py 任一），实际：{builders}")
+    ui_name = builders[0]
+    source = (UI_DIR / ui_name).read_text(encoding="utf-8")
+    assert any(marker in source for marker in GUI_TOOLKIT_IMPORTS), f"{ui_name} 应当 import 界面库"
+    stem = ui_name[:-3]
+    app = (UI_DIR / "app.py").read_text(encoding="utf-8")
+    imported = (f"from .{stem} import", f"from p2pchat.python_desktop.{stem} import", f"import {stem}")
+    assert any(pattern in app for pattern in imported), f"app.py 必须导入唯一的薄界面层 {ui_name}"
+
+
+def test_ui_layer_is_the_only_place_that_imports_the_toolkit() -> None:
+    """界面库只允许出现在那个唯一的薄界面层里（同样与迁移状态无关）。"""
+    builders = widget_building_modules()
+    assert len(builders) == 1, f"薄界面层必须唯一：{builders}"
+    offenders = toolkit_import_offenders(builders[0])
+    assert offenders == [], f"界面库只应出现在 {builders[0]}：{offenders}"

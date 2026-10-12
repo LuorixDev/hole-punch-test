@@ -380,8 +380,11 @@ def test_paused_panel_copy_never_says_running_even_with_an_empty_queue() -> None
 
 
 def test_ui_has_one_telemetry_renderer_used_by_both_screens() -> None:
-    """R1 的根因是两个渲染点各写一套判断，必须在界面上只有一个入口。"""
-    source = (REPO / "p2pchat" / "python_desktop" / "ui.py").read_text(encoding="utf-8")
+    """R1 的根因是两个渲染点各写一套判断，必须在界面上只有一个入口。
+
+    t24 之后界面层是 Qt（``qt_ui.py``）；Tk 实现已移出产品路径。
+    """
+    source = (REPO / "p2pchat" / "python_desktop" / "qt_ui.py").read_text(encoding="utf-8")
     assert "def _apply_telemetry" in source
     render = source.split("def _render", 1)[1].split("def _target_name", 1)[0]
     refresh = source.split("def _refresh_paths", 1)[1].split("def _on_telemetry_toggle", 1)[0]

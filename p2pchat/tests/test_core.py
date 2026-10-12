@@ -55,7 +55,7 @@ async def test_signaling_rejects_chat_and_bad_room_key(tmp_path):
         assert m['code']=='SCHEMA_INVALID'
         await a.close()
     await runner.cleanup()
-    assert 'never relay me' not in (tmp_path/'server.jsonl').read_text()
+    assert 'never relay me' not in (tmp_path/'server.jsonl').read_text(encoding='utf-8')
 
 
 async def wait_for_message(peer, predicate, timeout=30):
@@ -95,6 +95,6 @@ async def test_real_webrtc_echo_text_file_and_parallel_paths(tmp_path):
         # Echoing a response must not create another echo.
         a.send(path,{'kind':'text','id':str(uuid.uuid4()),'text':'do not echo','echoOf':identifier})
         await asyncio.sleep(.3)
-        assert 'hello P2P 世界' not in (tmp_path/'hub'/'server.jsonl').read_text()
+        assert 'hello P2P 世界' not in (tmp_path/'hub'/'server.jsonl').read_text(encoding='utf-8')
     finally:
         await cleanup_peers((a,b),tasks,runner,sys.exception())

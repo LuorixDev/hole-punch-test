@@ -35,13 +35,22 @@ def cli_env():
     return {**os.environ, "PYTHONIOENCODING": CLI_ENCODING, "PYTHONUTF8": "1"}
 
 
-def run_bridge(args=(), requests=()):
+def run_bridge(args=(), requests=(), env=None, bytes_output=False, timeout=30):
+    """Run the native CLI.
+
+    ``env=None`` forces UTF-8 for the child (the documented contract). Pass an explicit
+    hostile env (``PYTHONIOENCODING=cp1252``) to prove bridge.py pins its own stdout
+    instead of relying on the consumer.
+    """
     import subprocess
 
     payload = "".join(json.dumps(request) + "\n" for request in requests)
-    return subprocess.run([sys.executable, "-m", "p2pchat.native.bridge", *args],
-                          input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          encoding=CLI_ENCODING, env=cli_env(), timeout=30)
+    kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  env=cli_env() if env is None else env, timeout=timeout)
+    command = [sys.executable, "-m", "p2pchat.native.bridge", *args]
+    if bytes_output:
+        return subprocess.run(command, input=payload.encode(CLI_ENCODING), **kwargs)
+    return subprocess.run(command, input=payload, encoding=CLI_ENCODING, **kwargs)
 
 
 def bridge_frames(result):
@@ -181,6 +190,84 @@ def test_stdio_subprocess():
     assert not note.isascii(), "中文说明必须原样往返，不能被代码页吞掉"
 
 
+def test_capability_output_is_utf8_even_under_a_cp1252_parent_codepage():
+    """bridge.py pins its own stdout: a hostile parent code page must not truncate it."""
+    hostile = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
+    result = run_bridge(args=["capabilities"], env=hostile, bytes_output=True)
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert result.stderr == b"", result.stderr
+    text = result.stdout.decode(CLI_ENCODING)  # strict: this must really be UTF-8
+    payload = json.loads(text)
+    note = payload["prediction"]["hitRateNote"]
+    assert note and not note.isascii()
+    assert "?" not in note and "\ufffd" not in note, "不能把中文替换成 ? 或替换字符"
+    assert b"\\u" not in result.stdout, "中文应以 UTF-8 字节出现，而不是 ASCII 转义"
+    assert len(result.stdout) > len(text), "多字节字符必须真的落在字节流里"
+    assert text.count("\n") == 1, "必须是完整的一帧，不能被截断"
+    assert json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n" == text, "字节级完整"
+    # 同一 CLI 的 stdio 帧模式（含中文能力帧）也必须完整
+    frames = bridge_frames(run_bridge(requests=[dict(v=1, id=1, method="capabilities", params={})], env=hostile))
+    assert frames[-1]["result"]["prediction"]["hitRateNote"] == note
+
+
+def test_write_failure_is_reported_as_bridge_output_error():
+    """Deterministic injection: a failing writer must not be swallowed silently."""
+    from p2pchat.native.bridge import BridgeOutputError, serve
+
+    class Failing:
+        def __init__(self, error):
+            self.error = error
+
+        def write(self, text):
+            raise self.error
+
+        def flush(self):
+            raise self.error
+
+    class OneRequest:
+        def __init__(self):
+            self.sent = False
+
+        async def readline(self):
+            if self.sent:
+                return b""
+            self.sent = True
+            return (json.dumps(dict(v=1, id=1, method="capabilities", params={})) + "\n").encode()
+
+    cases = [(OSError("pipe closed"), "OUTPUT_IO_ERROR"),
+             (UnicodeEncodeError("utf-8", "中文", 0, 1, "unencodable"), "OUTPUT_ENCODING_FAILED"),
+             (ValueError("I/O operation on closed file"), "OUTPUT_CLOSED")]
+    for error, expected in cases:
+        with pytest.raises(BridgeOutputError, match=expected):
+            asyncio.run(serve(adapter=NativeAdapter(), reader=OneRequest(), output=Failing(error)))
+
+
+def test_closed_output_pipe_exits_nonzero_with_a_reason():
+    """OS-level injection: the consumer closes the read end while the CLI writes."""
+    import subprocess
+
+    process = subprocess.Popen([sys.executable, "-m", "p2pchat.native.bridge"], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=cli_env())
+    try:
+        process.stdout.close()  # 读端关闭：写端必须报错，而不是静默丢弃输出
+        process.stdin.write((json.dumps(dict(v=1, id=1, method="capabilities", params={})) + "\n").encode())
+        process.stdin.flush()
+        process.stdin.close()
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise AssertionError("写端失败后必须尽快非零退出，不能挂住")
+    finally:
+        if process.poll() is None:
+            process.kill()
+    assert process.returncode != 0, "退出码 0 加零输出就是静默截断，必须禁止"
+    stderr = process.stderr.read().decode(CLI_ENCODING, "replace")
+    process.stderr.close()
+    assert "native bridge:" in stderr and "OUTPUT_" in stderr, stderr
+    assert "capabilities" not in stderr, "诊断不得回显请求/载荷"
+
+
 @pytest.mark.asyncio
 async def test_quic_burst_is_not_aborted_by_a_momentary_full_buffer():
     """Same burst/budget that b56f507 aborted with BACKPRESSURE after one frame.
@@ -235,3 +322,26 @@ async def test_quic_send_waits_for_drain_and_fails_bounded_when_acks_stop(monkey
     finally:
         await a.shutdown()
         await b.shutdown()
+
+
+def test_unencodable_output_exits_nonzero_with_an_encoding_reason():
+    """Process-level injection: stdout refuses to encode the capability text."""
+    import subprocess
+
+    program = (
+        "import sys\n"
+        "class Broken:\n"
+        "    def write(self, text):\n"
+        "        raise UnicodeEncodeError('cp1252', text[:1], 0, 1, 'unencodable')\n"
+        "    def flush(self):\n"
+        "        pass\n"
+        "sys.stdout = Broken()\n"
+        "sys.argv = ['bridge', 'capabilities']\n"
+        "from p2pchat.native.bridge import main\n"
+        "main()\n"
+    )
+    result = subprocess.run([sys.executable, "-c", program], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            encoding=CLI_ENCODING, env=cli_env(), timeout=30)
+    assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+    assert "native bridge: OUTPUT_ENCODING_FAILED" in result.stderr, result.stderr
+    assert result.stdout == ""

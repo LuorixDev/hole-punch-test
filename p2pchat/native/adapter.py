@@ -66,7 +66,7 @@ def default_gateway_v4(route_text=None):
     text = route_text
     if text is None:
         try:
-            text = Path(ROUTE_TABLE_V4).read_text()
+            text = Path(ROUTE_TABLE_V4).read_text(encoding="utf-8")
         except OSError:
             return None
     for row in text.splitlines()[1:]:
@@ -1219,6 +1219,11 @@ class Attempt:
         Returns as soon as the buffer plus this frame fits the budget. Only a peer
         that keeps not acknowledging reaches the bound, and then this raises
         BACKPRESSURE: nothing is buffered without limit and no timeout is relaxed.
+
+        Closing or failing the attempt short-circuits the wait with an explicit code
+        instead of holding the whole budget: a close must never wait on the peer's
+        ACKs. The sleep is cancellable, so a close that cancels the sending task also
+        propagates immediately instead of being swallowed here.
         """
         if not self.quic:
             return
@@ -1227,6 +1232,9 @@ class Attempt:
         while True:
             if await self.quic_pending_bytes() + needed <= budget.queued_bytes:
                 return
+            if self.state in TERMINAL:
+                # 关闭/失败已经开始：不再等 ACK，也不把预算等满（避免关闭被排水拖住）。
+                raise ValueError("CLOSED")
             if time.monotonic() >= deadline:
                 raise ValueError("BACKPRESSURE")
             # Yielding is what lets this attempt's UDP task process the peer's ACKs.

@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the pure-Python Tkinter desktop client.
+"""PyInstaller spec for the pure-Python Qt (PySide6) desktop client.
 
 Build from the repository root (the spec resolves its own paths):
 
@@ -15,12 +15,18 @@ The same command is the recipe on every platform; on Windows use
 Why the explicit collection below:
 * aiortc/aioice/aioquic import C extensions and submodules that static analysis
   cannot always follow, and the native adapter is imported by dotted path;
-* ``_tkinter`` is a dynamically loaded extension that links ``libtcl``/``libtk``
-  by name only (``ldd`` reports "not found" until Tcl is initialised), so
-  PyInstaller cannot resolve them statically and the pair is shipped explicitly;
+* Qt: PyInstaller's PySide6 hook collects the Qt libraries and the platform
+  plugins (``PySide6/Qt/plugins/platforms/libqxcb.so`` for X11, plus the
+  offscreen/minimal plugins used headlessly). The build asserts after COLLECT
+  that the platform plugin really landed in the bundle, instead of trusting the
+  hook silently;
+* ``tkinter``/``_tkinter`` are **excluded**: the Tk shell was replaced by Qt (the
+  Tk runtime on this host is not linked against Xft and rendered 中文 as blanks);
 * only the Python modules of ``p2pchat`` are bundled — build outputs,
   node_modules, releases and research evidence are deliberately excluded, and the
-  interface wording ships as package data.
+  interface wording ships as package data;
+* LGPL: Qt/PySide6 are linked dynamically and their license texts ship inside the
+  bundle (``licenses/``); see ``p2pchat/python_desktop/licenses/PYSIDE6-NOTICE.txt``.
 
 The frozen entry point is generated next to this spec by the spec itself, so the
 packaged binary always delegates to ``p2pchat.python_desktop.app.main`` and
@@ -29,7 +35,7 @@ cannot drift from the module CLI.
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules, copy_metadata
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir, os.pardir))  # SPECPATH is <root>/p2pchat/tools
 
@@ -62,8 +68,11 @@ hidden += [
     )
 ]
 hidden += [
-    'tkinter',
-    '_tkinter',
+    'PySide6',
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'shiboken6',
     'av',
     'av.audio',
     'av.packet',
@@ -74,6 +83,7 @@ hidden += [
     'OpenSSL',
     'p2pchat.python_desktop.app',
     'p2pchat.python_desktop.selftest',
+    'p2pchat.python_desktop.qt_ui',
 ]
 
 # PyAV / libsrtp / cryptography wheels ship shared objects that PyInstaller does
@@ -85,27 +95,37 @@ for module in ('av', 'cryptography', 'aioquic', 'aiortc', 'pylibsrtp'):
     except Exception:
         pass
 
-# Tcl/Tk: _tkinter links libtcl/libtk by name only, so ship the pair next to it.
-if sys.platform.startswith('linux'):
-    import glob
-    import _tkinter
+# Qt: the PySide6 hook picks up libQt6*.so and PySide6/Qt/plugins. Record where
+# those live so the post-build check below can prove the platform plugin shipped.
+QT_PLUGIN_ROOT = None
+try:
+    import PySide6
 
-    tcl_root = os.path.dirname(os.path.dirname(os.path.dirname(_tkinter.__file__)))
-    for pattern in ('libtcl*.so*', 'libtk*.so*'):
-        for library in glob.glob(os.path.join(tcl_root, pattern)):
-            if '.so' in os.path.basename(library) and 'itcl' not in library and 'thread' not in library:
-                binaries.append((library, '.'))
+    QT_PLUGIN_ROOT = os.path.join(os.path.dirname(PySide6.__file__), 'Qt', 'plugins')
+except Exception:
+    QT_PLUGIN_ROOT = None
 
 # Interface wording and the retained web client are the only data assets the
 # desktop app needs.
 datas = [
     (os.path.join(ROOT, 'p2pchat', 'web'), 'p2pchat/web'),
     (os.path.join(ROOT, 'p2pchat', 'docs', 'METHODS-PLAIN.md'), 'p2pchat/docs'),
+    # LGPL-3.0/GPL-3.0 texts must travel with the dynamically linked Qt libraries.
+    (os.path.join(ROOT, 'p2pchat', 'python_desktop', 'licenses'), 'licenses'),
 ]
+# Distribution metadata so the packaged app can report the exact Qt/PySide6 it
+# ships (``importlib.metadata.version``) instead of "版本未知".
+for distribution in ('PySide6-Essentials', 'shiboken6'):
+    try:
+        datas += copy_metadata(distribution)
+    except Exception:
+        pass
 
 excludes = [
-    'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'matplotlib', 'numpy', 'pandas',
+    'PyQt5', 'PyQt6', 'PySide2', 'matplotlib', 'numpy', 'pandas',
     'notebook', 'IPython', 'pytest', 'setuptools', 'pip',
+    # The Tk shell is gone: never bundle tkinter again.
+    'tkinter', '_tkinter', 'Tkinter',
 ]
 if sys.platform != 'win32':
     excludes += ['win32com', 'win32api', 'pythoncom']
@@ -153,6 +173,25 @@ coll = COLLECT(
     upx_exclude=[],
     name='p2p-desktop',
 )
+
+# Prove the Qt platform plugin really shipped: without libqxcb.so the packaged
+# GUI cannot start, and a silent hook miss would only show up on the user's box.
+PLATFORM_PLUGIN = os.path.join(DISTPATH, 'p2p-desktop', '_internal', 'PySide6', 'Qt', 'plugins', 'platforms')
+if QT_PLUGIN_ROOT:
+    expected = sorted(
+        name for name in os.listdir(os.path.join(QT_PLUGIN_ROOT, 'platforms')) if name.endswith('.so')
+    )
+    found = sorted(name for name in os.listdir(PLATFORM_PLUGIN) if name.endswith('.so')) if os.path.isdir(PLATFORM_PLUGIN) else []
+    missing = [name for name in expected if name not in found]
+    if not found or missing:
+        raise SystemExit(
+            'QT PLATFORM PLUGINS MISSING in the bundle: '
+            + (', '.join(missing) if missing else 'none found')
+            + f' (bundle dir: {PLATFORM_PLUGIN})'
+        )
+    license_dir = os.path.join(DISTPATH, 'p2p-desktop', '_internal', 'licenses')
+    if not os.path.isdir(license_dir):
+        raise SystemExit(f'LGPL license texts missing from the bundle: {license_dir}')
 
 # The generated entry script is throwaway build input, not a source file.
 try:

@@ -11,6 +11,11 @@ import pytest
 from p2pchat.server import make_app
 from p2pchat.peer import Peer
 
+def _leaves(exc):
+    """展开嵌套 ExceptionGroup，取出叶子错误（用于断言具体原因码）。"""
+    return [leaf for item in exc.exceptions for leaf in _leaves(item)] if isinstance(exc,BaseExceptionGroup) else [exc]
+
+
 async def until(peer,predicate):
     async with asyncio.timeout(15):
         while True:
@@ -48,3 +53,33 @@ async def test_control_outage_keeps_authenticated_data_and_replays_logs(tmp_path
         await a.close();assert all(p['closing'] for p in a.paths.values())
     finally:
         await cleanup_peers((a,b),tasks,runner,sys.exception())
+
+
+@pytest.mark.asyncio
+async def test_stalled_rtc_close_is_bounded_and_names_the_phase(tmp_path,monkeypatch):
+    """控制组：注入卡死的 pc.close()，等价于 Windows 上 CPython Proactor 排空卡住。
+
+    证明两件事：(1) 在 Linux 上就能**确定性复现** CI 那条失败
+    `P2P_CLOSE_TIMEOUT:path.workers_rtc`（不是偶发、也不是环境噪声）；
+    (2) 关闭仍然**有界**结束并带明确原因码，残余任务继续被持有，绝不当作成功。
+    """
+    async def stalled(pc):
+        await asyncio.sleep(3600)          # 排空永远不完成
+    monkeypatch.setattr('p2pchat.peer.close_rtc',stalled)
+    peer=Peer('ws://127.0.0.1:1/ws','bounded',secrets.token_hex(16),'bounded',tmp_path/'bounded',False)
+    peer.CLOSE_TIMEOUT=.05
+    path=peer.new_path('remote','ice-v4',str(uuid.uuid4()),str(uuid.uuid4()))
+    try:
+        started=time.monotonic()
+        with pytest.raises(BaseExceptionGroup) as info:await peer.close_path(path)
+        elapsed=time.monotonic()-started
+        assert info.value.message=='P2P close failed: path.workers_rtc'   # CI 报的那条组消息
+        assert 'P2P_CLOSE_TIMEOUT:path.workers_rtc' in [str(leaf) for leaf in _leaves(info.value)]
+        assert elapsed<2*peer.CLOSE_TIMEOUT+0.5,elapsed            # 有界：不无限等排水
+        assert path['closing'] is True                            # 关闭状态已确立
+        residual=path.get('rtc_close_task')
+        assert residual is not None and not residual.done()       # 残余任务仍被持有，不当成功
+    finally:
+        residual=path.get('rtc_close_task')
+        if residual is not None:
+            residual.cancel();await asyncio.gather(residual,return_exceptions=True)
