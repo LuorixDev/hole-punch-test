@@ -562,6 +562,27 @@ class DesktopApp(QtWidgets.QMainWindow):
         prediction_bar.addWidget(prediction_disable)
         prediction_bar.addStretch(1)
         optin_layout.addLayout(prediction_bar)
+        # 第四件：检查我的网络（本机环境体检 + IPv6 入站回连）；默认关闭。
+        optin_layout.addWidget(QtWidgets.QLabel("检查我的网络（默认关闭，需要你同意）"))
+        self.network_line = QtWidgets.QLabel("")
+        self.network_line.setWordWrap(True)
+        optin_layout.addWidget(self.network_line)
+        network_bar = QtWidgets.QHBoxLayout()
+        network_run = QtWidgets.QPushButton("检查我的网络")
+        network_run.clicked.connect(self._on_network_check)
+        network_bar.addWidget(network_run)
+        self.network_privacy = QtWidgets.QCheckBox("在本机结论里保留完整地址（中心日志仍只收前缀/作用域/类型）")
+        self.network_privacy.clicked.connect(self._on_network_privacy_toggle)
+        network_bar.addWidget(self.network_privacy)
+        network_clear = QtWidgets.QPushButton("清除结论")
+        network_clear.clicked.connect(self._on_network_clear)
+        network_bar.addWidget(network_clear)
+        network_bar.addStretch(1)
+        optin_layout.addLayout(network_bar)
+        self.network_result = QtWidgets.QLabel("")
+        self.network_result.setWordWrap(True)
+        self.network_result.setObjectName("muted")
+        optin_layout.addWidget(self.network_result)
         self.optin_status = QtWidgets.QLabel("")
         self.optin_status.setObjectName("muted")
         self.optin_status.setWordWrap(True)
@@ -853,6 +874,12 @@ class DesktopApp(QtWidgets.QMainWindow):
         kind = event.get("kind")
         if kind == "engine.error":
             self._set_beacon(f"提示：{event.get('text') or plain.reason(event.get('code'))}", WARN)
+        elif kind == "network.check.progress":
+            self.network_result.setText(event.get("text", ""))
+        elif kind in {"network.check.result", "network.check.failed", "network.check.consent",
+                      "network.check.disabled", "network.check.serverResult"}:
+            # 结论/同意状态一变就重渲染（沿用 optin 的强制刷新路径）。
+            self._refresh_optin(force=True)
         elif kind == "optin":
             self.optin_status.setText(event.get("text", ""))
             # 同意/开关会改变能力文案（“已同意，可以试一次”“已开启…”），强制重探一次。
@@ -1198,6 +1225,11 @@ class DesktopApp(QtWidgets.QMainWindow):
             self.lan_line.setText(lan_line)
             # 端口预测不是能力探测（纯状态），每次重新渲染，免得开关后显示滞后。
             self.prediction_line.setText(self._prediction_line_text())
+            # 检查我的网络：同样纯状态渲染（同意/隐私勾选/上次结论）。
+            self.network_line.setText(self._network_line_text())
+            self.network_result.setText(self._network_result_text())
+            if self.engine is not None and hasattr(self.engine, "network_consent"):
+                self.network_privacy.setChecked(bool(self.engine.network_consent.get("share_full_address")))
         except Exception as error:  # 能力读取失败也要说出来，不静默
             self.optin_status.setText(f"读取能力失败：{type(error).__name__}")
 
@@ -1257,6 +1289,82 @@ class DesktopApp(QtWidgets.QMainWindow):
             self.engine._emit("optin", text="端口预测：已关闭")
         except Exception as error:
             self.engine._emit("optin", text=f"端口预测关闭失败：{type(error).__name__}")
+
+    # ------------------------------------------------ 检查我的网络（t53：环境体检 + IPv6 入站）
+    def _network_line_text(self) -> str:
+        engine = self.engine
+        if engine is None or not hasattr(engine, "network_check_status"):
+            return "检查我的网络：默认关闭；连上服务器后由你点“检查我的网络”并同意才会读地址/开短时监听。"
+        status = engine.network_check_status()
+        summary = engine.network_summary()
+        if not status["consented"]:
+            return ("检查我的网络：默认关闭，需要你点“检查我的网络”并同意。只读本机地址/路由，"
+                    "同意后才会让服务器用一次性 token 回连；不扫描、不访问第三方。")
+        prefix = ("本机保留完整地址；中心日志仍只收前缀长度/作用域/类型。"
+                  if status["shareFullAddress"] else "中心日志只收前缀长度/作用域/类型（不报完整地址）。")
+        return f"检查我的网络：已同意（入站回连：{'开' if status['inbound'] else '关'}）。{prefix}{summary.get('text', '')}"
+
+    def _network_result_text(self) -> str:
+        engine = self.engine
+        if engine is None or not hasattr(engine, "network_summary"):
+            return ""
+        summary = engine.network_summary()
+        if not summary["rows"]:
+            return summary.get("text", "")
+        lines = [summary.get("text", "")]
+        for row in summary["rows"]:
+            rtt = row["probeRttMs"]
+            rtt_text = "—" if rtt is None else f"{float(rtt):.1f} ms（探测/观测，不是聊天延迟）"
+            line = f"· {row['title']}：{row['statusText']} — {row['evidence']}｜探测往返：{rtt_text}"
+            if row["verdictText"]:
+                line += f"｜入站结论：{row['verdictText']}"
+            if row["note"]:
+                line += f"（{row['note']}）"
+            if row["advice"]:
+                line += f"　建议：{row['advice']}"
+            lines.append(line)
+        if summary.get("unmeasured"):
+            lines.append("未测/证据不足：" + "、".join(summary["unmeasured"]))
+        lines.append("未测得显示「—」，不会用 0 顶替；探测往返时间不是聊天延迟。")
+        return "\n".join(lines)
+
+    def _on_network_privacy_toggle(self):
+        engine = self.engine
+        if engine is None:
+            return
+        engine.network_consent["share_full_address"] = bool(self.network_privacy.isChecked())
+        self._refresh_optin(force=True)
+
+    def _on_network_clear(self):
+        engine = self.engine
+        if engine is None:
+            return
+        engine.network_report = None
+        self._refresh_optin(force=True)
+
+    def _on_network_check(self):
+        engine = self.engine
+        if engine is None:
+            self._warn("还没连接", "先在连接屏连上服务器，再点“检查我的网络”。")
+            return
+        if not self._ask("检查我的网络", engine.network_check_consent_text()):
+            return
+        self.network_result.setText("正在检查…（只读本机地址/路由；同意后才会开短时监听让服务器回连）")
+        self.engine_thread.submit(self._network_check_async())
+
+    async def _network_check_async(self):
+        try:
+            await self.engine.network_check_enable(consent=True,
+                                                   share_full_address=bool(self.network_privacy.isChecked()),
+                                                   inbound=True)
+        except Exception as error:
+            self.engine._emit("optin", text=f"检查我的网络：未开启同意（{type(error).__name__}）")
+            return
+        try:
+            summary = await self.engine.run_network_check()
+            self.engine._emit("optin", text=f"检查我的网络：{summary.get('statusText', '')}")
+        except Exception as error:
+            self.engine._emit("optin", text=f"检查我的网络失败：{type(error).__name__}")
 
     def _refresh_optin_throttled(self):
         now = time.time()

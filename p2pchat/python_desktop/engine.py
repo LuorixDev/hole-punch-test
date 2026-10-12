@@ -256,10 +256,46 @@ class _PeerSocket:
             yield message
 
 
+NETWORK_CONSENT_NOTE = ("只在你显式同意后才会读本机地址/路由，并在你同意时开一个短时监听器让服务器回连；"
+                        "不扫描、不访问第三方。中心日志只收前缀长度/作用域/类型，完整地址不上报。")
+NETWORK_STATUS_TEXT = {"determined": "已判定", "insufficient-evidence": "证据不足", "not-tested": "未测",
+                       "unavailable": "不可用", "not-applicable": "不适用"}
+NETWORK_COMPONENT_TITLES = {"addresses": "本机地址", "routes": "路由", "udpEgress": "UDP 出口",
+                            "natBehavior": "NAT 行为", "inboundReachability": "IPv6 入站回连",
+                            "ipv6Only": "纯 IPv6 环境", "nat64": "NAT64"}
+NETWORK_COMPONENT_TEXT = {"addresses": ("读本机地址，区分稳定/临时/链路本地", "只有临时地址时，结论只对当前时刻成立。"),
+                          "routes": ("读本机路由表（只读，不改任何路由）", ""),
+                          "udpEgress": ("只用你显式配置的观测点看 UDP 出口", "没有配置观测点就不会联系任何第三方。"),
+                          "natBehavior": ("按 RFC 4787 分类映射/过滤行为", "分类不完整时会明确写“证据不足”。"),
+                          "inboundReachability": ("请服务器用一次性 token 回连验证入站", "回连 RTT 不是聊天延迟。"),
+                          "ipv6Only": ("判断是不是只有 IPv6 可用", ""),
+                          "nat64": ("探测 NAT64/DNS64 迹象", "未探测就显示“未测”，不会猜。")}
+NETWORK_RESULT_TEXT = "本机环境体检：{status}（已判定 {measured} 项，未测/证据不足 {unmeasured} 项）"
+V6_VERDICT_TEXT = {
+    "REACHED_BY_SERVER": ("已判定", "服务端用一次性 token 回连成功：入站可达（只对当次地址成立）"),
+    "TIMEOUT": ("证据不足", "没有观测到回连；这不能证明入站被挡住（也可能是路由或对端问题）"),
+    "REFUSED_BY_LOCAL_POLICY": ("已判定", "本机策略拒绝：没有开监听器（未同意就不会对外监听）"),
+    "NO_GLOBAL_V6": ("已判定", "本机没有可用的全局 IPv6 地址——这是“没有地址”，不是防火墙结论"),
+    "NO_V6_ROUTE": ("已判定", "本机没有 IPv6 默认路由——这不是入站被挡的结论"),
+    "ADDRESS_ROTATED": ("证据不足", "地址在探测期间轮换；地址可能轮换，回连结果只对当前时刻成立"),
+    # t58：服务器 code 是权威结论；被拒/不匹配/看不懂都保留自己的名字，绝不折成超时或成功。
+    "CONNECTION_REFUSED": ("已判定", "被明确拒绝（连接被拒）——不是超时，也不是成功"),
+    "TOKEN_MISMATCH": ("拒绝", "回连带来的 token 不符：按拒绝处理（可能被干扰或伪造）"),
+    "REJECTED_BY_POLICY": ("拒绝", "服务端按策略拒绝回连：没有发起连接"),
+    "RESULT_UNRECOGNIZED": ("看不懂", "服务器结论无法识别（未知 code 或字段）：不做任何推断"),
+}
+
+
 class DesktopEngine:
     def __init__(self, config: EngineConfig, events: asyncio.Queue | None = None):
         self.config = config
         self.client_session = secrets.token_hex(16)
+        # 「检查我的网络」默认关闭：未同意时不会读地址/开监听/联系服务器。
+        self.network_consent = {"granted": False, "share_full_address": False, "inbound": False,
+                                "points": (), "budget": 20.0}
+        self.network_report = None
+        self._v6_result_future = None
+        self._v6_offer = None
         self.events = events if events is not None else asyncio.Queue(maxsize=4096)
         self.origin = config.origin or None
         self.peer: Peer | None = None
@@ -501,6 +537,9 @@ class DesktopEngine:
         )
         self.signaling.on_signal = self.route_inbound_native
         self.signaling.on_nat_samples = self.route_inbound_prediction
+        # v6-reach 结论（t47 的 v6-reach-result）由这里接管；transport 只要把帧交给
+        # engine.on_v6_reach_frame 即可（signal_session 的通用 typed 分发是它的归属）。
+        self.signaling.on_v6_reach_result = self.on_v6_reach_frame
         self.signaling.on_error = self._on_signaling_error
         self.signaling.factory = self._native_session_factory
         self.spawn(self.peer.run())
@@ -835,6 +874,203 @@ class DesktopEngine:
             return plain.AVAILABILITY_NOTE["pending"]
         return ""
 
+    # --------------------------------- “检查我的网络”：IPv6 入站 + 本机环境体检（t53）
+    def network_check_consent_text(self) -> str:
+        return ("「检查我的网络」只会做两件事：读本机地址/路由，以及在你同意后请服务器用一次性 token 回连验证入站；"
+                "观测点只联系你自己显式配置的地址，不扫描、不访问第三方。中心日志只收前缀长度/作用域/类型，"
+                "完整地址不会上报（既有日志白名单不收地址字段）；勾选隐私项只影响本机结论里的细节。")
+
+    def network_check_status(self) -> dict:
+        state = self.network_consent
+        return {"v": 1, "consented": bool(state["granted"]), "inbound": bool(state["inbound"]),
+                "shareFullAddress": bool(state["share_full_address"]),
+                "observationPoints": len(state["points"]),
+                "status": "available" if state["granted"] else "disabled",
+                "reason": "EXPLICIT_OPT_IN_REQUIRED" if not state["granted"] else "CONSENTED",
+                "note": NETWORK_CONSENT_NOTE, "consentText": self.network_check_consent_text()}
+
+    async def network_check_enable(self, consent: bool = False, *, share_full_address: bool = False,
+                                   inbound: bool = True, points=None, budget: float = 20.0) -> dict:
+        """显式同意后才允许读地址/开短时监听/让服务器回连；默认关闭。"""
+        if not consent:
+            raise PermissionError("NETWORK_CHECK_OPT_IN_REQUIRED")
+        from p2pchat.native import net_env as net
+        configured = tuple(points or ())
+        for point in configured:
+            if not isinstance(point, net.nat.StunObservationPoint):
+                raise ValueError("INVALID_OBSERVATION_POINTS")
+        self.network_consent.update({"granted": True, "share_full_address": bool(share_full_address),
+                                     "inbound": bool(inbound), "points": configured,
+                                     "budget": float(budget)})
+        status = self.network_check_status()
+        self._emit("network.check.consent", **status)
+        return status
+
+    async def network_check_disable(self) -> dict:
+        self.network_consent.update({"granted": False, "share_full_address": False, "inbound": False})
+        self.network_report = None
+        self._emit("network.check.disabled")
+        return self.network_check_status()
+
+    def _send_typed_frame(self, frame: dict) -> str:
+        """Send one whitelisted typed signaling frame and name the transport used.
+
+        ``signal_session`` currently exposes typed senders (signal / nat-samples); the
+        generic typed sender lands there, so this prefers it when present and otherwise
+        uses the session's own queue. It never turns a frame into anything else.
+        """
+        session = self.signaling
+        if session is None:
+            raise RuntimeError("SIGNALING_NOT_STARTED")
+        for name in ("send_v6_reach", "send_typed"):
+            method = getattr(session, name, None)
+            if callable(method):
+                method(**{key: value for key, value in frame.items() if key not in {"v", "type"}})
+                return name
+        enqueue = getattr(session, "_enqueue", None)
+        if callable(enqueue):
+            enqueue(dict(frame))
+            return "session-queue"
+        raise RuntimeError("V6_REACH_TRANSPORT_UNAVAILABLE")
+
+    def on_v6_reach_frame(self, frame: dict) -> bool:
+        """Server's v6-reach result: the authoritative conclusion for the running probe."""
+        if not isinstance(frame, dict) or frame.get("type") != "v6-reach-result":
+            return False
+        future = self._v6_result_future
+        if future is not None and not future.done():
+            future.set_result(dict(frame))
+        self._emit("network.check.serverResult", code=frame.get("code"), ok=frame.get("ok"),
+                   note=str(frame.get("note", ""))[:200])
+        return True
+
+    def _v6_reach_probe(self, loop):
+        """Wrap the probe so its verdict waiter sends the offer and awaits the server."""
+        from p2pchat.native import ipv6_reach as reach
+
+        async def probe(options, **extra):
+            waiter = loop.create_future()
+            self._v6_result_future = waiter
+
+            async def verdict_waiter(offer):
+                self._v6_offer = dict(offer)
+                self._send_typed_frame(offer)
+                try:
+                    return await asyncio.wait_for(asyncio.shield(waiter), max(0.2, float(options.timeout)))
+                except asyncio.TimeoutError:
+                    return None
+
+            try:
+                return await reach.probe_reachability(options, verdict_waiter=verdict_waiter, **extra)
+            finally:
+                self._v6_result_future = None
+
+        return probe
+
+    async def run_network_check(self) -> dict:
+        """Run the local environment health check (+ opted-in IPv6 inbound callback)."""
+        from p2pchat.native import net_env as net
+
+        state = dict(self.network_consent)
+        loop = asyncio.get_running_loop()
+        self._v6_offer = None
+        self._emit("network.check.progress", stage="addresses", text="正在读本机地址与路由…")
+        sources = net.Sources()
+        # 入站回连必须同时具备：用户同意 + 已连上信令（否则开了监听器也没人回连）。
+        inbound_ready = bool(state["granted"] and state["inbound"] and self.signaling is not None)
+        self._network_inbound_skipped = "" if (inbound_ready or not state["inbound"]) else "SIGNALING_NOT_STARTED"
+        if inbound_ready:
+            sources.reach_probe = self._v6_reach_probe(loop)
+        config = net.NetEnvConfig(
+            observation_points=tuple(state["points"]), inbound_probe=inbound_ready,
+            consent=bool(state["granted"]), connection_id=str(uuid.uuid4()), attempt_id=str(uuid.uuid4()),
+            session=self.client_session, include_addresses=bool(state["share_full_address"]),
+            total_budget_seconds=float(state.get("budget", 20.0)),
+        )
+        self._emit("network.check.progress", stage="probing", text="正在做有界探测（不会扫描）…")
+        try:
+            report = await net.health_check(config, sources=sources)
+        except Exception as error:  # 结论必须可见：失败也要说清楚，而不是静默
+            code = str(error.args[0]) if error.args else type(error).__name__
+            self.network_report = None
+            self._emit("network.check.failed", code=code)
+            return {"v": 1, "ok": False, "code": code, "text": f"体检失败：{code}", "rows": [],
+                    "unmeasured": ["全部"], "note": NETWORK_CONSENT_NOTE}
+        self.network_report = report
+        center = self._forward_center_events(report, config)
+        self._emit("network.check.progress", stage="done", text="完成")
+        summary = self.network_summary()
+        summary["centerEvents"] = center
+        self._emit("network.check.result", **{k: v for k, v in summary.items() if k != "rows"})
+        return summary
+
+    def _forward_center_events(self, report, config) -> dict:
+        """Forward net_env's already-allowlisted events through the durable local queue."""
+        try:
+            events = report.center_events(session=self.client_session, connection_id=config.connection_id,
+                                          attempt_id=config.attempt_id)
+        except Exception as error:
+            return {"emitted": 0, "deferred": 0, "error": str(error.args[0]) if error.args else "CENTER_EVENT_FAILED"}
+        store = getattr(self.peer, "store", None) if self.peer is not None else None
+        if store is None:
+            return {"emitted": 0, "deferred": len(events), "error": ""}
+        emitted = 0
+        for event in events:
+            store.emit(event["event"], event["data"], event.get("connectionId"), event.get("attemptId"))
+            emitted += 1
+        return {"emitted": emitted, "deferred": 0, "error": ""}
+
+    def network_rows(self) -> list:
+        """Display rows: every component keeps its own status word and plain sentence."""
+        report = self.network_report
+        if report is None:
+            return []
+        rows = []
+        for name, component in report.components.items():
+            detail = component.detail if isinstance(component.detail, dict) else {}
+            verdict = detail.get("verdict")
+            text, advice = NETWORK_COMPONENT_TEXT.get(name, ("", ""))
+            rows.append({"name": name, "title": NETWORK_COMPONENT_TITLES.get(name, name),
+                         "status": component.status, "statusText": NETWORK_STATUS_TEXT.get(component.status, component.status),
+                         "evidence": component.evidence, "reason": component.reason,
+                         "verdict": verdict, "verdictText": (V6_VERDICT_TEXT.get(verdict) or ("", ""))[1] if verdict else "",
+                         "note": str(detail.get("note", ""))[:300],
+                         "probeRttMs": detail.get("rttMs"), "plain": text, "advice": advice,
+                         "detail": detail})
+        return rows
+
+    def network_summary(self) -> dict:
+        report = self.network_report
+        state = self.network_consent
+        if report is None:
+            return {"v": 1, "consented": bool(state["granted"]), "status": "not-tested",
+                    "statusText": NETWORK_STATUS_TEXT["not-tested"], "overall": None, "rows": [],
+                    "probeRtt": None, "unmeasured": ["本机环境体检", "IPv6 入站回连"],
+                    "text": "尚未检查：本机与入站两项都未测（未测得显示「—」，不会拿 0 顶替）。",
+                    "note": NETWORK_CONSENT_NOTE, "inbound": bool(state["granted"] and state["inbound"]),
+                    "shareFullAddress": bool(state["share_full_address"])}
+        overall = report.overall if isinstance(report.overall, dict) else {}
+        rows = self.network_rows()
+        inbound = next((row for row in rows if row["name"] == "inboundReachability"), None)
+        probe_rtts = [row["probeRttMs"] for row in rows if isinstance(row["probeRttMs"], (int, float))]
+        measured = [row["title"] for row in rows if row["status"] in {"determined", "not-applicable"}]
+        unmeasured = [row["title"] for row in rows if row["status"] in {"not-tested", "unavailable", "insufficient-evidence"}]
+        return {"v": 1, "consented": bool(state["granted"]), "status": overall.get("status", "insufficient-evidence"),
+                "statusText": NETWORK_STATUS_TEXT.get(overall.get("status"), overall.get("status", "")),
+                "reasons": list(overall.get("reasons", [])), "rows": rows, "probeRtt": min(probe_rtts) if probe_rtts else None,
+                "probeRttLabel": "探测/观测往返时间（不是聊天延迟）", "measured": measured, "unmeasured": unmeasured,
+                "recommendations": [{"method": item.get("method"), "status": item.get("status"),
+                                     "plain": item.get("plain", "")} for item in report.recommendations],
+                "inboundVerdict": inbound["verdict"] if inbound else None,
+                "inboundText": inbound["verdictText"] if inbound else "",
+                "inboundNote": inbound["note"] if inbound else "",
+                "durationMs": report.duration_ms, "text": NETWORK_RESULT_TEXT.format(
+                    status=NETWORK_STATUS_TEXT.get(overall.get("status"), ""), measured=len(measured),
+                    unmeasured=len(unmeasured) or "全部"),
+                "note": NETWORK_CONSENT_NOTE, "inboundSkipped": getattr(self, "_network_inbound_skipped", ""),
+                "inbound": bool(state["granted"] and state["inbound"]),
+                "shareFullAddress": bool(state["share_full_address"])}
+
     def summary(self, key: str) -> dict:
         rows = self.rows(key)
         direct = [row for row in rows if row["canMessage"]]
@@ -864,6 +1100,7 @@ class DesktopEngine:
             # 面板文案只在数据层决定一次：暂停优先于"已开启"，两个界面（以及 Qt 版）
             # 都直接渲染 telemetry['text']，不各自判断。
             "telemetry": self.telemetry_status(),
+            "network": self.network_summary(),
             "observation": None if not self.targets.get(key) else self.targets[key].observation,
         }
 
