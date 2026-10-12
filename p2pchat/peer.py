@@ -478,7 +478,10 @@ class Peer:
                 # Signaling loss is not user leave: authenticated data paths keep
                 # their identity until a new welcome explicitly replaces session.
                 self.ws=None
-            if not self.closed:await asyncio.sleep(backoff);backoff=min(30,backoff*2)
+            if not self.closed:await asyncio.sleep(backoff);backoff=min(self.RECONNECT_BACKOFF_MAX,backoff*2)
+    # 重连退避上限：断网结束后，最坏情况下要等满这一轮才会再次尝试。任何「等它恢复」的
+    # 预算（测试、看门狗）都必须从这里推导，而不是各自另写一个数字。
+    RECONNECT_BACKOFF_MAX = 30
     CLOSE_TIMEOUT = 5.0
 
     @staticmethod

@@ -46,8 +46,23 @@ async def test_control_outage_keeps_authenticated_data_and_replays_logs(tmp_path
             if i<6:await asyncio.sleep(10)
         assert time.monotonic()-start>=60 and a.store.pending() and b.store.pending()
         block['value']=False
-        async with asyncio.timeout(40):
-            while a.id==old or not a.ws or not b.ws or a.store.pending() or b.store.pending():await asyncio.sleep(.2)
+        # 断网结束后，客户端可能刚好在退避里睡满一整轮才重连（Peer.RECONNECT_BACKOFF_MAX
+        # 秒），之后还要握手、重新加入、回放积压。预算必须**从退避上限推导**，不能随手写：
+        # Windows runner 上 40 秒不够（CI run 38222972337 就是卡在 40 秒那个预算上），
+        # 所以这里取「退避上限 + 60 秒余量」，并在超时时打印可诊断的状态而不是只抛超时。
+        budget=Peer.RECONNECT_BACKOFF_MAX+60
+        started_recovery=time.monotonic()
+        try:
+            async with asyncio.timeout(budget):
+                while a.id==old or not a.ws or not b.ws or a.store.pending() or b.store.pending():await asyncio.sleep(.2)
+        except TimeoutError:
+            raise AssertionError(
+                '断网结束后 %ss 内没有恢复（预算=%ss=退避上限 %ss + 60s）：'
+                'session 是否已换=%s（旧 %s / 新 %s）、a.ws=%s、b.ws=%s、'
+                'a 积压=%s、b 积压=%s、实际等待=%.1fs'
+                % (budget,budget,Peer.RECONNECT_BACKOFF_MAX,a.id!=old,old,a.id,
+                   bool(a.ws),bool(b.ws),a.store.pending(),b.store.pending(),
+                   time.monotonic()-started_recovery))
         assert p['closing'] and a.id!=old
         rows=app['store'].db.execute('SELECT scope,session,id,count(*) FROM diagnostics GROUP BY scope,session,id HAVING count(*)>1').fetchall();assert not rows
         await a.close();assert all(p['closing'] for p in a.paths.values())
