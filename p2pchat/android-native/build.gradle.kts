@@ -1,13 +1,13 @@
 plugins {
-    id("com.android.application") version "8.13.0" apply false
-    id("org.jetbrains.kotlin.android") version "2.1.20" apply false
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.android) apply false
 }
 // Resolves actual artifacts, not only lenient dependency-tree reporting.
 val officialWebRtc by configurations.creating
 val alternativeWebRtc by configurations.creating
 dependencies {
     officialWebRtc("org.webrtc:google-webrtc:1.0.32006")
-    alternativeWebRtc("io.github.webrtc-sdk:android:150.7871.01")
+    alternativeWebRtc(libs.webrtc.android)
 }
 tasks.register("probeWebRtcCoordinates") {
     doLast {

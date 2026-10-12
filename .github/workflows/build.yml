@@ -273,36 +273,68 @@ jobs:
             echo "== emulator -accel-check =="
             emulator -accel-check 2>&1 || echo "ACCEL_CHECK_UNAVAILABLE"
           } | tee -a p2pchat/releases/android-native-probes.log
+      - name: Run native Kotlin/JVM unit tests (no device; a failure fails this job)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `set -e` 是必须的：本步骤在 gradle 之后还有收尾命令（收集 XML、打印状态），
+          # 只写 `set -o pipefail` 会被最后一条命令的成功掩盖掉 gradle 的失败（本机预演实测：BUILD FAILED 但步骤 exit=0）。
+          # JVM 单测（ProtocolTest.kt：加入证明向量、帧编解码、地址族过滤、turn: 拒绝、未测得「—」语义）
+          # 不需要设备/模拟器。这里**没有**任何"失败也继续"的开关：没有 continue on error 键、没有 `|| true`、
+          # 没有 `if: always()` 兜底 —— 单测红了这个 job 就必须红（证据不能只靠"本地跑过"的说法）。
+          bash p2pchat/android-native/gradlew -p p2pchat/android-native --no-daemon --console=plain \
+            -Pandroid.builder.sdkDownload=false testRtcDebugUnitTest 2>&1 \
+            | tee p2pchat/releases/android-native-unit-tests.log
+          # 顺手把 JUnit XML 收进证据目录；报告缺失时明确写 NO_UNIT_TEST_RESULTS（不假装有结果）
+          findings=$(find p2pchat/android-native/app/build/test-results/testRtcDebugUnitTest -name '*.xml' 2>/dev/null | sort)
+          if [ -n "$findings" ]; then
+            printf '%s\n' "$findings" | xargs cat > p2pchat/releases/android-native-unit-tests.xml
+          else
+            echo "NO_UNIT_TEST_RESULTS" > p2pchat/releases/android-native-unit-tests.xml
+          fi
+          grep -q "tests=" p2pchat/releases/android-native-unit-tests.xml && echo "UNIT_TEST_RESULTS_RECORDED" \
+            || echo "UNIT_TEST_RESULTS_MISSING"
       - name: Build the native spike APK (preinstalled SDK, no license acceptance)
         shell: bash
         run: |
           set -o pipefail
           bash p2pchat/android-native/gradlew -p p2pchat/android-native --no-daemon --console=plain \
             -Pandroid.builder.sdkDownload=false assembleRtcDebug 2>&1 | tee p2pchat/releases/android-native-build.log
-      - name: Verify the resolved WebRTC artifact contents and record APK sha256
+      - name: Verify the resolved WebRTC artifact contents and record APK identity (sha256 + sourceCommit)
         if: always()
         shell: bash
         run: |
-          set -o pipefail
+          # `set -e`：AAR 探测失败/记录工具失败都要让步骤真红（本步骤后面还有命令，不能靠最后一条命令的退出码）。
+          set -euo pipefail
           mkdir -p p2pchat/releases
-          AAR=$(find "$HOME/.gradle/caches/modules-2/files-2.1/io.github.webrtc-sdk/android" -name 'android-*.aar' 2>/dev/null | sort | head -1)
+          # 注意 `|| true`：Gradle 缓存里没有 AAR 时 `find` 本身会返回非 0，若不吞掉，`set -e` 会在下面
+          # 那条友好报错（WEBRTC_AAR_NOT_RESOLVED）和身份记录之前就把步骤打断 —— 只吞 find 的退出码，
+          # 不吞后面的任何东西。
+          AAR=$(find "$HOME/.gradle/caches/modules-2/files-2.1/io.github.webrtc-sdk/android" -name 'android-*.aar' 2>/dev/null | sort | head -1 || true)
           if [ -z "$AAR" ]; then
             echo "WEBRTC_AAR_NOT_RESOLVED: Gradle 未在缓存中留下 AAR，无法做内容级校验" | tee p2pchat/releases/webrtc-aar-probe.log
             exit 1
           fi
           python p2pchat/android-native/tools/probe_webrtc_aar.py "$AAR" --abis arm64-v8a,x86_64 --remote \
             --json p2pchat/releases/webrtc-aar-probe.json | tee p2pchat/releases/webrtc-aar-probe.log
-          sha256sum p2pchat/android-native/app/build/outputs/apk/rtc/debug/*.apk 2>/dev/null | tee p2pchat/releases/android-native-apk.sha256 \
-            || echo "NO_APK_PRODUCED" | tee p2pchat/releases/android-native-apk.sha256
+          # APK 身份：第一行仍是 sha256sum 兼容格式，紧随其后的 sourceCommit/sourceTree/sourceFiles
+          # 让产物能绑回源码版本（不再只靠 artifact 名字里的 commit）。工具见
+          # p2pchat/android-native/tools/apk_identity.py（本机可用假 APK 预演格式）。
+          python p2pchat/android-native/tools/apk_identity.py \
+            --apk p2pchat/android-native/app/build/outputs/apk/rtc/debug \
+            --commit "${GITHUB_SHA:-unknown}" \
+            --source-root p2pchat/android-native \
+            --out p2pchat/releases/android-native-apk.sha256
       - name: Data channel runtime verification status (never fabricated)
         if: always()
         shell: bash
         run: |
           {
             echo "DATA_CHANNEL_RUNTIME_TEST: NOT_RUN"
-            echo "原因1：p2pchat/android-native 目前只有构建脚手架与 AndroidManifest，没有任何 Kotlin 源码或 instrumentation 用例，没有可执行的 DataChannel 路径（可行性报告 G3）。"
+            echo "原因1：DataChannel 运行时验证需要 instrumentation（真机或模拟器上跑 AndroidJUnitRunner）。本 job 只跑 JVM 单测（testRtcDebugUnitTest，上面的步骤）与 APK 构建；app/src/androidTest 目前没有任何用例。"
             echo "原因2：模拟器验证要求“预装系统镜像 + emulator + KVM 加速”三者同时具备；本 job 只做只读探测，不下载系统镜像、不做许可交互接受。"
-            echo "结论：本 job 提供依赖解析、产物内容校验、APK 构建三类证据；构建成功不等于应用可用。"
+            echo "结论：本 job 提供依赖解析、JVM 单测、产物内容校验、APK 构建四类证据；构建成功与单测通过都不等于应用可用（运行时 DataChannel 仍是 NOT_RUN，需真机/模拟器实测）。"
           } | tee p2pchat/releases/android-native-emulator-status.txt
       - name: Upload private android-native evidence (no release)
         if: always()
@@ -313,6 +345,7 @@ jobs:
             p2pchat/releases/android-native-*.log
             p2pchat/releases/android-native-*.txt
             p2pchat/releases/android-native-*.sha256
+            p2pchat/releases/android-native-*.xml
             p2pchat/releases/webrtc-aar-probe.*
             p2pchat/releases/*.apk
             p2pchat/android-native/app/build/outputs/apk/**/*.apk
