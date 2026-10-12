@@ -1,6 +1,8 @@
 """Allowlisted diagnostics. No data retrieval route exists on the control plane."""
+import hashlib
 import json
 import math
+import re
 import secrets
 import sqlite3
 import time
@@ -62,9 +64,78 @@ def validate_event(event,session):
     if len(json.dumps(event).encode())>2048: raise ValueError('LIMIT_EXCEEDED')
     return event
 
+# ---------------------------------------------------------------------------
+# 房间数据目录命名
+# ---------------------------------------------------------------------------
+# 取舍（可读性 vs 碰撞）：目录名 = 可读的 ASCII 安全片段 + 房间名的稳定哈希。
+#   * 片段只保留 [A-Za-z0-9_-]（其余折叠成 '-'，长度上限 32）：给人眼看，不承担唯一性；
+#     两个不同的房间名可能得到同一个片段（例如"房间A"/"房间B"都变成"room"）。
+#   * 唯一性由 sha256 前 16 hex（64 bit）承担：**不同房间名绝不同目录**（碰撞概率 2^-64），
+#     且与文件系统编码无关——这正是非 UTF-8 编码下也能建目录的原因。
+#   * 房间名里可能带 '/'、'..' 之类字符，片段化顺带把它们变成 '-'，不会形成路径穿越。
+# 路径里只有房间名与它的哈希，不含密钥/凭据；同一房间名无论 secret 是什么都映射到同一目录。
+ROOM_DIR_SLUG_MAX=32
+ROOM_DIR_HASH_CHARS=16
+ROOM_DIR_INFO=b'p2pchat/room-dir/v1\0'
+_UNSAFE_SLUG=re.compile(r'[^A-Za-z0-9_-]+')
+
+
+def directory_slug(label,limit=ROOM_DIR_SLUG_MAX):
+    """把任意标签压成 ASCII 安全且可读的片段；全被过滤掉时用 'room' 兜底。"""
+    text=_UNSAFE_SLUG.sub('-',str(label)).strip('-_')
+    return text[:limit].strip('-_') or 'room'
+
+
+def room_directory_name(room):
+    """房间数据目录的**目录名**（不含父目录）：可读片段 + 稳定哈希，ASCII 安全且不碰撞。"""
+    digest=hashlib.sha256(ROOM_DIR_INFO+str(room).encode('utf-8')).hexdigest()[:ROOM_DIR_HASH_CHARS]
+    return '%s-%s' % (directory_slug(room),digest)
+
+
+def legacy_room_directory(base,room):
+    """旧规则的目录（房间名直接当目录名）——只有里面有数据时才算数。
+
+    非 UTF-8 文件系统编码下，这个名字根本不可能存在于磁盘上（也就无从创建）；
+    探测本身也必须是有编码安全的：`os.stat` 在这种平台上会抛 UnicodeEncodeError，
+    这里按"旧目录不存在"处理，绝不因此崩溃。
+    """
+    try:
+        candidate=Path(base)/str(room)
+        if candidate.is_dir() and any(candidate.iterdir()):
+            return candidate
+    except (UnicodeError,OSError,ValueError):
+        return None
+    return None
+
+
+def room_directory(base,room,*,prefer_legacy=True):
+    """房间数据目录：**优先沿用旧目录**（有数据时），否则用新规则。
+
+    向后兼容策略：
+    1. 升级前已有 `base/<房间名>` 且里面有数据 ⇒ 继续用它。历史日志/队列不丢，
+       也不会出现"两个目录互相看不到"。
+    2. 旧目录不存在、或存在但是空的 ⇒ 用 `base/<片段>-<哈希>` 新规则。
+    3. 两种目录同时存在且旧目录有数据 ⇒ 仍然选旧目录（只保留一份历史）。
+    调用方把返回值交给 Store/LocalQueue 即可；Store 自己不会静默改名，遇到放不下的
+    目录名会明确报 DATA_DIR_NOT_ENCODABLE。
+    """
+    base=Path(base)
+    if prefer_legacy:
+        legacy=legacy_room_directory(base,room)
+        if legacy is not None:
+            return legacy
+    return base/room_directory_name(room)
+
+
 class Store:
     def __init__(self,directory,max_bytes=100*1024*1024,retention_days=7):
-        self.directory=Path(directory); self.directory.mkdir(parents=True,exist_ok=True)
+        self.directory=Path(directory)
+        try:
+            self.directory.mkdir(parents=True,exist_ok=True)
+        except UnicodeEncodeError as exc:
+            # 非 UTF-8 文件系统编码（例如 LC_ALL=C 的容器/CI）放不下这个目录名。
+            # 这里不静默改名——那可能把历史拆成两个目录——而是明确失败并指向命名工具。
+            raise ValueError('DATA_DIR_NOT_ENCODABLE') from exc
         self.path=self.directory/'server.jsonl'
         self.max_bytes=max_bytes; self.retention=retention_days*86400
         self.db=sqlite3.connect(self.directory/'events.sqlite3')

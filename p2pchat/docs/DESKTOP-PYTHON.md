@@ -237,6 +237,34 @@ dist/p2p-desktop/p2p-desktop --self-test      # 打包产物里的自检
 `PySide6/*.abi3.so`），加上 ICU 数据约 32 MiB —— 这是「中文能渲染」和「不依赖宿主 Tk」的直接代价。
 打包产物在**没有 DISPLAY**的环境里 `--capabilities` 与 `--self-test` 都通过（GUI 起不来时 `--self-test` 本来就走引擎层）。
 
+### 依赖声明：requirements.txt / constraints.txt / requirements-lock.txt
+
+三个文件分工不同，**不要混用**：
+
+| 文件 | 是什么 | 谁在用 |
+|---|---|---|
+| `p2pchat/requirements.txt` | 运行时 + 测试依赖的**声明**（区间为主；桌面 GUI 固定到已测版本）。**产品代码 import 到的每个第三方模块都必须在这里** | **CI 唯一安装的运行时清单**：`pip install -r p2pchat/requirements.txt -r p2pchat/platform/build-requirements.txt -c p2pchat/platform/constraints.txt`；本地开发同样从它开始 |
+| `p2pchat/platform/constraints.txt` | 传输/加密栈的**精确已测版本**（aiohttp / aiortc / aioquic / cryptography / pylibsrtp …），Linux 与 Windows 通用 | CI 的 `-c` 约束；不含 Qt（GUI 的固定版本在 requirements.txt 里） |
+| `p2pchat/platform/build-requirements.txt` | 打包工具链精确版本（PyInstaller / hooks-contrib / setuptools） | CI 与本地打包 |
+| `p2pchat/requirements-lock.txt` | 本机**实测环境**的精确记录（含 PySide6-Essentials 6.12.0 / shiboken6 6.12.0 及 wheel 大小与 sha256） | `README.md` 的本地环境安装命令、`DELIVERY.md` / `VERIFICATION-*.md` 的冻结哈希记录、`licenses/PYSIDE6-NOTICE.txt` 的合规记录 |
+
+**保持一致**：同一个包同时出现在两处时版本必须相容；桌面 GUI 在 `requirements.txt` 里
+固定为 `PySide6-Essentials==6.12.0`，与锁文件记录的已测版本、`licenses/PYSIDE6-NOTICE.txt`
+里的 wheel sha256 完全一致（它的元数据自带 `shiboken6==6.12.0`，所以绑定运行时版本也被固定）。
+CI 不安装锁文件（它装 requirements.txt + constraints.txt），这一点在本轮已如实报告给 captain；
+本轮**没有**改 `.github/`，也没有删除锁文件。
+
+**防漂移**：`p2pchat/tests/desktop/test_declared_dependencies.py` 会扫描产品代码
+（`p2pchat/*.py`、`python_desktop/`、`native/`、`backend/`，外加 `tools/*.py`）里 import 的
+第三方顶层模块，断言它们都在 `requirements.txt`（`tools/` 可为 `build-requirements.txt`）里声明；
+标准库自动放过，确需豁免的（可选依赖、平台专有）只能进显式白名单并**逐条写明理由**，
+已声明的包反过来写豁免会被判为多余。它还会断言扫描真的看到了已知第三方模块、requirements
+真的解析出了核心包，避免检查退化成“零 imports → 全绿”。
+
+这道门就是 CI run 38191690337 事故的产物：当时 Qt 依赖只写在锁文件里，CI 装的
+`requirements.txt` 没有它，`test_ui.py` 在**收集阶段**就因 `ModuleNotFoundError: No module named 'PySide6'`
+让三个平台一起红。现在把 PySide6 声明进 requirements.txt 之后，CI 的既有安装命令即可满足导入。
+
 ### LGPL 合规（Qt / PySide6）
 
 `PySide6-Essentials==6.12.0` + `shiboken6==6.12.0`（LGPL-3.0-only；wheel 元数据写作
