@@ -1,45 +1,79 @@
 {
-  "revision": "t34-windows-stun-ipv6-platform-reviewed",
-  "previousSourceTreeSha256": "44389408db396a4cc22ab4a3646700f060901ae6c5df323ad21c0b210c998eb3",
-  "sourceTreeSha256": "430471c693a875b09f57154222d31a1ad8d57e2b46ce1516e889d3b3b9807c58",
-  "sourceFileCount": 140,
-  "sourceManifestSha256": "fec6d557e2df485f65fdc6e1fe9c0deb8248a794cbe164b1fa176d25928ca294",
-  "packageTreeSha256": "02e17b5685b92724975cdd7330cd5c31f52aeb1411774fca16c1c79adc821294",
-  "packageFileCount": 109,
-  "artifactSha256": {
-    "releases/linux-unpacked/p2p-observatory-chat": "10a14d05c6ff4f94075cfb3eeb6ed6571be33ebcc08cbd675b5ce9ff84706564",
-    "releases/linux-unpacked/resources/app.asar": "021c5e233616f545094b78e81bf1fa4caf0c211dc1dfcce0ebc97980758b4ec7",
-    "releases/linux-unpacked/resources/native/p2p-native": "922d0587fdf992c94874e1b753b81c29678940a1c03ea3bbc7aa0eb85caaa95b",
-    "package-lock.json": "6beed4f9163d5bcc775c1dd8429caf6b405b71909a8643ba23720a20f64dbef0",
-    "requirements-lock.txt": "e8a8f0a6b1dbf627b99353c4e42aeb2add5859bfa0594d0c0959e295bf75c9bd"
+  "revision": "p2p-delivery-v2-final-freeze-d07ed36",
+  "frozenAtUtc": "2026-10-12T08:43:21Z",
+  "headCommit": "d07ed36cf20c6b97104bebd49aed12660c8c9ae6",
+  "headCommitSubject": "Give the outage test a recovery budget derived from the client's own backoff",
+  "previousSourceTreeSha256": "5a5745babe2753a6d9eae9eb1a27e66e827fe44c34769ab6ccd9b57c49339b19",
+  "sourceTreeSha256": "c9e3e16d23bce590d03f53a388a90ab4d552461d9b50aea6b7d72dd258382869",
+  "sourceFileCount": 231,
+  "sourceManifestSha256": "34d0a476b72a45c5e3df678af3db4bb56d8a9433d32df23daa88388f9fa3ba7e",
+  "sourceFreezeVerify": "SOURCE_FREEZE_VERIFIED c9e3e16d23bce590d03f53a388a90ab4d552461d9b50aea6b7d72dd258382869 231",
+  "frozenTreeDirty": true,
+  "frozenTreeDirtyNote": "docs/SOURCE-MANIFEST.json 与 docs/FREEZE.json 由本次冻结写入、尚未提交，故工作树对 git 是脏的；两者都不在源码清单的收录范围内（清单只收 docs/*.md），不影响 --verify。",
+  "artifact": {
+    "reviewedRecord": {
+      "record": "p2pchat/python_desktop/evidence/desktop-build.json",
+      "sourceCommit": "4ccbf59627d9c0a084e1fe1ac6ec97279bc53555",
+      "sourceTree": "sha256:2fe162434c8a13de80594d811b529b4366442a3ad9053dd26de4ba8d7bb21e1a",
+      "sourceFileCount": 142,
+      "exe": "p2p-desktop",
+      "exeSha256": "412b7d8f8d6cd5b14f6e760584e1514859b69b3db469ed461fe2c0562860e188",
+      "exeBytes": 5261832,
+      "bundleTreeSha256": "sha256:9b54cc6c8250d74c451f93db1e600b13ed9af33b291e0217b401ea65f4b500ff",
+      "bundleFileCount": 453,
+      "bundleBytes": 514602514,
+      "independentlyReviewed": "t43 needs_revision → t44 repair/rebuild → t45 verdict=pass (review p2pchat/review/ux-desktop/REVIEW-QT-T24-R2.md)"
+    },
+    "localUnreviewedRebuild": {
+      "status": "已删除（本机未复审的 dist/ 与 build/ 不留在工作树，避免与已复审记录混淆）",
+      "howToReproduce": "在冻结 HEAD 上重建并用 p2pchat/tools/desktop_build_record.py 重新生成记录，且需重新独立复审后才能宣称已验证"
+    },
+    "recordVerifyAgainstCurrentDist": "本地无 dist/，因此不适用（不是 VERIFIED 也不是 MISMATCH）。记录仍绑定 4ccbf59（t45 verdict=pass）的产物：exe 412b7d8f…/5261832 B、整包 9b54cc6c…/453；该产物可从 CI 运行 4ccbf59 的 windows/linux 私产包下载后重新核对（captain 已对 linux 与 windows 两个 tar.gz 跑过 sha256sum -c 成功）。要恢复 BUILD RECORD VERIFIED 只有两条正当路径：在冻结 HEAD 重建后重新独立复审并重生成记录，或本机丢弃 dist（现在就是这条）。"
   },
   "tests": {
-    "python": "97 passed, 8 AppKey warnings, 81.21s, no skip",
-    "nodeClientPlatformNativeIntegration": "48 passed, no skip",
-    "reviewTargetHashes": "8 T32/T33 targets matched",
-    "publishedDocumentationLinks": "all README/PLATFORMS/docs local targets are in explicit upload allowlist; private reports rendered as text",
-    "syncWeb": "passed",
-    "linuxBuild": "passed; changed native rebuilt",
-    "linuxSandboxSmoke": "passed",
-    "nativeManifestMatches": "passed"
+    "python": "693 passed, 82 warnings, 0 failed, 0 skipped（含 test_outage 恢复预算修复后的复跑）",
+    "nodeClientAndPlatform": "62 passed, 0 failed, 0 skipped",
+    "packagedCapabilities": "exit 0（在本地未复审重建的产物上）",
+    "packagedSelfTest": "exit 0; 6.2s; dual-stack + IPv4 direct; RTT 3.4 ms; 65536-byte file checksum; datachannel 0.7 ms; loopback application-layer 93.2 Mbps（应用层速率，不是线路带宽）; STUN mapping observed",
+    "publishedDocumentationLinks": "all README/PLATFORMS/docs local targets resolve (81 relative links checked, 0 broken)"
+  },
+  "coverageGaps": [
+    "【已关闭】tools/freeze.py 的 SOURCE_DIRS 不含 android-native/：本次冻结已修（新增 android-native 分支），清单里 android-native/ 从 0 → 23 个文件。",
+    "【已关闭】后缀集合不含 .spec：本次冻结已加入 .spec，tools/desktop.spec 已收录。",
+    "freeze.py 收录 android/ 时排除 assets/、capacitor-cordova-android-plugins/、.idea/；android-native/ 排除 local.properties（含本机 SDK 路径）与 .cxx/、build/、.gradle/，这是刻意排除生成物与机器相关文件，不是缺口。"
+  ],
+  "uploadPolicy": {
+    "scope": "p2pchat explicit source only; .github reviewed separately by captain",
+    "excluded": [
+      "ci/windows-analysis except explicit ciUploadAllowlist（快照/提案/patch/日志/源码冻结副本一律排除）",
+      "verification 原始运行数据（run*/pytest-temp*/SQLite/JSONL/hash 副本）",
+      "review 原始报告（只允许人工脱敏的 Markdown 摘要）",
+      "releases、dist、dist-web、platform/build、platform/work、node_modules",
+      "android/app/src/main/assets 等生成物",
+      "密钥（room.key/token/PEM/私钥）、媒体（录音/图片/pcap/截图）、data 目录"
+    ],
+    "ciUploadAllowlist": [
+      "p2pchat/ci/windows-analysis/diagnostic_runner.py"
+    ]
   },
   "historicalCI": {
     "commit": "78a20506972d24605bdb9557378c3ce47c92a818",
     "run": "38132637106",
-    "linux": "success",
-    "android": "success",
-    "windows": "original two-echo/timing 2 passed; full suite 70 passed 6 failed 1 skipped; 2 STUN window, 3 native IPv6, 1 gateway platform failures; no EXE"
+    "note": "属于已删除的 Electron 桌面版与旧树；Linux/Android success，Windows 70 passed/6 failed/1 skipped 且无 EXE。历史成功包与 EXE 不可继承到本轮 Python/Qt 桌面。"
   },
-  "currentCI": "PENDING captain push; Windows post-repair not yet confirmed",
+  "currentCI": "captain 已推送三轮并逐轮收敛（每轮 Windows 只红一条，且每次都是不同的一条）：38220907495 → test_ipv6_callback 的 Windows 平台行为（由 b00dc6d 的纯函数判定修掉）；38222972337 → test_outage 的恢复预算小于客户端自身退避上限（由 d07ed36 的 Peer.RECONNECT_BACKOFF_MAX 推导预算 + 超时诊断修掉）；38225064739 → 待 runner 确认（预期四平台全绿、四个产物齐备）。",
   "notRun": [
-    "post-repair Windows runner",
-    "Android/Windows interactive device and microphone",
-    "real residential NAT",
-    "real gateway devices"
+    "Windows 桌面 CI 全绿确认（38225064739 待 runner 回执）与 Windows/macOS 实机打包运行",
+    "真实家宽 / 双 NAT / CGNAT / 运营商 UDP 封锁下的打洞成功",
+    "真实路由器放行（UPnP/PCP/NAT-PMP/IPv6 pinhole）与设备兼容性",
+    "安卓原生真机运行（本机无实机；构建已在 CI 通过，真机 DataChannel 未跑）",
+    "安卓/Windows 实机录音与真实麦克风采集",
+    "磁盘写满、断电、七天长跑下的日志限额行为"
   ],
   "sourceFrozen": true,
   "releaseMetadataExcludedFromSourceTree": [
     "docs/SOURCE-MANIFEST.json",
     "docs/FREEZE.json"
-  ]
+  ],
+  "hashSelfReferenceNote": "SOURCE-MANIFEST 的 treeSha256 与构建记录的 sourceTree 都覆盖 docs/*.md；把它们的数值写进本仓库的文档会立刻改变该数值。因此权威值只保存在被排除于清单之外的文件里（本文件、SOURCE-MANIFEST.json），文档只给出文件数（207 / 142）与不受影响的产物哈希（exe / 整包树）。"
 }

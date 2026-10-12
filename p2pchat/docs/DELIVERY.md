@@ -12,7 +12,7 @@
 | Qt 迁移（t24） | **已完成并独立复审 pass** | t43 needs_revision → t44 修复并重建产物（14:20，exe `053738d9…`）→ **t45 verdict=pass（基准 HEAD `e60ba0d`）**。其后的提交（t49/t53 网络体检、t62 可达性帧、t61 Windows 控制台 UTF-8）不在该审范围内 |
 | 新增穿透能力 | **已落地（最高 L1/L2）** | NAT 行为分类（多 STUN 观测）、局域网直连发现、对称 NAT 端口预测、网关放行接线；**默认关闭、需显式同意**，真实网络一律 NOT_RUN |
 | 信令/服务端 | 已落地 | 单进程真双栈（每 `--host` 一个 V6ONLY 站点）、加入流程 v2（不再明文发送房间密钥）、HTTP/SSE 传输（**服务端有、网页客户端未接入**） |
-| 本轮冻结清单 | **PENDING（故意）** | 写入本行时整套回归在收集阶段中止（`ImportError: cannot import name 'ui'`，Qt 迁移中间态）。冻结必须建立在稳定且全绿的树上，故重新生成排在迁移完成之后 |
+| 本轮冻结清单 | **已完成（冻结 HEAD `d07ed36c`）** | `tools/freeze.py` 生成并通过 `--verify`（**231 文件**；权威 `treeSha256` 只在 [SOURCE-MANIFEST](SOURCE-MANIFEST.json) / [FREEZE](FREEZE.json) 里，文档不抄写哈希以免自引用失效）。回归 **693 pytest passed** + **62 node passed**（0 fail、0 skip）。**产物身份分层**：`desktop-build.json` 绑定 `4ccbf59` 那次**已复审**产物（exe `412b7d8f…`、整包 `9b54cc6c…`）；本机 `dist/` 已删除（不留未复审的本地产物）；记录仍绑 `4ccbf59` 的已复审产物，可用该次 CI 私产包重新核对 |
 | 新版桌面 Windows CI | **PENDING** | 待 captain 推送；旧 Electron 版记录不可继承 |
 | 安卓原生 Kotlin | **第一阶段已落地（t46）** | 业务逻辑全在 Kotlin（`android-native/app/src/main/java/...`，11 个 `.kt`），协议按 `peer.py`/`core.js` 对齐并有 JVM 单测；**本机无 SDK/JDK21 → 编译 NOT_RUN，真机运行 NOT_RUN**；Capacitor APK 保留 |
 | 真实家宽/双 NAT/CGNAT、真实路由器放行、实机、麦克风、磁盘满/断电/长跑 | **NOT_RUN** | 见 PUNCHING-MATRIX 第 6 节 |
@@ -23,6 +23,7 @@
 - **t7 审查 needs_revision，已由 t22/t23 处理**：第一轮审查提出的问题经 t22 修复、t23 复审查验，仍有 2 个 medium 留到 t26 修完，最终由 **t27 独立复审 verdict=pass**（基准为 Tk 版 + 数据层；Qt 版本须另行复审）。
 - **两处附条件接受的越界改动（t20）**：在 inScope 之外改了两行 `p2pchat/web/ux.js` 使英文缩写文案与 `METHODS-PLAIN.md` 一致；并把网页客户端的「加入」改为跟随 t16 的 v2 join（不再明文发送房间密钥）。两处都已记录在案，属条件接受，不是默认许可。
 - **网页客户端目前只支持 WebSocket 信令**：服务端已实现 HTTP/SSE 传输（t15），但 `web/` 里没有任何客户端接入（`grep -rn "EventSource\|/events" p2pchat/web/` 无命中）。服务端能力 ≠ 产品可用。
+- **t51 是「取消」而不是「完成」**：它原本要修 PyInstaller spec 在 Windows 上找不到 PySide6 平台插件的问题。t44 在修 Qt 产物时已把 spec 的平台插件路径改为**按布局探测**（源侧+产物侧都探，找不到就带已探测路径失败、不跳过收集，扩展名含 `.dll`），因此 t51 的独立修复不再需要，合并进 t44 后取消。**取消 ≠ 已验证 Windows 行为**：Windows 真实结果仍由 CI 给出。
 - **旧 Electron 产物仍在磁盘上**（`p2pchat/releases/linux-unpacked/`、Windows `.exe`、旧 APK、`builder-debug.yml`）：它们**不在**任何 allowlist 里，也不代表本轮桌面；是否从工作树清理由 captain 决定。
 
 

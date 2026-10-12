@@ -18,11 +18,18 @@ def allowed(p):
     if not p.is_file() or any(v in SKIP for v in parts):return False
     if len(parts)==1:return r.name in ROOT_FILES
     if parts[0] in SOURCE_DIRS:
-        return p.suffix in {'.py','.js','.cjs','.css','.html','.md'} and r.name!='freeze.pyc'
+        return p.suffix in {'.py','.js','.cjs','.css','.html','.md','.spec'} and r.name!='freeze.pyc'
     if parts[0]=='platform':return len(parts)==2 and r.name in {'native_entry.py','mobile.js','build-requirements.txt','constraints.txt'}
     if parts[0]=='android':
         if 'assets' in parts or 'capacitor-cordova-android-plugins' in parts or '.idea' in parts:return False
         return p.suffix in {'.gradle','.properties','.java','.kt','.xml','.png','.jar','.bat','.pro'} or r.name in {'gradlew','.gitignore'}
+    if parts[0]=='android-native':
+        # 原生安卓客户端同样是交付源码：以前这里漏掉整个目录，清单里它 0 个文件，
+        # 等于「冻结了但没覆盖」。构建产物由 SKIP('build'/'.gradle') 挡掉；机器相关的
+        # local.properties（含本机 SDK 路径）与 NDK 中间产物 .cxx 不入清单。
+        if r.name=='local.properties' or '.cxx' in parts:return False
+        return (p.suffix in {'.gradle','.kts','.properties','.java','.kt','.xml','.png','.jar','.bat','.pro'}
+                or r.name in {'gradlew','gradlew.bat','.gitignore','gradle-wrapper.properties'})
     return False
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def assert_shell_removed():

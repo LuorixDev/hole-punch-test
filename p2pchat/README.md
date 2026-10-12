@@ -4,7 +4,8 @@
 
 **本轮状态（p2p-delivery-v2）：桌面端已改为纯 Python + Qt(PySide6) + PyInstaller，Electron 桌面壳已删除。** 新增并接入：NAT 行为分类（多 STUN 观测）、局域网直连发现（同网段不用打洞）、对称 NAT 端口预测、以及「路由器放行」的真实接线——后三者**默认关闭、必须显式同意**。**每条打洞方式到底实现了什么、能传消息还是只能探测、证据到哪一级（L0–L4）与还剩哪些缺口，以 [打洞方式全量对照矩阵](docs/PUNCHING-MATRIX.md) 为准**；不要再凭印象判断「集成了没有」。
 
-- **仍待确认（PENDING）**：新版 Python/Qt 桌面的 Windows CI 结果，以及最终冻结清单。`docs/SOURCE-MANIFEST.json` / `docs/FREEZE.json` 在 Qt 迁移落地、整套回归恢复全绿之后重新生成，**在那之前它们仍是上一轮的快照**。
+- **最终冻结已完成（HEAD `d07ed36c`）**：`docs/SOURCE-MANIFEST.json`（**231 文件**）与 `docs/FREEZE.json` 已在本轮生成并通过 `freeze.py --verify`。**产物记录保持绑定被独立复审过的 `4ccbf59` 产物**；本机 `dist/` 已删除（未复审的本地重建不留在工作树），因此不存在会与已复审记录混淆的本地产物（见下）。
+- **仍待确认（PENDING）**：新版 Python/Qt 桌面的 **Windows CI 结果**（老 Electron 版的成功记录不可继承）。冻结清单不能替代它。
 - **真实家宽 / 双 NAT / CGNAT、真实路由器放行、Windows/macOS 与安卓实机、真实麦克风录音全部 NOT_RUN**，详见矩阵第 6 节与 [脱敏证据索引](docs/EVIDENCE-INDEX.md)。
 
 **历史（不要当作当前状态）**：旧 Electron 桌面版与更早跨平台轮次的 CI 记录（`78a2050` 全套 70 passed/6 failed/1 skipped、`61b400e` 计时断言失败但关闭正常、`a1c6e7e` 诊断 90 秒 exit124、`855c19c` watchdog 600 秒 exit124 等）只属于**已删除的桌面壳与旧树**，不能继承到本轮 Python/Qt 桌面。历史版本表、失败留痕与上传边界见 [交付清单](docs/DELIVERY.md)。
@@ -135,6 +136,6 @@ node --test p2pchat/tests/integration/*.test.cjs
 npm --prefix p2pchat run sync:web
 ```
 
-本轮本地实跑（**Tk 基线**，Qt 迁移落地后必须整套重跑）：**450 Python passed**、`tests/desktop` 67 passed / 0 skipped（含真实 Tk 面板）、**55 Node client**、**6 platform** passed / 0 skipped；`--self-test`（源码与打包产物）真实握手通过，独立通道测速两次都拿到对端确认（65.52 / 53.58 Mbps，标注为**应用层 goodput、不是线路带宽**）。**取证时（2026-10-12）整套回归因 Qt 迁移中间态在收集阶段中止（`ImportError: cannot import name 'ui'`），所以本轮不生成冻结清单**——原因与处置见 [PUNCHING-MATRIX](docs/PUNCHING-MATRIX.md) 第 8 节 G9 与第 11 节。
+本轮本地实跑（**冻结 HEAD `d07ed36c`**）：**693 Python passed**（142.48 s，0 fail / 0 skip）+ **62 Node passed**（客户端/平台门，0 skip）；无界面自检在**本机重建的**打包产物上跑通（`--self-test` 6.2 秒、双栈直连+IPv4 直连、往返 3.4 ms、65536 字节文件校验、数据通道 0.7 ms、**回环应用层确认速率 93.2 Mbps——应用层速率，不是线路带宽**）。冻结清单已生成并通过 `--verify`（**231 文件**；权威哈希见 [SOURCE-MANIFEST](docs/SOURCE-MANIFEST.json) 与 [FREEZE](docs/FREEZE.json)，文档不抄写以免自引用失效）。**产物身份分层（别读混）**：`desktop-build.json` 绑定的仍是 `4ccbf59` 那次**被独立复审过**的产物（exe `412b7d8f…`、整包 `9b54cc6c…`）；本机 `dist/` 已删除，**没有**未复审的本地产物与记录混在一起；可用 CI 运行 `4ccbf59` 的私产包重新核对（两个 tar.gz 均已 `sha256sum -c` 通过）。
 
 **真实IPv4双家宽/NAT成功、真实路由器放行、Windows/macOS/Android实机、真实麦克风采集、磁盘满/断电/七天长跑均未验证（NOT_RUN）**；IPv6隔离netns stateful与延迟丢包成功也不是运营商现场证据。完整版本、历史失败及上传边界见 [DELIVERY](docs/DELIVERY.md)。
