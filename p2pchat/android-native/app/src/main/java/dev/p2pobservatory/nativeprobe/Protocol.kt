@@ -165,28 +165,46 @@ object Protocol {
             .filter { line -> !line.startsWith("a=candidate:") || permitted(line.removePrefix("a="), profile) }
             .joinToString("\r\n")
 
-    /** 服务器下发的 STUN 白名单：只接受 stun:/stuns:，任何 turn:/relay 一律拒绝（回归即失败）。 */
-    fun stunUrls(rawServers: JSONArray?): List<String> {
-        if (rawServers == null) return emptyList()
+    /**
+     * 服务器下发的 STUN 白名单（**与 org.json/Android 无关的纯逻辑**，可直接在 JVM 单测里跑）：
+     * 只接受 stun:/stuns:，任何 turn:/turns: 一律拒绝（回归即失败），空串直接丢掉。
+     *
+     * 为什么要把安全判定从 JSON 里拆出来：Android 本地单测里 `org.json` 是 **stub**
+     * （`unitTests.isReturnDefaultValues` 下桩方法返回 null/0），如果"有没有 TURN"这种判定
+     * 依赖 JSON 解析结果，桩一返回空数组就会变成"看起来没有 TURN"的静默通过。
+     */
+    fun stunUrlsFrom(raw: List<String>): List<String> {
         val urls = ArrayList<String>()
-        for (i in 0 until rawServers.length()) {
-            val entry = rawServers.optJSONObject(i) ?: continue
-            val value = entry.opt("urls")
-            val candidates = when (value) {
-                is JSONArray -> (0 until value.length()).mapNotNull { value.optString(it, null) }
-                is String -> listOf(value)
-                else -> emptyList()
-            }
-            for (url in candidates) {
-                val trimmed = url.trim()
-                if (trimmed.isEmpty()) continue
-                require(!trimmed.startsWith("turn:") && !trimmed.startsWith("turns:")) { "RELAY_FORBIDDEN" }
-                require(trimmed.startsWith("stun:") || trimmed.startsWith("stuns:")) { "RELAY_FORBIDDEN" }
-                urls.add(trimmed)
-            }
+        for (url in raw) {
+            val trimmed = url.trim()
+            if (trimmed.isEmpty()) continue
+            require(!trimmed.startsWith("turn:") && !trimmed.startsWith("turns:")) { "RELAY_FORBIDDEN" }
+            require(trimmed.startsWith("stun:") || trimmed.startsWith("stuns:")) { "RELAY_FORBIDDEN" }
+            urls.add(trimmed)
         }
         return urls
     }
+
+    /** 纯适配层：把 `iceServers` 的 JSON 摊平成 URL 字符串列表（不做安全判定）。 */
+    fun rawStunUrls(rawServers: JSONArray?): List<String> {
+        if (rawServers == null) return emptyList()
+        val raw = ArrayList<String>()
+        for (i in 0 until rawServers.length()) {
+            val entry = rawServers.optJSONObject(i) ?: continue
+            when (val value = entry.opt("urls")) {
+                is JSONArray -> for (index in 0 until value.length()) {
+                    val text = value.optString(index, "")
+                    if (text.isNotEmpty()) raw.add(text)
+                }
+                is String -> raw.add(value)
+                else -> continue
+            }
+        }
+        return raw
+    }
+
+    /** 服务器下发的 STUN 白名单：只接受 stun:/stuns:，任何 turn: 一律拒绝（回归即失败）。 */
+    fun stunUrls(rawServers: JSONArray?): List<String> = stunUrlsFrom(rawStunUrls(rawServers))
 
     /**
      * 与 JS `JSON.stringify(fields)` 等价的数组序列化：只转义 `"`、`\` 与控制字符，

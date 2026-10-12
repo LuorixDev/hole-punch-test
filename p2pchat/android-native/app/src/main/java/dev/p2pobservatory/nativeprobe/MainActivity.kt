@@ -344,8 +344,18 @@ class MainActivity : Activity(), SignalingClient.Listener, PathRunner.Listener, 
         }
         val candidate = message.optJSONObject("candidate")
         if (candidate != null) {
-            session.onRemoteCandidate(candidate.optString("sdpMid", null), candidate.optInt("sdpMLineIndex", 0),
-                candidate.optString("candidate"))
+            // `optString(name, null)` 是拿 null 去顶一个平台类型 String 参数（Kotlin 报
+            // "inferred type is 'Nothing?', but 'String' was expected"）。缺字段本来就表示"没有 mid"，
+            // 所以显式判空，而不是把 null 塞进 String 位置。
+            val sdpMid = if (candidate.has("sdpMid") && !candidate.isNull("sdpMid")) candidate.optString("sdpMid") else null
+            val sdp = candidate.optString("candidate")
+            if (sdp.isNotEmpty()) {
+                session.onRemoteCandidate(sdpMid, candidate.optInt("sdpMLineIndex", 0), sdp)
+            } else {
+                // 空候选不往 WebRTC 里塞（否则要么抛异常要么静默丢弃）：如实记一条，不假装收到。
+                diagnostics.emit("signal.candidate", JSONObject().put("candidateType", "unknown")
+                    .put("reason", "SCHEMA_INVALID").put("profile", "ice-dual"))
+            }
         }
     }
 

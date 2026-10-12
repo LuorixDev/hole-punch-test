@@ -50,34 +50,69 @@ object JoinProof {
         .put("clientSessionId", clientSessionId)
 
     /**
-     * 加入报文：字段与 `core.js joinMessage()` 一致。
+     * 加入报文的**纯字段**（不含 JSON）：字段名/顺序与 `core.js joinMessage()` 一致。
      * 只有房间里还没有密钥时才带 `verifier`（派生值本身，仍然不是房间密钥）。
+     *
+     * 单测直接断言这个 Map，不经过 `org.json`（Android 本地单测里它是 stub，会让断言失真）。
      */
+    fun joinFields(
+        room: String, secret: String, name: String, clientSessionId: String,
+        capabilities: List<String>, nonce: String, roomEstablished: Boolean,
+    ): Map<String, Any?> {
+        val key = joinKeyHex(secret, room)
+        val fields = linkedMapOf<String, Any?>(
+            "v" to 1,
+            "type" to "join",
+            "joinVersion" to JOIN_VERSION,
+            "room" to room,
+            "name" to name,
+            "clientSessionId" to clientSessionId,
+            "capabilities" to capabilities,
+            "nonce" to nonce,
+            "proof" to proof(key, room, nonce, clientSessionId),
+        )
+        if (!roomEstablished) fields["verifier"] = key
+        return fields
+    }
+
+    /** 端上实际发送的报文：把纯字段序列化成 JSON（行为与改动前一致，键顺序保持）。 */
     fun joinMessage(
         room: String, secret: String, name: String, clientSessionId: String,
         capabilities: List<String>, nonce: String, roomEstablished: Boolean,
     ): JSONObject {
-        val key = joinKeyHex(secret, room)
         val message = JSONObject()
-            .put("v", 1)
-            .put("type", "join")
-            .put("joinVersion", JOIN_VERSION)
-            .put("room", room)
-            .put("name", name)
-            .put("clientSessionId", clientSessionId)
-            .put("capabilities", org.json.JSONArray(capabilities))
-            .put("nonce", nonce)
-            .put("proof", proof(key, room, nonce, clientSessionId))
-        if (!roomEstablished) message.put("verifier", key)
+        for ((key, value) in joinFields(room, secret, name, clientSessionId, capabilities, nonce, roomEstablished)) {
+            when (value) {
+                is List<*> -> message.put(key, org.json.JSONArray(value))
+                null -> Unit
+                else -> message.put(key, value)
+            }
+        }
         return message
     }
 
-    /** 加入报文里绝不能出现房间密钥（静态与运行时都检查）。 */
-    fun containsSecret(message: JSONObject, secret: String): Boolean {
+    /** 纯判定：字段里出现了 `secret` 键、或任何值里带着房间密钥，都算泄漏。 */
+    fun joinFieldsContainSecret(fields: Map<String, Any?>, secret: String): Boolean {
         if (secret.isEmpty()) return false
-        val text = message.toString()
+        if (fields.keys.any { it == "secret" }) return true
+        return fields.values.any { value ->
+            when (value) {
+                is String -> value.contains(secret)
+                is Collection<*> -> value.any { it?.toString()?.contains(secret) == true }
+                else -> false
+            }
+        }
+    }
+
+    /** 加入报文字符串里绝不能出现房间密钥（运行时兜底用）。 */
+    fun containsSecretIn(text: String, secret: String): Boolean {
+        if (secret.isEmpty()) return false
         return text.contains("\"secret\"") || text.contains(secret)
     }
+
+    /** 加入报文里绝不能出现房间密钥（静态与运行时都检查）。 */
+    fun containsSecret(message: JSONObject, secret: String): Boolean =
+        containsSecretIn(message.toString(), secret)
 
     /**
      * 自检向量：由 `p2pchat/android-native/tools/probe_join_vectors.py` 用 peer.py 同一套

@@ -21,7 +21,7 @@ object TelemetrySchema {
         "session.joined", "session.error", "session.left", "signal.sdp", "signal.candidate", "stun.binding",
         "transfer.sent", "transfer.received", "chat.received", "chat.echo", "peer.ack", "task.error",
         "receive.error", "receive.queue_overflow", "datachannel.open", "datachannel.closed", "rtc.connection",
-        "peer.authenticated_channel", "server.error", "diagnostic.dropped",
+        "peer.authenticated_channel", "server.error", "diagnostic.dropped", "export.session",
     )
     val ENUMS = mapOf(
         "state" to setOf("unsupported", "gathering", "probing", "authenticating", "direct", "failed", "timeout",

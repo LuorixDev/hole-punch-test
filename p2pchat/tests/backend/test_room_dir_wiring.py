@@ -131,6 +131,138 @@ def free_port():
     return port
 
 
+# 子进程自报分支用的探针：源码必须保持纯 ASCII（C locale 下 -c 里放非 ASCII 会直接解不动）。
+BRANCH_PROBE = (
+    "import os,sys\n"
+    "try:\n"
+    "    os.fsencode('\\u79bb\\u7ebf')\n"
+    "    print('FS-BRANCH=unicode')\n"
+    "except UnicodeEncodeError:\n"
+    "    print('FS-BRANCH=ascii')\n"
+    "print('fs=' + sys.getfilesystemencoding())\n"
+)
+# 只有这几类字样才算"端口被抢"（换端口重试的唯一触发条件，别的一律带证据失败）。
+PORT_BUSY_MARKERS = ('address already in use', 'eaddrinuse', 'errno 98', 'errno 10048',
+                     'only one usage of each socket address')
+
+
+def _child_branch_report(python, cwd, unicode_fs):
+    """用**同一 env/cwd**问子进程自己：它的文件系统编码落在哪个分支。
+
+    失败信息里必须有它自报的 `FS-BRANCH`，否则"分支对不对"只能靠猜。
+    """
+    try:
+        proc = subprocess.run([python, '-c', BRANCH_PROBE], cwd=cwd, env=_child_env(cwd, unicode_fs),
+                              capture_output=True, text=True, encoding='utf-8', errors='replace',
+                              timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return '取不到（%s）' % type(exc).__name__
+    if proc.returncode != 0:
+        return '探针退出码 %d：%s' % (proc.returncode, (proc.stderr or '').strip()[:200])
+    return (proc.stdout or '').strip().replace('\n', ' ')
+
+
+class ServerChild:
+    """真启动的服务端子进程 + 一次性输出捕获。
+
+    就绪判定用**真健康检查**（轮询 /health 直到 ok 或超时），不看"数据目录建出来了没有"——
+    中心库在监听之前就建好了，那个条件**不能**证明端口已经可连（CI 的 Connection refused
+    就是这么来的）。任何一次失败都把子进程的 stdout/stderr、退出码与它自报的 FS-BRANCH
+    一起带出来，避免下次又只剩一句 "Connection refused"。
+    """
+
+    def __init__(self, proc, port, python, cwd, unicode_fs, attempt=1):
+        self.proc = proc
+        self.port = port
+        self.python = python
+        self.cwd = cwd
+        self.unicode_fs = unicode_fs
+        self.attempt = attempt
+        self.health_tries = 0
+        self._captured = None
+
+    def alive(self):
+        return self.proc.poll() is None
+
+    def output(self):
+        """把子进程的输出取出来（只取一次；还活着就先 terminate）。"""
+        if self._captured is None:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+            try:
+                out, err = self.proc.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                out, err = self.proc.communicate(timeout=20)
+            self._captured = (out or '', err or '')
+        return self._captured
+
+    def diagnostics(self, stage, last_error=None):
+        out, err = self.output()
+        return ('%s\n'
+                '  请求端口 127.0.0.1:%s（第 %d 次启动）健康检查没有就绪\n'
+                '  子进程 returncode=%s\n'
+                '  子进程自报：%s（本机预期分支 %s）\n'
+                '  最后一次健康检查的结果：%s\n'
+                '  --- 子进程 stdout ---\n%s\n'
+                '  --- 子进程 stderr ---\n%s' % (
+                    stage, self.port, self.attempt, self.proc.returncode,
+                    _child_branch_report(self.python, self.cwd, self.unicode_fs),
+                    expected_branch(self.unicode_fs), last_error or '（一次都没连上）', out, err))
+
+    def wait_healthy(self, deadline=DEADLINE, interval=0.05):
+        """有界就绪等待：轮询真健康检查；子进程一死立刻失败（不是"慢"，是死了）。"""
+        started = time.monotonic()
+        last_error = None
+        while True:
+            if not self.alive():
+                raise AssertionError(self.diagnostics('子进程在就绪前退出'))
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:%d/health' % self.port, timeout=2) as response:
+                    payload = json.loads(response.read().decode())
+                if payload.get('ok') is True:
+                    return self.health_tries
+                last_error = '健康检查返回 ok=%r' % payload.get('ok')
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                last_error = '%s: %s' % (type(exc).__name__, exc)
+            if time.monotonic() - started > deadline:
+                raise AssertionError(self.diagnostics('有界就绪等待超时（%.0f 秒）' % deadline, last_error))
+            self.health_tries += 1
+            time.sleep(interval)
+
+
+def spawn_server(python, cwd, base, port, unicode_fs):
+    return subprocess.Popen([python, '-m', 'p2pchat.server', '--data', str(base),
+                             '--room', as_argv(ROOM), '--port', str(port)],
+                            cwd=cwd, env=_child_env(cwd, unicode_fs), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+
+
+def start_server_child(base, unicode_fs, attempts=2):
+    """启动服务端子进程并等它**真的就绪**；返回 (ServerChild, 健康检查轮数)。
+
+    * 端口交接：`free_port()`（绑定→取端口→关闭）与 Popen 紧挨着，把竞争窗口压到最小。
+    * 端口被抢（EADDRINUSE）→ 换一个新端口**有界**重试（最多 attempts 次）；
+      其它任何退出/超时都不重试，直接把子进程输出与退出码抛出来（不用重试掩盖真问题）。
+    """
+    last = None
+    for attempt in range(1, attempts + 1):
+        with _subprocess_target() as (python, cwd):
+            port = free_port()
+            proc = spawn_server(python, cwd, base, port, unicode_fs)
+        child = ServerChild(proc, port, python, cwd, unicode_fs, attempt=attempt)
+        try:
+            tries = child.wait_healthy()
+        except AssertionError as exc:
+            text = str(exc)
+            if attempt < attempts and any(m in text.lower() for m in PORT_BUSY_MARKERS):
+                last = text
+                continue
+            raise
+        return child, tries
+    raise AssertionError(last)
+
+
 # ---------------------------------------------------------------------------
 # 服务端：data_directory() 用共享实现 + 旧目录优先 + 分支真实断言
 # ---------------------------------------------------------------------------
@@ -310,29 +442,19 @@ def test_server_cli_with_unicode_room(tmp_path, unicode_fs):
     base = tmp_path / 'data'
     expected = room_directory(base, ROOM)          # 父进程算出的目录名（与子进程的 locale 无关）
     assert expected.name == ROOM_NAME
-    port = free_port()
-    with _subprocess_target() as (python, cwd):
-        proc = subprocess.Popen([python, '-m', 'p2pchat.server', '--data', str(base),
-                                 '--room', as_argv(ROOM), '--port', str(port)],
-                                cwd=cwd, env=_child_env(cwd, unicode_fs), stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-    stderr = ''
+    child, tries = start_server_child(base, unicode_fs)
     try:
-        deadline = time.monotonic() + DEADLINE
-        while time.monotonic() < deadline and not (expected / 'events.sqlite3').exists():
-            if proc.poll() is not None:
-                raise AssertionError('服务器提前退出：\n' + proc.communicate()[1])
-            time.sleep(0.2)
-        assert (expected / 'events.sqlite3').exists(), '中文房间名没建出数据目录'
+        # 走到这里 /health 已经真返回过 ok=True：子进程确实建了库也真的在监听。
+        # （中心库在监听之前就建好了，所以"库存在"不能当作就绪条件——旧写法就是这么漏的。）
+        assert child.alive() and child.health_tries == tries   # 还活着，且轮数就是它就绪前我们真的探过的次数
+        assert (expected / 'events.sqlite3').exists(), child.diagnostics('数据目录没建出来')
         assert expected.name == ROOM_NAME and expected.name.isascii()
         assert not (base / ROOM).exists()                       # 没有按房间名原样建目录
 
-        # 真实健康检查 + 真实旧式 join（loopback 默认允许）→ 产生 session.joined
-        with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=10) as response:
-            assert json.loads(response.read().decode())['ok'] is True
+        # 真实旧式 join（loopback 默认允许）→ 产生 session.joined
         body = {'v': 1, 'type': 'join', 'room': ROOM, 'secret': SECRET, 'name': 'wiring',
                 'clientSessionId': str(uuid.uuid4()), 'capabilities': ['webrtc']}
-        request = urllib.request.Request(f'http://127.0.0.1:{port}/signal/join',
+        request = urllib.request.Request('http://127.0.0.1:%d/signal/join' % child.port,
                                          data=json.dumps(body).encode(),
                                          headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -341,7 +463,9 @@ def test_server_cli_with_unicode_room(tmp_path, unicode_fs):
         # 写入 → 回读：jsonl 有那条事件，sqlite 能打开且表在
         deadline = time.monotonic() + DEADLINE
         while time.monotonic() < deadline and not (expected / 'server.jsonl').exists():
-            time.sleep(0.2)
+            if not child.alive():
+                raise AssertionError(child.diagnostics('写日志前子进程就退出了'))
+            time.sleep(0.05)
         lines = (expected / 'server.jsonl').read_text(encoding='utf-8').splitlines()
         assert any('session.joined' in line for line in lines), lines
         assert all(json.loads(line) for line in lines)
@@ -349,15 +473,13 @@ def test_server_cli_with_unicode_room(tmp_path, unicode_fs):
             tables = {row[0] for row in db.execute('SELECT name FROM sqlite_master')}
         assert 'diagnostics' in tables, tables
     finally:
-        proc.terminate()
-        try:
-            _, stderr = proc.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            _, stderr = proc.communicate(timeout=20)
+        stdout, stderr = child.output()
     assert 'Traceback' not in stderr, stderr
+    # 端口交接真的到位：子进程自己报的就是测试请求的那个端口（被抢走的端口不可能这么报）
+    assert ('signaling listening on 127.0.0.1:%d' % child.port) in stderr, stderr
     if expected_branch(unicode_fs) == 'ascii':
         assert 'UnicodeEncodeError' not in stderr, stderr       # 非 UTF-8 编码下的原始缺陷不再出现
+    assert stdout == '' or stdout.isascii()                     # 子进程 stdout 不该混进非 UTF-8 噪声
 
 
 # ---------------------------------------------------------------------------
