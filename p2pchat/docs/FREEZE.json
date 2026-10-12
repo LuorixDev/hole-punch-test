@@ -1,13 +1,13 @@
 {
-  "revision": "p2p-delivery-v2-final-freeze-d07ed36",
+  "revision": "p2p-delivery-v2-final-freeze-315e8cb",
   "frozenAtUtc": "2026-10-12T08:43:21Z",
-  "headCommit": "d07ed36cf20c6b97104bebd49aed12660c8c9ae6",
+  "headCommit": "315e8cb7e895fb18721150504370ea8849710812",
   "headCommitSubject": "Give the outage test a recovery budget derived from the client's own backoff",
   "previousSourceTreeSha256": "5a5745babe2753a6d9eae9eb1a27e66e827fe44c34769ab6ccd9b57c49339b19",
-  "sourceTreeSha256": "fb1edf4d1a0fd236d25a8509beab4a25a452e9523bd0931269e424a268ced529",
-  "sourceFileCount": 230,
-  "sourceManifestSha256": "fdf5598bd2020e2174f7f8147622be0942df0c06efb82b076ea7aebb281a8bad",
-  "sourceFreezeVerify": "SOURCE_FREEZE_VERIFIED fb1edf4d1a0fd236d25a8509beab4a25a452e9523bd0931269e424a268ced529 230",
+  "sourceTreeSha256": "92bd141a4a3aac755d8ded9d82686952fbda728063638e824e9303d89589dab1",
+  "sourceFileCount": 233,
+  "sourceManifestSha256": "16139aa47531e99236a55320c63a3fdea75c2722c91e566961097c984bce16a9",
+  "sourceFreezeVerify": "SOURCE_FREEZE_VERIFIED 92bd141a4a3aac755d8ded9d82686952fbda728063638e824e9303d89589dab1 233",
   "frozenTreeDirty": true,
   "frozenTreeDirtyNote": "docs/SOURCE-MANIFEST.json 与 docs/FREEZE.json 由本次冻结写入、尚未提交，故工作树对 git 是脏的；两者都不在源码清单的收录范围内（清单只收 docs/*.md），不影响 --verify。",
   "artifact": {
@@ -61,7 +61,7 @@
     "run": "38132637106",
     "note": "属于已删除的 Electron 桌面版与旧树；Linux/Android success，Windows 70 passed/6 failed/1 skipped 且无 EXE。历史成功包与 EXE 不可继承到本轮 Python/Qt 桌面。"
   },
-  "currentCI": "captain 已推送三轮并逐轮收敛（每轮 Windows 只红一条，且每次都是不同的一条）：38220907495 → test_ipv6_callback 的 Windows 平台行为（由 b00dc6d 的纯函数判定修掉）；38222972337 → test_outage 的恢复预算小于客户端自身退避上限（由 d07ed36 的 Peer.RECONNECT_BACKOFF_MAX 推导预算 + 超时诊断修掉）；38225064739 → 待 runner 确认（预期四平台全绿、四个产物齐备）。",
+  "currentCI": "38226405027（35a941c）四平台全绿、四个产物齐备（windows 75MB / linux 118MB / android 3MB / android-native 14MB）；此后 315e8cb 修掉安卓原生启动闪退（真机级缺陷，CI 四平台全绿也照样存在），本轮冻结基准随之更新。",
   "notRun": [
     "Windows 桌面 CI 全绿确认（38225064739 待 runner 回执）与 Windows/macOS 实机打包运行",
     "真实家宽 / 双 NAT / CGNAT / 运营商 UDP 封锁下的打洞成功",

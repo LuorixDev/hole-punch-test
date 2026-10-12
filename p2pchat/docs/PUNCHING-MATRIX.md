@@ -58,7 +58,7 @@
 | **网页版（保留）** | 浏览器 WebRTC，无任意 UDP/TCP API | `web/index.html` + `web/app.js` / `web/rtc.js` | 仅 WebRTC 三 profile | 无 UDP/QUIC/TCP/网关能力，界面必须显示「不支持」 |
 | **桌面版** | 纯 Python + Qt(PySide6) + PyInstaller，Electron 已删 | `python_desktop/app.py`、`python_desktop/engine.py`、`python_desktop/qt_ui.py`（Tk 版 `ui.py` 已按用户要求移除，原因见 `docs/DESKTOP-PYTHON.md`） | WebRTC 三 profile + `udp-probe` / `quic` / `tcp` / `tcp-simopen` + STUN 观测 + 网关放行（默认关闭）+ 局域网发现（默认关闭）+ 对称 NAT 端口预测（默认关闭） | 进程内直接复用 `peer.py` 与 `native/adapter.py`，不再需要 stdio bridge/asar。**Qt 迁移已完成并经独立复审 pass（t43→t44→t45，基准 HEAD `e60ba0d`）；其后的提交不在该审范围内** |
 | **安卓版（当前可交付）** | Capacitor WebView 壳 | `android/`（页面资源来自 `web/`） | 仅 WebView 自带的 WebRTC | 无原生网络适配器（见 `PLATFORMS.md` 的「User-facing platform behavior」） |
-| **安卓原生（第一阶段已落地）** | Kotlin + WebRTC Android SDK，无 WebView 承载 | `android-native/app/src/main/java/dev/p2pobservatory/nativeprobe/`（11 个 `.kt`，t46） | 仅 WebRTC（STUN-only ICE 配置）+ v2 加入证明 + 数据通道/限额对齐 | **本机编译 NOT_RUN（无 SDK/JDK21）、真机运行 NOT_RUN**；Capacitor APK 保留至原生对等经实机验证；见 `docs/ANDROID-NATIVE.md` |
+| **安卓原生（第一阶段已落地）** | Kotlin + WebRTC Android SDK，无 WebView 承载 | `android-native/app/src/main/java/dev/p2pobservatory/nativeprobe/`（12 个 `.kt` 主源码 + 单测，t46/t65） | 仅 WebRTC（STUN-only ICE 配置）+ v2 加入证明 + 数据通道/限额对齐 | **本机编译与模拟器启动已验证**（本机已装 JDK 17 + SDK 36；启动闪退已定位并修复，证据见 `android-native/evidence/LAUNCH-CRASH-AND-FIX.md`）；**真机双端数据通道与真实麦克风仍 NOT_RUN**；Capacitor APK 保留至原生对等经实机验证；见 `docs/ANDROID-NATIVE.md` |
 | **服务端（信令+STUN+日志中心）** | 单进程 Python，可多 `--host` 双栈 | `server.py`、`backend/protocol.py`、`backend/telemetry.py` | 信令 WebSocket、STUN Binding、中心日志收集 | **不转发聊天**，不是中继（见第 6.8 条） |
 
 ---
@@ -197,7 +197,7 @@
 | G2 | **NAT 行为分类（多 STUN 观测）** | **已落地（t10）**：`native/nat_behavior.py`；只访问用户显式配置的观测点 | transport-engineer | `ls p2pchat/native/nat_behavior.py` | **L1**（受控多 STUN 应答端点）；真实家宽 = **L4 NOT_RUN** |
 | G3 | **对称 NAT 端口预测** | **已落地（t18）+ 已接入连接流程（t21）**：`native/port_prediction.py`；默认关闭，仅对称型启用 | transport-engineer / traversal-engineer | `ls p2pchat/native/port_prediction.py` | **L1**（受控端点）；真实对称 NAT = **L4 NOT_RUN**；命中率有限，失败是正常结果 |
 | G4 | **网关放行接线到产品** | **已落地（t14）**：适配器 `gateway_capability/map/pinhole/renew/release` + 桌面 `gateway_open_port/close_port` + 设置面板入口；默认关闭 + 显式同意 | platform-engineer | `grep -rn "gateway_map\|gateway_open_port" p2pchat/native/adapter.py p2pchat/python_desktop/` | **L0/L1**（受控回环 mock + 平台能力核对，读出默认网关）；真实路由器 = **L4 NOT_RUN** |
-| G5 | **安卓原生 Kotlin** | **第一阶段已落地（t46）**：业务逻辑全在 Kotlin（11 个 `.kt`），协议按 `peer.py`/`core.js` 对齐并有 JVM 单测；Capacitor 版保留 | platform-engineer | `find p2pchat/android-native -name '*.kt' \| wc -l` | **构建与真机运行 NOT_RUN**：本机无 SDK/JDK21，CI 只跑 JVM 单测与 AAR 校验；真机 DataChannel 需用户实测 |
+| G5 | **安卓原生 Kotlin** | **第一阶段已落地（t46）**：业务逻辑全在 Kotlin（12 个 `.kt` 主源码），协议按 `peer.py`/`core.js` 对齐并有 JVM 单测；Capacitor 版保留 | platform-engineer | `find p2pchat/android-native -name '*.kt' \| wc -l` | **构建已由 CI 与本机验证；模拟器启动已验证并修掉一处启动闪退**（根因：WebRTC 未初始化就建工厂；已加静态护栏随 CI 跑）；**真机 DataChannel 与真实麦克风仍需用户实测** |
 | G6 | **Windows 桌面实机** | **PENDING**（新版 Python+Qt 桌面的 Windows CI 结果待 captain 推送后确认；历史成功记录属于**已删除的 Electron 版**，不可继承） | captain / platform-engineer | `.github/workflows/build.yml` 的 Windows job 结论 | CI runner ≠ 用户机器；GUI/防火墙实机 NOT_RUN |
 | G7 | **macOS 打包** | **未验证** | platform-engineer | `ls p2pchat/tools/build-desktop-macos.sh` | 脚本存在不等于产物可用 |
 | G8 | **TURN / 中继** | **永久禁用（不是缺口）** | — | `grep -rn "turn:" p2pchat/web p2pchat/native p2pchat/peer.py p2pchat/server.py` | 应无 `turn:` 配置；出现即回归 |
@@ -248,7 +248,7 @@ grep -n '^METHODS' p2pchat/native/adapter.py         # 43:METHODS = ("udp-probe"
 grep -n 'PROFILES' p2pchat/backend/protocol.py       # 3 个 ICE profile
 ls p2pchat/native/lan_discovery.py p2pchat/native/nat_behavior.py p2pchat/native/port_prediction.py   # 三个都存在（G1/G2/G3 已落地）
 ls p2pchat/python_desktop/qt_ui.py; ls p2pchat/python_desktop/ui.py   # qt_ui.py 在；ui.py: No such file（G9 已落地并复审 pass）
-find p2pchat/android-native -name '*.kt' | wc -l     # 11（G5 第一阶段已落地；构建/真机仍 NOT_RUN）
+find p2pchat/android-native -name '*.kt' | wc -l     # 14（G5：本机/CI 构建与模拟器启动已验证；真机 DataChannel 仍 NOT_RUN）
 grep -rn "EventSource\|/events" p2pchat/web/         # NO_SSE_CLIENT（G10 仍是缺口）
 grep -c "turn:" p2pchat/web/* p2pchat/native/*.py p2pchat/peer.py p2pchat/server.py 2>/dev/null | paste -sd' '   # 每个文件计数 0
 .venv/bin/python -m pytest p2pchat/tests/desktop/test_methods_copy.py -q   # 21 passed
