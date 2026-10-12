@@ -46,11 +46,11 @@ class GatewayPolicy:
             raise NotImplementedError("LOCAL_GATEWAY_VALIDATION_UNAVAILABLE")
         # Read-only OS routing evidence; no shell, route mutation, or trusting an arbitrary URL.
         if gateway.version == 4:
-            routes = Path("/proc/net/route").read_text().splitlines()[1:]
+            routes = Path("/proc/net/route").read_text(encoding="utf-8").splitlines()[1:]
             expected = socket.inet_aton(str(gateway))[::-1].hex().upper()
             valid = any(len(fields := row.split()) > 3 and fields[2] == expected and int(fields[3], 16) & 2 for row in routes)
         else:
-            routes = Path("/proc/net/ipv6_route").read_text().splitlines()
+            routes = Path("/proc/net/ipv6_route").read_text(encoding="utf-8").splitlines()
             valid = any(len(fields := row.split()) >= 10 and fields[4] == gateway.packed.hex()
                         and int(fields[8], 16) & 2 for row in routes)
         if not valid:

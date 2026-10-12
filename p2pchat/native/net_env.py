@@ -30,6 +30,21 @@ What it never does
   meaning marker and is never presented as chat latency. A local address/route
   observation is never presented as NAT evidence.
 
+Encoding and clock discipline (platform portability)
+----------------------------------------------------
+* Every file this module reads uses an explicit ``encoding=``, and the one subprocess
+  on its path (``ip -6 addr show``, the command t48 prefers) is invoked with an
+  explicit ``encoding="utf-8", errors="replace"``, so
+  ``-X warn_default_encoding -W error::EncodingWarning`` stays clean. t48's own
+  ``run_ip_command``/``ipconfig`` calls still pass ``text=True`` without an encoding;
+  that file is outside this task's scope, so this module supplies the explicit version
+  for the primary path and delegates to t48's chain only for its remaining fallbacks
+  (getifaddrs, ipconfig).
+* Reported durations (``probeRttMs``, ``durationMs``) use ``time.perf_counter``.
+  ``time.monotonic`` on Windows ticks at ~15.6 ms, so measuring a sub-millisecond
+  loopback round trip with it reports exactly ``0.0`` ms; the coarse clock is still
+  used for budget limits and rate windows, where one tick does not matter.
+
 Honesty vocabulary
 ------------------
 ``determined``             - measured; the reason names the measurement
@@ -45,15 +60,20 @@ inbound IPv6 can only be confirmed on a real home network (see ``unmeasured``).
 
 Center-log reporting
 --------------------
-``NetEnvReport.center_events(...)`` returns events that satisfy the existing
-allowlist in ``backend/telemetry.py`` (exact envelope keys, allowlisted data keys,
-<= 30 events, <= 2048 bytes each); the tests validate every event through
-``backend.telemetry.validate_event``. Because that allowlist has no field for
-net-environment semantics, the inference detail (mapping/filtering, address
-stability, NAT64 signs) currently stays local: ``center_report()`` carries it with
-``ingest.localOnlyFields`` and ``ingest.allowlistFieldsNeeded`` naming the exact
-extra keys an ingest allowlist change would need. This module does not edit that
-shared allowlist and does not smuggle the detail into unrelated fields.
+``NetEnvReport.center_events(...)`` returns events that satisfy the allowlist in
+``backend/telemetry.py`` (exact envelope keys, allowlisted data keys, <= 30 events,
+<= 2048 bytes each); the tests validate every event through
+``backend.telemetry.validate_event``. The **first** event (``client.boot``) also carries
+this check's conclusion under the ten ``netEnv*`` keys the receiving allowlist now
+provides (``center_summary()``): overall/component/status, the bounded reason list, the
+real address-stability word (including ``not-global``), NAT64 conclusion, first
+recommendation, the bounded unmeasured list, and mapping/filtering **only** when
+nat_behavior really classified them. Nothing localOnly is projected (raw records,
+gateway address, interface names, NAT mapping/filtering evidence, inbound
+verdict/note, NAT64 signs, UDP bindings, errors); anything not measured is omitted
+rather than guessed, and a value that would not fit the receiving vocabulary raises
+``NetEnvError("SUMMARY_NOT_ALLOWLISTED")`` here instead of being silently dropped
+there. This module still does not edit the shared allowlist.
 """
 from __future__ import annotations
 
@@ -61,8 +81,10 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import re
 import socket
 import struct
+import subprocess
 import sys
 import time
 import uuid
@@ -135,10 +157,57 @@ LOCAL_ONLY_FIELDS = (
     "natBehavior.filtering", "natBehavior.mappingEvidence", "natBehavior.filteringEvidence",
     "inboundReachability.verdict", "inboundReachability.note", "nat64.signs", "udpEgress.bindings", "errors",
 )
+# t58's refusal-style conclusions (server-reported) plus its "could not read the word"
+# outcome: each keeps its own name here, so none of them degrades into the generic
+# UNKNOWN_REACH_VERDICT fallback (which would silently drop the meaning). Spellings are
+# verbatim from ``ipv6_reach.VERDICTS`` / the server's ``INBOUND_CHECK_LOG``.
+INBOUND_REFUSAL_OUTCOMES = {
+    "CONNECTION_REFUSED": (DETERMINED, "INBOUND_CONNECTION_REFUSED",
+                           "对端回连被本机端口拒绝（本机没有监听或地址已变）：不当作可达，也不是入站被墙的结论"),
+    "TOKEN_MISMATCH": (DETERMINED, "INBOUND_TOKEN_MISMATCH",
+                       "有人应答但没有带回本次一次性 token：不当作可达"),
+    "REJECTED_BY_POLICY": (DETERMINED, "SERVER_REFUSED_BY_POLICY",
+                           "对端按自身策略拒绝回连，本次没有测到入站"),
+    "RESULT_UNRECOGNIZED": (INSUFFICIENT, "UNRECOGNIZED_REACH_VERDICT",
+                            "对端回报的结论无法识别；看不懂就不猜，不做任何推断"),
+}
 ALLOWLIST_FIELDS_NEEDED = (
     "netEnvOverall", "netEnvComponent", "netEnvStatus", "netEnvReason", "netEnvMapping", "netEnvFiltering",
     "netEnvAddressStability", "netEnvNat64", "netEnvRecommendation", "netEnvUnmeasured",
 )
+# Bounds of the summary projection: same numbers the receiving allowlist enforces
+# (backend/telemetry.py LIST_KEYS). The reason cap is 8 (one per component plus slack)
+# and a token segment may be 48 characters, because this module's own real codes reach
+# 40 (`ALTERNATE_ADDRESS_MUST_DIFFER_IN_ADDRESS`), followed by
+# `INSUFFICIENT_ADDRESS_OR_ROUTE_EVIDENCE` (38) and `ROUTE_TABLE_UNREADABLE_ON_PLATFORM`
+# (34, only on the non-Linux path, i.e. always on Windows). A 32-char cap rejected
+# every real Windows report at the receiver.
+MAX_SUMMARY_REASONS = 8
+MAX_SUMMARY_UNMEASURED = 8
+# Same token shape the ingest allowlist enforces for `netEnvReason`/`netEnvNat64`: each
+# segment starts with a letter, <=48 characters, at most 3 segments
+# (`component:status:code`). It cannot hold an address (digits first, dots, empty
+# segments are all refused) and it cannot hold free text.
+SUMMARY_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,47}(?::[A-Za-z][A-Za-z0-9_-]{0,47}){0,2}$")
+#: A whole segment of bare hex is a token/hash shape, never a reason code (same rule and
+#: same threshold as the receiver's NET_ENV_PURE_HEX).
+SUMMARY_PURE_HEX = re.compile(r"^[0-9a-f]{8,}$")
+# nat_behavior's own words (never invent one: `undetermined` stays `undetermined`).
+NAT_BEHAVIOR_WORDS = frozenset({
+    nat.MAPPING_ENDPOINT_INDEPENDENT, nat.MAPPING_ADDRESS_DEPENDENT, nat.MAPPING_ADDRESS_AND_PORT_DEPENDENT,
+    nat.FILTERING_ENDPOINT_INDEPENDENT, nat.FILTERING_ADDRESS_DEPENDENT, nat.FILTERING_ADDRESS_AND_PORT_DEPENDENT,
+    nat.UNDETERMINED})
+# `AddressRecord.stability()` values, including the `not-global` tier.
+ADDRESS_STABILITY_WORDS = ("stable", "temporary", "unverified", "not-global")
+
+
+def summary_token_ok(value):
+    """Is this a reason-code token the receiving allowlist would keep?
+
+    Same two rules as the receiver: the ``SUMMARY_TOKEN`` shape and the pure-hex
+    exclusion (a bare hex segment is a token/hash, never a reason code).
+    """
+    return isinstance(value, str) and bool(SUMMARY_TOKEN.match(value)) and not SUMMARY_PURE_HEX.match(value)
 
 
 class NetEnvError(ValueError):
@@ -443,8 +512,15 @@ class Sources:
     nat_probe: Callable[..., Any] | None = None
     udp_binding: Callable[..., Any] | None = None
     reach_probe: Callable[..., Any] | None = None
+    reach_provider: Callable[[], Any] | None = None
+    reach_route_check: Callable[[], Any] | None = None
     reach_module: Any = None
     monotonic: Callable[[], float] = time.monotonic
+    # Durations that are *reported* use a high-resolution clock: on Windows
+    # time.monotonic() ticks at ~15.6 ms, so a sub-millisecond loopback round trip
+    # measured with it is exactly 0.0 ms (observed in CI). Limits and deadlines keep
+    # using `monotonic`, which tests also inject.
+    perf_counter: Callable[[], float] = time.perf_counter
     wall: Callable[[], float] = time.time
 
 
@@ -521,9 +597,82 @@ class NetEnvReport:
                           "interfaceNames": "sha256-prefix-tag", "credentials": "never-included",
                           "probeRtt": "probe-round-trip-only-not-chat-latency"},
             "ingest": {"envelope": "p2pobs telemetry v1", "eventsEmittedBy": "center_events()",
+                       "summaryEmittedBy": "center_summary()", "summaryEvent": "client.boot",
                        "localOnlyFields": list(LOCAL_ONLY_FIELDS),
                        "allowlistFieldsNeeded": list(ALLOWLIST_FIELDS_NEEDED)},
         }
+
+    def address_stability(self):
+        """The real stability word of the best global IPv6 address this host offers.
+
+        Same preference as ``select_address`` (stable > unverified > temporary).
+        ``not-global`` is returned when address enumeration really happened and found no
+        usable global IPv6 address; when addresses were never enumerated there is no
+        measurement to report, so ``None`` is returned and the summary omits the key
+        instead of claiming a scope fact that was not observed.
+        """
+        component = self.components.get("addresses")
+        if component is None or component.status != DETERMINED:
+            return None
+        records = [record for record in component.detail.get("records", [])
+                   if record.get("family") == 6 and record.get("isGlobal") and not record.get("deprecated")]
+        for word in ("stable", "unverified", "temporary"):
+            if any(record.get("stability") == word for record in records):
+                return word
+        return "not-global"
+
+    def center_summary(self):
+        """This check's conclusion under the ten allowlisted ``netEnv*`` keys.
+
+        Values are the report's own words (no translation, no invention): statuses from
+        ``STATUSES``/``RECOMMENDATION_STATUSES``, mapping/filtering from nat_behavior's
+        vocabulary (``undetermined`` stays ``undetermined``), the real
+        ``AddressRecord.stability()``, the module's NAT64 reason, the first
+        recommendation and the bounded unmeasured list. Unmeasured NAT behaviour is
+        omitted (not-tested is not the same as undetermined), the reason list is capped
+        at ``MAX_SUMMARY_REASONS`` and unmeasured at ``MAX_SUMMARY_UNMEASURED``, and no
+        localOnly field is ever projected. A value that would not fit the receiving
+        vocabulary raises instead of being dropped downstream.
+
+        ``SUMMARY_TOKEN`` mirrors the receiving shape exactly (<=48 characters per
+        segment, at most 3 segments, no pure-hex segment): this module's longest real
+        code is 40 characters, so no real reason is dropped, and a code the receiver
+        could not carry is **omitted** here rather than truncated, renamed or replaced
+        (the full list stays in ``center_report()['overall']['reasons']``).
+        """
+        center = self.center_report()
+        components = center["components"]
+        names = [name for name in COMPONENTS if name in components]
+        first = "addresses" if "addresses" in names else (names[0] if names else None)
+        data = {"netEnvOverall": center["overall"].get("status")}
+        if first is not None:
+            data["netEnvComponent"] = first
+            data["netEnvStatus"] = components[first].get("status")
+        reasons = [reason for reason in center["overall"].get("reasons", [])
+                   if summary_token_ok(reason)][:MAX_SUMMARY_REASONS]
+        if not reasons and first is not None:
+            fallback = components[first].get("reason")
+            if summary_token_ok(fallback):
+                reasons = [fallback]
+        if reasons:
+            data["netEnvReason"] = reasons
+        stability = self.address_stability()
+        if stability is not None:
+            data["netEnvAddressStability"] = stability
+        nat64 = components.get("nat64", {}).get("reason")
+        if isinstance(nat64, str) and nat64:
+            data["netEnvNat64"] = nat64
+        if center["recommendations"]:
+            data["netEnvRecommendation"] = center["recommendations"][0].get("method")
+        unmeasured = [code for code in center["unmeasured"] if isinstance(code, str) and code][:MAX_SUMMARY_UNMEASURED]
+        if unmeasured:
+            data["netEnvUnmeasured"] = unmeasured
+        detail = self.components["natBehavior"].detail if "natBehavior" in self.components else {}
+        for key, field_name in (("netEnvMapping", "mapping"), ("netEnvFiltering", "filtering")):
+            word = detail.get(field_name)
+            if isinstance(word, str) and word in NAT_BEHAVIOR_WORDS:
+                data[key] = word
+        return _validate_summary(data)
 
     def center_events(self, *, session, connection_id=None, attempt_id=None, start_seq=0, now_ms=None):
         """Schema-valid telemetry events (allowlisted keys only) for the central log.
@@ -541,9 +690,14 @@ class NetEnvReport:
         * ``client.error``- the UDP path failed at the OS level, or no entry point
           could be observed at all.
 
-        The NAT mapping/filtering inference, address stability and NAT64 signs are NOT
-        encoded here: the ingest allowlist has no field for them, and inventing one out
-        of an unrelated enum would be a mislabel (see ``center_report()['ingest']``).
+        This check's conclusion rides on the **first** event (``client.boot``) under the
+        ten ``netEnv*`` keys (see ``center_summary()``): overall/component/status, the
+        bounded reason list, the real address-stability word, NAT64, the first
+        recommendation and the bounded unmeasured list - plus mapping/filtering only
+        when nat_behavior really classified them. The NAT mapping/filtering *evidence*,
+        address records, gateway, interface names, inbound verdict/note, NAT64 signs,
+        UDP bindings and errors stay local and are never emitted (see
+        ``center_report()['ingest']['localOnlyFields']``).
         """
         _validate_uuid(session, "session")
         for value, name in ((connection_id, "connectionId"), (attempt_id, "attemptId")):
@@ -566,7 +720,7 @@ class NetEnvReport:
         family = 4 if summary.get("ipv4") else (6 if summary.get("ipv6") else "unknown")
         egress = self.components["udpEgress"]
         emit("client.boot", {"family": family, "protocol": "udp",
-                             "canMessage": egress.status == DETERMINED, "ok": True})
+                             "canMessage": egress.status == DETERMINED, "ok": True, **self.center_summary()})
         if egress.status == DETERMINED:
             emit("probe.ack", {"family": egress.detail.get("family", family), "protocol": "udp",
                                "rttMs": egress.detail.get("probeRttMs"), "ok": True})
@@ -606,11 +760,86 @@ def _validate_uuid(value, name):
         raise NetEnvError("INVALID_IDENTITY") from None
 
 
+def _validate_summary(data):
+    """Refuse to emit a summary the receiving allowlist would reject or drop.
+
+    The receiver is strict: an out-of-vocabulary value is rejected, and its non-strict
+    path would drop the key silently, which would make "not reported" look like
+    "reported as something else". Failing here keeps that from ever happening, and the
+    key set is pinned to ``ALLOWLIST_FIELDS_NEEDED`` so a localOnly field cannot ride
+    along by accident.
+    """
+    if set(data) - set(ALLOWLIST_FIELDS_NEEDED):
+        raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    for key in ("netEnvOverall", "netEnvStatus"):
+        if key in data and data[key] not in set(STATUSES) | set(RECOMMENDATION_STATUSES):
+            raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    if "netEnvComponent" in data and data["netEnvComponent"] not in COMPONENTS:
+        raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    for key in ("netEnvMapping", "netEnvFiltering"):
+        if key in data and data[key] not in NAT_BEHAVIOR_WORDS:
+            raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    if "netEnvAddressStability" in data and data["netEnvAddressStability"] not in ADDRESS_STABILITY_WORDS:
+        raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    if "netEnvRecommendation" in data and data["netEnvRecommendation"] not in METHOD_ORDER:
+        raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    reasons = data.get("netEnvReason")
+    if reasons is not None and (not isinstance(reasons, list) or not 0 < len(reasons) <= MAX_SUMMARY_REASONS
+                                or not all(summary_token_ok(item) for item in reasons)):
+        raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    unmeasured = data.get("netEnvUnmeasured")
+    codes = {code for code, _ in UNMEASURED}
+    if unmeasured is not None and (not isinstance(unmeasured, list)
+                                   or not 0 < len(unmeasured) <= MAX_SUMMARY_UNMEASURED
+                                   or not all(isinstance(item, str) and item in codes for item in unmeasured)):
+        raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    nat64 = data.get("netEnvNat64")
+    if nat64 is not None and not summary_token_ok(nat64):
+        raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    for key in ("netEnvOverall", "netEnvComponent", "netEnvStatus", "netEnvRecommendation",
+                "netEnvNat64", "netEnvUnmeasured"):
+        if key not in data:
+            raise NetEnvError("SUMMARY_NOT_ALLOWLISTED")
+    return data
+
+
 # --------------------------------------------------------------- sub-probes
+def run_ip_show_explicit_encoding():
+    """`ip -6 addr show` with an explicit encoding; None when the command is unusable.
+
+    This module must not introduce an implicit-encoding subprocess. t48's
+    ``ipv6_reach.run_ip_command()`` passes ``text=True`` without ``encoding=``, so the
+    primary enumeration path is invoked here with the same command list and the same
+    2 s bound, but with the encoding made explicit and undecodable bytes replaced.
+    Parsing stays t48's (``parse_ip_addr_output``), and when this command is not
+    available the caller falls back to t48's full chain (getifaddrs, then ipconfig on
+    Windows) instead of guessing.
+    """
+    for command in (["ip", "-6", "addr", "show"], ["ip", "addr", "show"]):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False,
+                                    encoding="utf-8", errors="replace")
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and "inet6" in (result.stdout or ""):
+            return result.stdout
+    return None
+
+
+def default_ipv6_provider(module):
+    """Records from `ip` with an explicit encoding, else t48's own fallback chain."""
+    def provider():
+        text = run_ip_show_explicit_encoding()
+        if text is not None:
+            return module.parse_ip_addr_output(text)
+        return module.enumerate_addresses()
+    return provider
+
+
 def _addresses_component(config, sources, errors):
     v4_provider = sources.ipv4_addresses or (linux_ipv4_addresses if sources.platform.startswith("linux") else None)
     module = sources.reach_module if sources.reach_module is not None else reach
-    v6_provider = sources.ipv6_addresses or (module.enumerate_addresses if module is not None else None)
+    v6_provider = sources.ipv6_addresses or (default_ipv6_provider(module) if module is not None else None)
     v4_raw = v4_provider() if v4_provider is not None else None
     v6_raw = v6_provider() if v6_provider is not None else None
     if v4_raw is None and v6_raw is None:
@@ -707,7 +936,7 @@ async def _udp_egress(config, sources, budget, errors):
             if family == 6:
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             sock.setblocking(False)
-            started = budget.monotonic()
+            started = sources.perf_counter()
             try:
                 sock.bind((host, 0))
                 allowance = min(config.udp_probe_timeout, budget.remaining())
@@ -715,7 +944,8 @@ async def _udp_egress(config, sources, budget, errors):
                 answered += 1
                 mapped = result.get("address")
                 bindings.append({"family": family, "scope": classify_scope(mapped) if mapped else "unknown",
-                                 "probeRttMs": round((budget.monotonic() - started) * 1000, 3),
+                                 "probeRttMs": round((sources.perf_counter() - started) * 1000, 3),
+                                 "probeRttClock": "perf_counter",
                                  "requestBytes": 20, "pointPort": point.port,  # RFC5389 header only
                                  "observation": result.get("observation", "mapped-address-only-not-nat-type")})
             except asyncio.TimeoutError:
@@ -732,6 +962,7 @@ async def _udp_egress(config, sources, budget, errors):
     if answered:
         detail["family"] = bindings[0]["family"]
         detail["probeRttMs"] = bindings[0]["probeRttMs"]
+        detail["probeRttClock"] = bindings[0]["probeRttClock"]
         return _component("udpEgress", DETERMINED, "UDP_OUTBOUND_CONFIRMED",
                           f"{answered}/{attempts} 个观测点回了包，UDP 出站可用", detail)
     if not attempts:
@@ -821,7 +1052,16 @@ async def _inbound_component(config, sources, budget, errors):
                                   session=config.session,
                                   timeout=min(8.0, max(MIN_COMPONENT_TIMEOUT, budget.remaining())),
                                   allow_temporary=config.allow_temporary)
-        result = await asyncio.wait_for(probe(options), budget.remaining())
+        # t48's probe enumerates addresses and reads the route itself by default; the
+        # injection seams let this module (and its tests) supply deterministic inputs
+        # instead of a host subprocess, without changing the production defaults.
+        extra = {}
+        if sources.reach_probe is None:
+            if sources.reach_provider is not None:
+                extra["provider"] = sources.reach_provider
+            if sources.reach_route_check is not None:
+                extra["route_check"] = sources.reach_route_check
+        result = await asyncio.wait_for(probe(options, **extra), budget.remaining())
     except asyncio.TimeoutError:
         errors.append("REACH_PROBE_TIMEOUT")
         return _component("inboundReachability", UNAVAILABLE, "TOTAL_BUDGET_EXCEEDED", "入站回连探测超出总时长预算")
@@ -848,6 +1088,10 @@ async def _inbound_component(config, sources, budget, errors):
         if verdict == getattr(module, "TIMEOUT", "TIMEOUT"):
             return _component("inboundReachability", INSUFFICIENT, "INBOUND_NOT_PROVEN",
                               "没有观测到回连；这不能证明入站被封锁（也可能是路由或对端问题）", detail)
+        outcome = INBOUND_REFUSAL_OUTCOMES.get(verdict)
+        if outcome is not None:
+            status, reason, evidence = outcome
+            return _component("inboundReachability", status, reason, evidence, detail)
     return _component("inboundReachability", INSUFFICIENT, "UNKNOWN_REACH_VERDICT",
                       "入站探测返回了未知结论；不做任何推断", detail)
 
@@ -998,6 +1242,7 @@ async def health_check(config=None, *, sources=None):
     config = (config or NetEnvConfig()).validate()
     sources = sources or Sources()
     budget = _Budget(config.total_budget_seconds, sources.monotonic)
+    started = sources.perf_counter()  # reported duration: never the coarse budget clock
     errors: list = []
     checked_at_ms = sources.wall() * 1000
     addresses, records = _addresses_component(config, sources, errors)
@@ -1013,7 +1258,7 @@ async def health_check(config=None, *, sources=None):
     components = {"addresses": addresses, "routes": routes, "udpEgress": udp, "natBehavior": nat_component,
                   "inboundReachability": inbound, "ipv6Only": ipv6_only_component, "nat64": nat64}
     return NetEnvReport(components=components, recommendations=_recommend(addresses, routes, nat_component, inbound),
-                        overall=_overall(components), duration_ms=budget.elapsed() * 1000,
+                        overall=_overall(components), duration_ms=(sources.perf_counter() - started) * 1000,
                         checked_at_ms=checked_at_ms,
                         config_view={"observationPointCount": len(config.observation_points),
                                      "inboundProbe": config.inbound_probe, "consent": config.consent,

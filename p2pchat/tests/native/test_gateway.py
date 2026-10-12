@@ -99,7 +99,9 @@ def test_gateway_platform_validation_fail_closed(monkeypatch, platform):
     import p2pchat.native.gateway as module
     monkeypatch.setattr(module.sys, "platform", platform)
     # No host route probing needed: deterministic empty Linux routing fixture.
-    monkeypatch.setattr(module.Path, "read_text", lambda self: "Iface Destination Gateway Flags\n")
+    # The stub accepts the explicit encoding= the production call site now passes.
+    monkeypatch.setattr(module.Path, "read_text",
+                        lambda self, **_kwargs: "Iface Destination Gateway Flags\n")
     with pytest.raises(PermissionError, match="GATEWAY_OPT_IN_REQUIRED"):
         GatewayPolicy("198.51.100.77", "127.0.0.1").validate()
     if platform == "linux":
