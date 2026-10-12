@@ -95,13 +95,25 @@ for module in ('av', 'cryptography', 'aioquic', 'aiortc', 'pylibsrtp'):
     except Exception:
         pass
 
-# Qt: the PySide6 hook picks up libQt6*.so and PySide6/Qt/plugins. Record where
-# those live so the post-build check below can prove the platform plugin shipped.
+# Qt: the PySide6 hook picks up libQt6*.so and the platform plugins. Which
+# directory holds them depends on the wheel: PySide6 ships them either under
+# ``Qt/plugins`` or directly under ``plugins``, and the layout differs between
+# Linux and Windows. Probe both instead of assuming one, so a Windows build does
+# not fail on a path that only exists on Linux.
 QT_PLUGIN_ROOT = None
+QT_PLUGIN_CANDIDATES = []
 try:
     import PySide6
 
-    QT_PLUGIN_ROOT = os.path.join(os.path.dirname(PySide6.__file__), 'Qt', 'plugins')
+    _pyside_dir = os.path.dirname(PySide6.__file__)
+    QT_PLUGIN_CANDIDATES = [
+        os.path.join(_pyside_dir, 'Qt', 'plugins'),
+        os.path.join(_pyside_dir, 'plugins'),
+    ]
+    QT_PLUGIN_ROOT = next(
+        (path for path in QT_PLUGIN_CANDIDATES if os.path.isdir(os.path.join(path, 'platforms'))),
+        None,
+    )
 except Exception:
     QT_PLUGIN_ROOT = None
 
@@ -174,24 +186,46 @@ coll = COLLECT(
     name='p2p-desktop',
 )
 
-# Prove the Qt platform plugin really shipped: without libqxcb.so the packaged
-# GUI cannot start, and a silent hook miss would only show up on the user's box.
-PLATFORM_PLUGIN = os.path.join(DISTPATH, 'p2p-desktop', '_internal', 'PySide6', 'Qt', 'plugins', 'platforms')
-if QT_PLUGIN_ROOT:
-    expected = sorted(
-        name for name in os.listdir(os.path.join(QT_PLUGIN_ROOT, 'platforms')) if name.endswith('.so')
+# Prove the Qt platform plugin really shipped: without the platform plugin the
+# packaged GUI cannot start, and a silent hook miss would only show up on the
+# user's box. Probe both bundle layouts (.so on Linux, .dll on Windows) and fail
+# with the probed paths instead of quietly collecting nothing.
+_BUNDLE_INTERNAL = os.path.join(DISTPATH, 'p2p-desktop', '_internal')
+BUNDLE_PLUGIN_CANDIDATES = [
+    os.path.join(_BUNDLE_INTERNAL, 'PySide6', 'Qt', 'plugins', 'platforms'),
+    os.path.join(_BUNDLE_INTERNAL, 'PySide6', 'plugins', 'platforms'),
+]
+PLATFORM_PLUGIN = next((path for path in BUNDLE_PLUGIN_CANDIDATES if os.path.isdir(path)), None)
+if PLATFORM_PLUGIN is None:
+    raise SystemExit(
+        'QT PLATFORM PLUGIN DIRECTORY NOT FOUND in the bundle. Probed: '
+        + ', '.join(BUNDLE_PLUGIN_CANDIDATES)
+        + ' (bundle internal dir: '
+        + (', '.join(sorted(os.listdir(_BUNDLE_INTERNAL))) if os.path.isdir(_BUNDLE_INTERNAL) else 'missing')
+        + ')'
     )
-    found = sorted(name for name in os.listdir(PLATFORM_PLUGIN) if name.endswith('.so')) if os.path.isdir(PLATFORM_PLUGIN) else []
-    missing = [name for name in expected if name not in found]
-    if not found or missing:
-        raise SystemExit(
-            'QT PLATFORM PLUGINS MISSING in the bundle: '
-            + (', '.join(missing) if missing else 'none found')
-            + f' (bundle dir: {PLATFORM_PLUGIN})'
-        )
-    license_dir = os.path.join(DISTPATH, 'p2p-desktop', '_internal', 'licenses')
-    if not os.path.isdir(license_dir):
-        raise SystemExit(f'LGPL license texts missing from the bundle: {license_dir}')
+if QT_PLUGIN_ROOT is None:
+    raise SystemExit(
+        'QT PLUGIN DIRECTORY NOT FOUND in the installed PySide6. Probed: '
+        + ', '.join(QT_PLUGIN_CANDIDATES or ['<PySide6 import failed>'])
+        + ' — refusing to build a bundle whose platform plugin was never collected.'
+    )
+expected = sorted(
+    name
+    for name in os.listdir(os.path.join(QT_PLUGIN_ROOT, 'platforms'))
+    if name.endswith(('.so', '.dll'))
+)
+found = sorted(name for name in os.listdir(PLATFORM_PLUGIN) if name.endswith(('.so', '.dll')))
+missing = [name for name in expected if name not in found]
+if not found or missing:
+    raise SystemExit(
+        'QT PLATFORM PLUGINS MISSING in the bundle: '
+        + (', '.join(missing) if missing else 'none found')
+        + f' (bundle dir: {PLATFORM_PLUGIN})'
+    )
+license_dir = os.path.join(_BUNDLE_INTERNAL, 'licenses')
+if not os.path.isdir(license_dir):
+    raise SystemExit(f'LGPL license texts missing from the bundle: {license_dir}')
 
 # The generated entry script is throwaway build input, not a source file.
 try:

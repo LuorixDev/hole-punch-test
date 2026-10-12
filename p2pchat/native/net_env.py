@@ -170,6 +170,12 @@ INBOUND_REFUSAL_OUTCOMES = {
                            "对端按自身策略拒绝回连，本次没有测到入站"),
     "RESULT_UNRECOGNIZED": (INSUFFICIENT, "UNRECOGNIZED_REACH_VERDICT",
                             "对端回报的结论无法识别；看不懂就不猜，不做任何推断"),
+    # t58's parser-level failures, in case a caller hands us the error code itself:
+    # each keeps its own name instead of degrading into the generic fallback.
+    "UNRECOGNIZED_REACH_CODE": (INSUFFICIENT, "UNRECOGNIZED_REACH_CODE",
+                                "对端码不在共同词表里；看不懂就不猜，既不当作成功也不当作拒绝"),
+    "INCONSISTENT_REACH_VERDICT": (INSUFFICIENT, "INCONSISTENT_REACH_VERDICT",
+                                   "对端字段自相矛盾；不挑一个当作结论"),
 }
 ALLOWLIST_FIELDS_NEEDED = (
     "netEnvOverall", "netEnvComponent", "netEnvStatus", "netEnvReason", "netEnvMapping", "netEnvFiltering",

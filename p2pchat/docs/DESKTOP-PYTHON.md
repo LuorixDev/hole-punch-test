@@ -283,3 +283,18 @@ CI 不安装锁文件（它装 requirements.txt + constraints.txt），这一点
 - 不把 ICE 的三种地址组合说成三种独立协议（它们是同一个 WebRTC 协议的地址族策略）；
 - 不把同机或模拟结果当成真实家宽证据；
 - 不静默改走其它通道：直连不成功就是失败，界面按用户能懂的话说明原因。
+
+## 构建记录：产物与源码的绑定
+
+打包产物不入库（体积数百 MB），但它的身份写在 `python_desktop/evidence/desktop-build.json` 里，可据此核对任意一份产物或截图：
+
+| 项 | 值 |
+|---|---|
+| sourceCommit | `a58943f9d0604c7ecc6ac56f0717884cb30192c9`（构建时工作树 有未提交改动，故以 sourceTree 为准） |
+| sourceTree | `sha256:85dfb5816732fa1a6c91bc7b1b772ef5f8f00fa899e91e0fc9df1d303cda23c3`（770 个 `.py/.spec/.md/.txt`，排除 releases/review/verification/ci/dist-web） |
+| 可执行文件 sha256 | `053738d965e83ae639ef34fe569395f36800d479e2ec43be9f75b3a12fee742c`（5247536 字节） |
+| 整包树哈希 | `sha256:a94398bc19f8cf4e5cf5d763868bb0735991642d909f66f9f9560b6ac2c22310`（453 个文件 / 514588218 字节） |
+| 产物自检 | `--capabilities` exit 0；`--self-test` exit 0（文本+回显、65536 字节文件校验、数据通道往返 0.5ms、应用层 75.18 Mbps、STUN 观测） |
+
+截图 `evidence/qt-7-packaged-connect.jpg`（sha256 `d90326c2d8e46fab…`）来自**该产物**运行时的窗口，不是源码直跑的窗口。
+连接后的截图未产出：它需要真实对端会话；预览态截图 `evidence/qt-2-attempt-preview.png` 明确标为预览用途，不作为流程证据。

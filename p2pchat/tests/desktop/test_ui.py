@@ -386,7 +386,12 @@ def test_headless_startup_reports_missing_display(monkeypatch, capsys) -> None:
 
 
 def test_attempt_screen_lists_all_nine_methods_before_connecting(qt_app) -> None:
-    """没有连接/没有对端时，第 2 屏也要按文档顺序列出九种方式（状态=等待中）。"""
+    """没有连接/没有对端时，第 2 屏也要按文档顺序列出九种方式（状态=等待中）。
+
+    复审 F5 之后这里改成：可用性**不再硬编码 "—"**，而是取引擎能力视图的文档词表
+    三值（可用/不可用/不支持），且不可用/不支持必须给出原因；状态与实测延迟仍如实
+    「等待中 / —」（未连接时不猜数字）。
+    """
     window = qt_ui.DesktopApp(app=qt_app)
     try:
         assert window.engine is None
@@ -398,11 +403,207 @@ def test_attempt_screen_lists_all_nine_methods_before_connecting(qt_app) -> None
             assert method["explain"] in item.text(0)
             assert "可行网络：" + method["works"] in item.text(0)
             assert item.text(1) == "等待中"
-            # 没有引擎就不能猜可用性/延迟。
-            assert item.text(2) == "—"
+            # 可用性必须是文档词表里的词，而不是自造的「—」。
+            assert item.text(2) in {"可用", "不可用", "不支持"}, (index, item.text(2))
+            # 未连接就是没测过：不能报任何延迟数字。
             assert item.text(3) == "—"
+        rows = window._preview_summary()["rows"]
+        assert [row["title"] for row in rows] == [m["title"] for m in plain.METHODS]
+        for row in rows:
+            assert row["availability"] in {"可用", "不可用", "不支持"}, row
+            if row["availability"] != "可用":
+                assert row["detail"].strip(), f"{row['title']} 说不可用/不支持却没有原因"
+            assert row["latency"] is None
         assert window.settings_tree.topLevelItemCount() == 9
         assert plain.WEBRTC_PROFILE_NOTE in window.attempt_profile_note.text()
         assert "9" in window.attempt_summary.text() or "剩余方式" in window.attempt_summary.text()
+    finally:
+        _destroy_window(window, qt_app)
+
+
+def test_capability_preview_is_reachable_from_the_connect_screen(qt_app) -> None:
+    """F5：连接前的九种方式必须是真实交互里能到达的界面，不是只有测试才走得到的死代码。"""
+    window = qt_ui.DesktopApp(app=qt_app)
+    try:
+        assert window.engine is None
+        assert window.current_screen == "connect"
+        assert hasattr(window, "preview_button"), "连接页应当有「先看看九种打洞方式」按钮"
+        assert window.preview_button.isEnabled()
+        window.preview_button.click()
+        assert window.current_screen == "attempt"
+        assert "还没连接服务器" in window.beacon.text()
+        # 真实刷新路径（_refresh 在 engine 为 None 时也渲染能力视图），不是直接调 _refresh_paths。
+        window._refresh()
+        assert window.attempt_tree.topLevelItemCount() == 9
+        assert "还没连接服务器" in window.attempt_summary.text()
+        # 连上以后同一个按钮不能再挂着“还没连接服务器”的提示（行内容由引擎给）。
+        window.engine = _FakeEngineForOptin()
+        window._show_capability_preview()
+        assert window.current_screen == "attempt"
+        assert "还没连接服务器" not in window.beacon.text()
+        assert "实时结果" in window.beacon.text()
+    finally:
+        _destroy_window(window, qt_app)
+
+
+class _CountingGateway:
+    """能力探测计数替身：只关心“被问了几次”，不碰任何 socket。"""
+
+    def __init__(self, line: str = "路由器放行：可用，但需要你点同意（网关 10.8.1.254）"):
+        self.calls = 0
+        self.line = line
+
+    def capability_line(self) -> str:
+        self.calls += 1
+        return self.line
+
+    def consent_text(self) -> str:
+        return "同意说明"
+
+
+class _CountingLan:
+    def __init__(self, line: str = "同一网段直连发现：可用，但默认关闭（需要你点开启）"):
+        self.calls = 0
+        self.line = line
+        self.peers: list = []
+
+    def capability_line(self) -> str:
+        self.calls += 1
+        return self.line
+
+
+class _FakeEngineForOptin:
+    """只提供设置面板/第 2 屏需要的几个方法，用来观察刷新频率与状态文案。"""
+
+    def __init__(self, audit=None):
+        self.gateway_optin = _CountingGateway()
+        self.lan_direct = _CountingLan()
+        self._audit = audit or []
+        self.targets: dict = {}
+
+    def summary(self, key=None):
+        return {
+            "rows": [], "remaining": [], "direct": [], "latency": None, "probeOnly": [],
+            "probeRtt": None, "canSend": False,
+            "webRtcProfileNote": plain.WEBRTC_PROFILE_NOTE, "telemetry": self.telemetry_status(),
+        }
+
+    def gateway_audit(self):
+        return self._audit
+
+    def gateway_failure_hint(self, code: str) -> str:
+        return f"人话解释({code})"
+
+    def telemetry_status(self):
+        return {"uploadEnabled": True, "paused": False, "complete": True, "note": "", "text": "自动汇集…"}
+
+
+def test_optin_capability_probe_is_cached_per_engine_and_still_refreshes(qt_app) -> None:
+    """F3：能力探测按“每个引擎一次”缓存，但换引擎或显式 force 时仍会重新探测。
+
+    局域网能力探测（multicast_available）会短暂创建并关闭一个 loopback UDP socket，
+    设置面板可见时 0.5 秒刷一次，所以必须缓存；缓存**不是**“一次之后就永远不探测”。
+    """
+    window = qt_ui.DesktopApp(app=qt_app)
+    try:
+        first = _FakeEngineForOptin()
+        window.engine = first
+        window._refresh_optin()
+        assert first.lan_direct.calls == 1 and first.gateway_optin.calls == 1
+        for _ in range(10):
+            window._refresh_optin()
+        assert first.lan_direct.calls == 1, "同一引擎重复刷新不应重复探测"
+        assert first.gateway_optin.calls == 1
+        # 用户同意/开关之后必须重新探测（否则文案会停留在“需要你点同意”）。
+        window._refresh_optin(force=True)
+        assert first.lan_direct.calls == 2 and first.gateway_optin.calls == 2
+        # 换一个引擎（例如重连）也必须重新探测，缓存不能跨引擎粘住。
+        second = _FakeEngineForOptin()
+        window.engine = second
+        window._refresh_optin()
+        assert second.lan_direct.calls == 1 and second.gateway_optin.calls == 1
+        # 断开回到“没有引擎”也算换了 key，仍应重新问一次。
+        window.engine = None
+        window._refresh_optin()
+        assert second.lan_direct.calls == 1
+        window.engine = first
+        window._refresh_optin()
+        assert first.lan_direct.calls == 3
+    finally:
+        _destroy_window(window, qt_app)
+
+
+def test_optin_status_line_never_repeats_the_capability_line(qt_app) -> None:
+    """F4：状态行只说“做过什么”，能力行由上面的三行各自负责，不重复同一句话。"""
+    window = qt_ui.DesktopApp(app=qt_app)
+    try:
+        window.engine = _FakeEngineForOptin()
+        window._refresh_optin()
+        window._refresh_optin_status()
+        status = window.optin_status.text()
+        assert "同一网段直连发现" not in status, f"状态行重复了 LAN 能力行：{status!r}"
+        assert status == "", "没有审计动作时状态行应当为空，而不是复读能力行"
+        # 有审计动作时只显示动作行。
+        window.engine = _FakeEngineForOptin(
+            audit=[{"action": "map-port", "reason": "GATEWAY_OPTIN_REQUIRED"}]
+        )
+        window._refresh_optin()
+        window._refresh_optin_status()
+        status = window.optin_status.text()
+        assert "最近一次动作 = map-port" in status
+        assert "同一网段直连发现" not in status
+        assert window.lan_line.text().startswith("同一网段直连发现")
+    finally:
+        _destroy_window(window, qt_app)
+
+
+def test_lan_enable_refuses_before_probing_capability() -> None:
+    """F3：未同意时先拒绝，连平台能力探测都不做（探测会短暂建一个 loopback UDP socket）。"""
+    import asyncio
+
+    from p2pchat.python_desktop import lan_client
+
+    probes = {"n": 0}
+
+    def capability_fn():
+        probes["n"] += 1
+        return {"mechanism": "lan-direct", "status": "available", "reason": "OK"}
+
+    direct = lan_client.LanDirect(capability_fn=capability_fn)
+    try:
+        asyncio.run(
+            direct.enable(room="lab", secret="secretsecret123", peer_id="p1", listen_port=5000, consent=False)
+        )
+        raise AssertionError("未同意竟然没有拒绝")
+    except PermissionError as error:
+        assert "LAN_OPT_IN_REQUIRED" in str(error)
+    assert probes["n"] == 0, "未同意时不应做任何能力探测"
+    assert direct.audit.events[-1]["action"] == "enable-denied"
+
+
+def test_automation_hook_is_opt_in_and_only_clicks(qt_app, monkeypatch) -> None:
+    """截图/回归钩子：不设环境变量时什么都不做；设了也只排用户会做的那几个点击。"""
+    calls: list[str] = []
+    monkeypatch.delenv(qt_ui.AUTOMATION_ENV, raising=False)
+    window = qt_ui.DesktopApp(app=qt_app)
+    try:
+        window._show_capability_preview = lambda: calls.append("preview")
+        window._on_connect = lambda: calls.append("connect")
+        window._open_settings = lambda: calls.append("settings")
+        assert window._apply_automation_hook() == []
+        assert calls == []
+        monkeypatch.setenv(qt_ui.AUTOMATION_ENV, "preview")
+        assert window._apply_automation_hook() == ["preview"]
+        monkeypatch.setenv(qt_ui.AUTOMATION_ENV, "connect, chat ,settings")
+        assert window._apply_automation_hook() == ["connect", "chat", "settings"]
+        # send 走的是“发送”按钮的同一个槽函数，不另开路径。
+        monkeypatch.setenv(qt_ui.AUTOMATION_ENV, "send")
+        assert window._apply_automation_hook() == ["send"]
+        window._on_send_text = lambda: calls.append("send-slot")
+        window._automation_send()
+        assert calls[-1] == "send-slot"
+        assert "自动化截图消息" in window.field_message.text()
+        monkeypatch.setenv(qt_ui.AUTOMATION_ENV, "definitely-not-an-action")
+        assert window._apply_automation_hook() == []
     finally:
         _destroy_window(window, qt_app)

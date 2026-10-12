@@ -600,12 +600,21 @@ async def test_inbound_verdicts_are_mapped_honestly(verdict, status, reason):
 
 def test_inbound_refusal_vocabulary_matches_t58_and_the_server():
     """t58 认的三种拒绝与"看不懂"各有一个自己的名字；词表逐字来自 t58/服务端。"""
-    assert set(env.INBOUND_REFUSAL_OUTCOMES) <= set(reach.VERDICTS)
+    # 解析器级的两个错码不是 verdict，但 t58 逐字就是这么抛的（这里当场复现，防止自己发明词）
+    parser_codes = {"UNRECOGNIZED_REACH_CODE", "INCONSISTENT_REACH_VERDICT"}
+    assert parser_codes <= set(env.INBOUND_REFUSAL_OUTCOMES)
+    with pytest.raises(reach.ReachError, match="UNRECOGNIZED_REACH_CODE"):
+        reach.parse_reach_verdict({"v": 1, "type": reach.SIGNAL_RESULT_TYPE, "connectionId": CID,
+                                   "attemptId": AID, "code": "SOMETHING_NEW", "ok": True})
+    with pytest.raises(reach.ReachError, match="INCONSISTENT_REACH_VERDICT"):
+        reach.parse_reach_verdict({"v": 1, "type": reach.SIGNAL_RESULT_TYPE, "connectionId": CID,
+                                   "attemptId": AID, "code": "REACHABLE", "ok": False})
+    assert set(env.INBOUND_REFUSAL_OUTCOMES) - parser_codes <= set(reach.VERDICTS)
     assert set(INBOUND_CHECK_LOG) == set(reach.SERVER_RESULT_CODES)                 # 服务端六选一
     refusals = set(INBOUND_CHECK_LOG) - set(INBOUND_CHECK_CLIENT_VERDICT)           # 服务端刻意不给客户端词
     assert refusals == {"CONNECTION_REFUSED", "TOKEN_MISMATCH", "REJECTED_BY_POLICY"}
     assert {reach.SERVER_CODE_VERDICT[code] for code in refusals} == (
-        set(env.INBOUND_REFUSAL_OUTCOMES) - {reach.RESULT_UNRECOGNIZED})
+        set(env.INBOUND_REFUSAL_OUTCOMES) - {reach.RESULT_UNRECOGNIZED} - parser_codes)
     assert reach.RESULT_UNRECOGNIZED in env.INBOUND_REFUSAL_OUTCOMES
     reasons = [outcome[1] for outcome in env.INBOUND_REFUSAL_OUTCOMES.values()]
     assert len(set(reasons)) == len(reasons) and "UNKNOWN_REACH_VERDICT" not in reasons

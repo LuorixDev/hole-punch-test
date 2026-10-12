@@ -81,6 +81,13 @@ class LanDirect:
         return self.discovery is not None and not self.discovery.closed
 
     def capability(self) -> dict:
+        """平台能力（纯探测）。
+
+        注意：``_capability_fn()``（``native/lan_discovery.py: multicast_available``）
+        会**短暂创建并关闭一个 loopback UDP socket** 做 IP_ADD_MEMBERSHIP 能力自检；
+        不发送任何报文、不碰真实网卡、不改宿主防火墙。界面层应缓存结果，不要每次
+        刷新都重探（见 ``qt_ui.DesktopApp._refresh_optin``）。
+        """
         capability = dict(self._capability_fn())
         capability["enabled"] = self.enabled
         capability["testMode"] = bool(self.restricted_local)
@@ -117,11 +124,16 @@ class LanDirect:
     async def enable(self, *, room: str, secret: str, peer_id: str, listen_port: int,
                      consent: bool = False, interface: str | None = None,
                      restricted_local: bool = False) -> dict:
-        """显式开启。未同意 / 平台不支持 / 没有真实网卡地址都如实失败。"""
-        capability = self._capability_fn()
+        """显式开启。未同意 / 平台不支持 / 没有真实网卡地址都如实失败。
+
+        未同意时**先拒绝再探测**：平台能力探测会短暂创建并关闭一个 loopback UDP
+        socket（只做 IP_ADD_MEMBERSHIP 能力自检，不发送任何报文），因此放在同意
+        判定之后，保证“没有同意就没有任何 socket 动作”。
+        """
         if not consent:
             self.audit.record("enable-denied", reason="LAN_OPT_IN_REQUIRED")
             raise PermissionError("LAN_OPT_IN_REQUIRED")
+        capability = self._capability_fn()
         if capability.get("status") != "available":
             self.audit.record("enable-denied", reason=capability.get("reason"))
             raise NotImplementedError(str(capability.get("reason")))

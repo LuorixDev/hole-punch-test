@@ -45,6 +45,10 @@ BAD = "#e05a5a"
 
 MAX_MESSAGE_BYTES = 16384
 PUMP_INTERVAL_MS = 150
+# 自动化钩子（截图/回归用）：只有操作者显式设置这个环境变量时，界面才在启动后
+# “替你点一下”按钮——preview=先看看九种打洞方式，connect=连接并寻找对方。
+# 它做的动作和用户手动点击完全一样，不额外开任何通道、不绕过任何同意。
+AUTOMATION_ENV = "P2P_DESKTOP_AUTOCONNECT"
 
 # Families Qt can pick when it has to render 中文. The list is tried in order and
 # every candidate is *measured* (inFontUcs4) before it is used.
@@ -146,6 +150,11 @@ class DesktopApp(QtWidgets.QMainWindow):
         self.recording = False
         self._images: list = []
         self._optin_refreshed_at = 0.0
+        # 能力探测结果（每个引擎一次）；None 表示还没探测过。
+        self._optin_probe_cache: tuple[str, str] | None = None
+        self._optin_probe_key: int | None = -1
+        # 连接前的能力视图引擎（未启动、无副作用）；False 表示建不起来。
+        self._preview_engine = None
 
         self.font_family = self._install_fonts()
         self._build_style()
@@ -169,6 +178,7 @@ class DesktopApp(QtWidgets.QMainWindow):
         self._pump_timer = QtCore.QTimer(self)
         self._pump_timer.timeout.connect(self._pump)
         self._pump_timer.start(PUMP_INTERVAL_MS)
+        self._apply_automation_hook()
         if config is not None:
             self._prefill(config)
 
@@ -280,6 +290,13 @@ class DesktopApp(QtWidgets.QMainWindow):
         self.connect_button.setObjectName("primary")
         self.connect_button.clicked.connect(self._on_connect)
         form.addWidget(self.connect_button, len(rows) * 2, 0, 1, 2)
+
+        # 连接前也能去看第 2 屏：九种方式逐条列出、可用性来自本机能力视图。
+        # 复审 F5 之前这条路走不到（表是空的/只有测试才渲染），现在是真的可达。
+        self.preview_button = QtWidgets.QPushButton("先看看九种打洞方式")
+        self.preview_button.setToolTip("还没连接服务器时也能看：九种方式各自是什么、什么网络下可行、本机能不能做")
+        self.preview_button.clicked.connect(self._show_capability_preview)
+        form.addWidget(self.preview_button, len(rows) * 2 + 1, 0, 1, 2)
         note = QtWidgets.QLabel(
             "点击连接即确认这个服务器，并自动汇集不含聊天内容的诊断记录。\n"
             "本客户端没有中继、没有 TURN，也不会把聊天内容交给服务器转发。"
@@ -559,6 +576,18 @@ class DesktopApp(QtWidgets.QMainWindow):
         self.field_name.setText(config.name)
         self.field_secret.setText(config.secret)
 
+    def _show_capability_preview(self):
+        """跳到第 2 屏看九种方式（连接前=能力视图，连接后=实时结果）。
+
+        文案按状态分开说，避免连上以后还挂着“还没连接服务器”的提示误导人。
+        """
+        self._show("attempt")
+        if self.engine is None:
+            self._set_beacon("还没连接服务器：这里显示的是九种方式与本机能力，不是实测结果。", MUTED)
+        else:
+            self._set_beacon("下面是九种方式的实时结果：已打通/仅探测/仍在尝试都会写在这里。", MUTED)
+        self._refresh_paths()
+
     def _on_connect(self):
         url = self.field_server.text().strip()
         room = self.field_room.text().strip()
@@ -774,6 +803,36 @@ class DesktopApp(QtWidgets.QMainWindow):
         self.engine._emit("benchmark.done", **result)
 
     # -------------------------------------------------------------------- pump
+    def _apply_automation_hook(self) -> list[str]:
+        """按环境变量“替用户点按钮”，供无人值守截图/回归使用；默认什么都不做。
+
+        值可以是逗号分隔的动作序列（preview/connect/chat/settings），按顺序各延迟
+        1.2 秒执行一次——**等价于用户自己点那些按钮**（同一个槽函数），不额外开通道、
+        不绕过任何同意。返回实际排入的动作列表，方便测试直接断言。
+        """
+        actions = {
+            "preview": self._show_capability_preview,
+            "connect": self._on_connect,
+            "chat": lambda: self._show("chat"),
+            "settings": self._open_settings,
+            # 截图/回归：在输入框里填入固定文本，然后走和“发送”按钮完全相同的槽函数。
+            "send": self._automation_send,
+        }
+        requested = [
+            part.strip().lower()
+            for part in (os.environ.get(AUTOMATION_ENV) or "").split(",")
+            if part.strip()
+        ]
+        scheduled = [name for name in requested if name in actions]
+        for index, name in enumerate(scheduled):
+            QtCore.QTimer.singleShot(1200 + index * 9000, actions[name])
+        return scheduled
+
+    def _automation_send(self) -> None:
+        """自动化钩子专用：填入一条固定文本并点一次“发送”（与用户操作同一路径）。"""
+        self.field_message.setText("自动化截图消息：你好，这是一条测试消息。")
+        self._on_send_text()
+
     def _pump(self):
         """Drain engine events on the GUI thread, then refresh derived views."""
         engine = self.engine
@@ -796,7 +855,9 @@ class DesktopApp(QtWidgets.QMainWindow):
             self._set_beacon(f"提示：{event.get('text') or plain.reason(event.get('code'))}", WARN)
         elif kind == "optin":
             self.optin_status.setText(event.get("text", ""))
-            self._refresh_optin()
+            # 同意/开关会改变能力文案（“已同意，可以试一次”“已开启…”），强制重探一次。
+            self._refresh_optin(force=True)
+            self._refresh_optin_status()
         elif kind == "session.welcome":
             if self.engine is not None and self.engine.plaintext_warning:
                 self._set_beacon("⚠ 未加密连接：" + self.engine.plaintext_warning, BAD)
@@ -914,6 +975,8 @@ class DesktopApp(QtWidgets.QMainWindow):
 
     def _refresh(self):
         if self.engine is None:
+            # 还没连接：也要把第 2 屏的九种方式画出来（能力视图），不能留一张空表。
+            self._refresh_paths()
             return
         self._refresh_peers()
         self._refresh_paths()
@@ -948,41 +1011,57 @@ class DesktopApp(QtWidgets.QMainWindow):
             self._show("chat")
             self._set_beacon("已有一条直接连接可用，可以开始聊天；其余方式仍在后台继续尝试。", OK)
 
+    def _capability_engine(self):
+        """连接前的能力视图用的**未启动**引擎（只为问“这台机器上能不能做这件事”）。
+
+        `DesktopEngine.__init__` 不建 socket、不读盘、不起线程；这里也不调用
+        `start()`，所以它不会连服务器、不会发任何报文。可用性 / availabilityNote /
+        detail 全部来自数据层的 `availability_for()`，Qt 层不自己判断语义。
+        """
+        if self._preview_engine is None:
+            try:
+                self._preview_engine = DesktopEngine(
+                    EngineConfig(
+                        url=self.field_server.text().strip() or "ws://127.0.0.1:8088/ws",
+                        room=self.field_room.text().strip() or "(未连接)",
+                        secret="capability-preview-only",
+                        name=self.field_name.text().strip() or "Explorer",
+                        data_dir=os.path.join(os.path.expanduser("~"), ".p2pchat-desktop"),
+                        allow_native=True,
+                    )
+                )
+            except Exception:
+                # 连能力视图都建不起来时退回空表，并且把原因说出来（不假装有内容）。
+                self._preview_engine = False
+        return self._preview_engine or None
+
     def _preview_summary(self) -> dict:
-        """连接前的第 2 屏：九种方式按文档顺序列出，状态=等待中，不谎报可用性/延迟。"""
-        rows = [
-            {
-                "id": method["id"],
-                "title": method["title"],
-                "explain": method["explain"],
-                "works": method["works"],
-                "failureHint": method["failure"],
-                "status": "等待中",
-                "state": "pending",
+        """连接前的第 2 屏：九种方式按文档顺序列出，可用性来自引擎的能力视图。
+
+        这不是“摆拍用的脚手架”：`_refresh()` 在没有引擎时也会调用它，所以界面一打开
+        就能看到九种方式（状态=等待中、没有实测延迟），可用性/说明由引擎给出——
+        还没探测过的原生方式会如实显示“不支持 + 还没探测”的说明，而不是编一个词。
+        """
+        engine = self._capability_engine()
+        if engine is None:
+            return {
+                "rows": [],
+                "remaining": [],
+                "direct": [],
                 "latency": None,
-                "availability": "—",
-                "availabilityNote": "",
-                "detail": "",
+                "probeOnly": [],
                 "probeRtt": None,
-                "probeOnly": bool(method.get("probe_only")),
-                "canMessage": False,
-                "consentRequired": bool(method.get("opt_in")),
-                "consented": False,
-                "capabilityLine": "",
+                "canSend": False,
+                "previewNote": "还没连接服务器，而且本机能力视图也建不起来；连上后再看这一屏。",
+                "webRtcProfileNote": plain.WEBRTC_PROFILE_NOTE,
+                "telemetry": {},
             }
-            for method in plain.METHODS
-        ]
-        return {
-            "rows": rows,
-            "remaining": [method["title"] for method in plain.METHODS],
-            "direct": [],
-            "latency": None,
-            "probeOnly": [],
-            "probeRtt": None,
-            "canSend": False,
-            "webRtcProfileNote": plain.WEBRTC_PROFILE_NOTE,
-            "telemetry": self.engine.telemetry_status() if self.engine is not None else {},
-        }
+        summary = engine.summary("")
+        summary["previewNote"] = (
+            "还没连接服务器：下面按顺序列出九种方式，状态都是「等待中」；"
+            "「可用性」是本机能力（来自引擎，未探测的会写明原因），实测延迟要连上对端才会有。"
+        )
+        return summary
 
     def _refresh_paths(self):
         if self.engine is None:
@@ -1022,8 +1101,10 @@ class DesktopApp(QtWidgets.QMainWindow):
             latency_text = _fmt_latency(summary["latency"])
             if summary["latency"] is None:
                 latency_text = "—（还没有可聊天的直连，所以不报延迟）"
+            prefix = (summary.get("previewNote") or "").strip()
             self.attempt_summary.setText(
-                f"已打通：{'、'.join(summary['direct']) if summary['direct'] else '暂无'}　|　"
+                (prefix + "\n" if prefix else "")
+                + f"已打通：{'、'.join(summary['direct']) if summary['direct'] else '暂无'}　|　"
                 f"实测延迟：{latency_text}　|　剩余方式：{len(summary['remaining'])} 条"
             )
         self.settings_tree.clear()
@@ -1097,10 +1178,25 @@ class DesktopApp(QtWidgets.QMainWindow):
             return engine.lan_direct
         return LanDirect()
 
-    def _refresh_optin(self):
+    def _refresh_optin(self, force: bool = False):
+        """刷新三件同意项的能力文案。
+
+        能力探测**每个引擎只做一次**并缓存（`force=True` 用于同意/开关动作之后的刷新）：
+        局域网能力探测会短暂创建并关闭一个 loopback UDP socket（不发送任何报文），
+        设置面板可见时 0.5 秒刷新一次，不缓存就等于每秒重探两次。
+        """
         try:
-            self.gateway_line.setText(self._gateway_controller().capability_line())
-            self.lan_line.setText(self._lan_controller().capability_line())
+            cache_key = id(self.engine) if self.engine is not None else None
+            if force or self._optin_probe_key != cache_key or self._optin_probe_cache is None:
+                self._optin_probe_cache = (
+                    self._gateway_controller().capability_line(),
+                    self._lan_controller().capability_line(),
+                )
+                self._optin_probe_key = cache_key
+            gateway_line, lan_line = self._optin_probe_cache
+            self.gateway_line.setText(gateway_line)
+            self.lan_line.setText(lan_line)
+            # 端口预测不是能力探测（纯状态），每次重新渲染，免得开关后显示滞后。
             self.prediction_line.setText(self._prediction_line_text())
         except Exception as error:  # 能力读取失败也要说出来，不静默
             self.optin_status.setText(f"读取能力失败：{type(error).__name__}")
@@ -1173,22 +1269,31 @@ class DesktopApp(QtWidgets.QMainWindow):
         self.optin_status.setText(self._optin_status_text())
 
     def _optin_status_text(self) -> str:
-        parts = []
+        """只显示“做过什么”的审计动作行。
+
+        能力/开关状态由上面三行（gateway_line/lan_line/prediction_line）各自负责，
+        这里不再重复同一句，免得同一面板同一句话出现两次、像是两个开关。
+        """
         engine = self.engine
-        if engine is not None and hasattr(engine, "gateway_audit"):
-            audit = engine.gateway_audit()
-            if audit:
-                last = audit[-1]
-                text = f"路由器放行：最近一次动作 = {last.get('action')}"
-                reason = last.get("reason")
-                if reason:
-                    text += "（" + engine.gateway_failure_hint(str(reason).split(",", 1)[0]) + "）"
-                parts.append(text)
+        if engine is None or not hasattr(engine, "gateway_audit"):
+            return ""
+        parts = []
+        audit = engine.gateway_audit()
+        if audit:
+            last = audit[-1]
+            text = f"路由器放行：最近一次动作 = {last.get('action')}"
+            reason = last.get("reason")
+            if reason:
+                text += "（" + engine.gateway_failure_hint(str(reason).split(",", 1)[0]) + "）"
+            parts.append(text)
         controller = self._lan_controller()
-        line = controller.capability_line()
-        if controller.peers:
-            line += f"；已发现 {len(controller.peers)} 个同网段设备"
-        parts.append(line)
+        lan_audit = getattr(getattr(controller, "audit", None), "events", None) or []
+        if lan_audit:
+            last = lan_audit[-1]
+            text = f"同网段发现：最近一次动作 = {last.get('action')}"
+            if controller.peers:
+                text += f"；当前已发现 {len(controller.peers)} 个同网段设备"
+            parts.append(text)
         return "\n".join(parts)
 
     def _refresh_optin_status(self):
