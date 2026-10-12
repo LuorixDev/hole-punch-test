@@ -2,11 +2,14 @@
 
 Transport contract (unchanged): one JSON request per line on stdin, one JSON frame per
 line on stdout, bounded sizes, explicit enumerated errors, no relay of chat content.
+Input accepts either ``\n`` or ``\r\n`` terminators (JSON treats the trailing CR as
+whitespace, and the line-length bound counts the bytes that arrived).
 
-Output contract (t31): stdout/stderr are pinned to UTF-8 at startup whatever the parent's
-code page is (a Windows pipe defaults to the ANSI code page, which cannot encode the
-Chinese capability text), and a failed local write is surfaced as a non-zero exit with a
-bounded reason on stderr instead of silently exiting 0 with no output.
+Output contract (t31/t40): stdout/stderr are pinned to UTF-8 with canonical ``\n``
+line endings whatever the parent's code page or text mode is (Windows text mode would
+otherwise rewrite every frame as CRLF and break byte-level consumers), and a failed
+local write is surfaced as a non-zero exit with a bounded reason on stderr instead of
+silently exiting 0 with no output.
 """
 import argparse
 import asyncio
@@ -21,6 +24,9 @@ from .adapter import NativeAdapter, MAX_FRAME
 MAX_LINE = 128 * 1024
 METHODS = {"capabilities", "start", "signal", "send", "stats", "close"}
 OUTPUT_ENCODING = "utf-8"
+# The frame separator is part of the wire contract, so it is canonical on every
+# platform rather than whatever the local text mode would translate "\n" into.
+LINE_ENDING = "\n"
 # Data output is strict: never replace a character with "?" or "\ufffd" and call it done.
 STDOUT_ERRORS = "strict"
 # Diagnostics must never crash or print "?" while reporting a problem.
@@ -33,19 +39,39 @@ class BridgeOutputError(RuntimeError):
 
 
 def force_utf8_streams():
-    """Pin stdout/stderr to UTF-8 regardless of the parent process code page.
+    """Pin stdout/stderr to UTF-8 with canonical ``\n`` regardless of the parent.
 
     ``PYTHONIOENCODING`` only influences interpreter startup, so an explicitly
     hostile parent (``PYTHONIOENCODING=cp1252``) would otherwise reconfigure our
-    pipe back to a code page that cannot encode the capability text. Streams that
-    are not real text files (embedded callers, some test harnesses) are left alone.
+    pipe back to a code page that cannot encode the capability text. ``newline="\\n"``
+    disables newline translation, so Windows text mode cannot turn frames into CRLF.
+    Streams that are not real text files (embedded callers, some test harnesses) are
+    left alone; ``write_frame`` still guarantees the bytes on the wire.
     """
     for stream, errors in ((sys.stdout, STDOUT_ERRORS), (sys.stderr, STDERR_ERRORS)):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         with contextlib.suppress(ValueError, OSError, AttributeError):
-            reconfigure(encoding=OUTPUT_ENCODING, errors=errors)
+            reconfigure(encoding=OUTPUT_ENCODING, errors=errors, newline=LINE_ENDING)
+
+
+def write_frame(output, text):
+    """Write one frame as canonical UTF-8 bytes, ignoring text-mode translation.
+
+    Prefers the underlying binary buffer: the bytes on the wire are exactly the frame
+    plus ``\\n``, so a Windows text stream (``newline=None``) cannot rewrite them as
+    CRLF. Injected writers without a buffer keep the text path. Either way the stream
+    is flushed here, so a failure is visible to the caller instead of being lost at
+    interpreter shutdown, and encoding stays strict (no silent "?" substitution).
+    """
+    buffer = getattr(output, "buffer", None)
+    if buffer is not None:
+        buffer.write(text.encode(OUTPUT_ENCODING))
+        buffer.flush()
+        return
+    output.write(text)
+    output.flush()
 
 
 def describe_output_error(error):
@@ -111,9 +137,8 @@ async def serve(adapter=None, reader=None, output=None):
             while True:
                 frame = await queue.get()
                 try:
-                    text = json.dumps(frame, ensure_ascii=False, separators=(",", ":")) + "\n"
-                    await asyncio.to_thread(output.write, text)
-                    await asyncio.to_thread(output.flush)
+                    text = json.dumps(frame, ensure_ascii=False, separators=(",", ":")) + LINE_ENDING
+                    await asyncio.to_thread(write_frame, output, text)
                 finally:
                     queue.task_done()
         except asyncio.CancelledError:
@@ -182,10 +207,8 @@ async def serve(adapter=None, reader=None, output=None):
 
 def write_stdout_once(text):
     """Write one frame to the real stdout; any failure becomes a BridgeOutputError."""
-    stream = sys.stdout
     try:
-        stream.write(text)
-        stream.flush()
+        write_frame(sys.stdout, text)
     except (UnicodeError, OSError, ValueError, AttributeError) as error:
         raise BridgeOutputError(describe_output_error(error)) from None
 
@@ -222,7 +245,7 @@ def main():
     try:
         if args.command == "capabilities":
             payload = asyncio.run(adapter.capabilities())
-            write_stdout_once(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+            write_stdout_once(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + LINE_ENDING)
             return
         asyncio.run(serve(adapter))
     except BridgeOutputError as error:

@@ -30,10 +30,12 @@ import struct
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from urllib.parse import urlparse
 
 from aiohttp import ClientSession
+from p2pchat.backend.telemetry import room_directory
 from p2pchat.native.adapter import METHODS as NATIVE_METHODS, NativeAdapter
 from p2pchat.peer import Peer, frame as peer_frame
 
@@ -107,6 +109,29 @@ NATIVE_SELF_NAME = "本机原生信令"
 WEBRTC_RETRY_SECONDS = 20.0
 
 _SHIM = {"engines": 0, "original": None}
+
+# 旧布局（本模块接线之前）把记录直接放在 <data_dir>/webRTC、录音放在 <data_dir>/voice，
+# 房间名根本不进路径。只要这两个目录里已有数据，就继续用 <data_dir>，历史不丢也不分裂。
+LEGACY_RECORD_SUBDIRS = ("webRTC", "voice")
+
+
+def records_directory(data_dir, room):
+    """桌面本地记录目录：共享的房间目录规则，旧布局优先沿用。
+
+    新安装：`<data_dir>/<可读片段>-<哈希>`——房间名（可能是中文/emoji）经
+    :func:`p2pchat.backend.telemetry.room_directory` 编码，因此 LC_ALL=C 这类
+    非 UTF-8 文件系统编码下也能建目录，且不同房间绝不同目录。
+    旧安装：`<data_dir>/{webRTC,voice}` 已有数据时返回 `<data_dir>` 本身。
+    """
+    base = Path(data_dir)
+    for name in LEGACY_RECORD_SUBDIRS:
+        try:
+            legacy = base / name
+            if legacy.is_dir() and any(legacy.iterdir()):
+                return base
+        except (UnicodeError, OSError, ValueError):
+            continue   # 非 UTF-8 编码下旧目录不可能存在；探测本身也可能抛 UnicodeEncodeError
+    return room_directory(base, room)
 
 
 @dataclass
@@ -457,7 +482,7 @@ class DesktopEngine:
             self.config.room,
             self.config.secret,
             self.config.name,
-            os.path.join(self.config.data_dir, "webRTC"),
+            os.path.join(records_directory(self.config.data_dir, self.config.room), "webRTC"),
             echo=self.config.echo,
             origin=self.origin,
         )

@@ -44,6 +44,40 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Python dependencies and bundler
         run: python -m pip install -r p2pchat/requirements.txt -r p2pchat/platform/build-requirements.txt -c p2pchat/platform/constraints.txt
+      - name: Qt runtime system libraries for PySide6 (Linux runner)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p p2pchat/releases
+          LOG=p2pchat/releases/qt-runtime-libs.log
+          # PySide6 的 libQt6Gui.so.6 把 libEGL.so.1 / libGL.so.1 / libglib-2.0.so.0 列为**直接 NEEDED**
+          # （readelf -d 实测），runner 没装这些系统库时 `from PySide6 import QtWidgets` 在**导入期**就
+          # ImportError: libEGL.so.1: cannot open shared object file —— 这正是 CI run 38193188589 上
+          # linux 与 android 两个 target 收集 tests/desktop/test_ui.py 时红的原因（Windows 的 wheel 自带运行库，所以不红）。
+          # 只装系统运行库；PySide6 本体仍由 pip 提供，不做任何许可交互。
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglx0 libglvnd0 libegl-mesa0 \
+            libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libfreetype6 \
+            libdbus-1-3 libglib2.0-0 libsystemd0 \
+            libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxcb1 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 \
+            libxcb-util1 libxcb-xfixes0 libxcb-xkb1 libpng16-16 libbrotli1 2>&1 | tee "$LOG"
+          # 断言 1：真正被 import 用到的那几个 Qt 库，动态依赖必须全部解析得到
+          QT_LIB="$(python -c 'import PySide6, os; print(os.path.join(os.path.dirname(PySide6.__file__), "Qt", "lib"))')"
+          for soname in libQt6Core.so.6 libQt6Gui.so.6 libQt6Widgets.so.6; do
+            echo "--- ldd $soname" | tee -a "$LOG"
+            ldd "$QT_LIB/$soname" | tee -a "$LOG"
+          done
+          if ldd "$QT_LIB/libQt6Core.so.6" "$QT_LIB/libQt6Gui.so.6" "$QT_LIB/libQt6Widgets.so.6" | grep -q "not found"; then
+            echo "QT_RUNTIME_LIBS_MISSING" | tee -a "$LOG"
+            exit 1
+          fi
+          # 断言 2：导入 + offscreen 建一个 QApplication（被测代码真正需要的能力）
+          QT_QPA_PLATFORM=offscreen python -c "import PySide6; from PySide6 import QtCore, QtGui, QtWidgets; app = QtWidgets.QApplication([]); print('QT_RUNTIME_OK', PySide6.__version__, QtCore.qVersion(), app.platformName())" 2>&1 | tee -a "$LOG"
       - name: Platform and client gates
         working-directory: p2pchat
         shell: bash
@@ -56,6 +90,8 @@ jobs:
       - name: Python gates (repository root, bounded diagnostic runner)
         timeout-minutes: 12
         shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           set -euo pipefail
           mkdir -p p2pchat/releases
@@ -68,6 +104,8 @@ jobs:
         if: matrix.target != 'android'
         timeout-minutes: 12
         shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           set -euo pipefail
           mkdir -p p2pchat/releases
@@ -89,6 +127,8 @@ jobs:
         if: matrix.target == 'linux'
         timeout-minutes: 12
         shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           set -euo pipefail
           mkdir -p p2pchat/releases
@@ -110,20 +150,16 @@ jobs:
             "$ASCII_PY" -c "import sys, os; print('executable', sys.executable); print('prefix', sys.prefix); print('cwd_real', os.getcwd())"
             LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 "$ASCII_PY" -c "import sys, locale; print('default=%s preferred=%s fs=%s' % (sys.getdefaultencoding(), locale.getpreferredencoding(False), sys.getfilesystemencoding()))"
           } | tee "$LOG"
-          # 双重钳制：C locale 的非 UTF-8 默认编码 + EncodingWarning 当错误。
-          # 范围=整套 p2pchat/tests，唯一排除 tests/desktop/test_engine.py：该文件里
-          # 4 条用例（test_real_webrtc_handshake_text_and_file / test_no_direct_path_is_reported_not_faked /
-          # test_gateway_methods_report_real_capability_but_never_message / test_udp_probe_reports_probe_only）
-          # 用中文标签拼出数据目录（如 lab.config("网关回声")），在 LC_ALL=C（fs=ascii）下
-          # p2pchat/backend/telemetry.py:67 的 directory.mkdir() 必然 UnicodeEncodeError ——
-          # 那是"ASCII 文件系统无法创建这个文件名"的结构性限制，与被测代码的隐式编码无关，
-          # 且这 4 条仍被上面步骤 8（整套 p2pchat/tests 的 EncodingWarning 门）覆盖。
-          # 待 tests/desktop 归属人把标签改成 ASCII（或标注需要 UTF-8 文件系统）后删掉这个 --ignore。
+          # 双重钳制：C locale 的非 UTF-8 默认编码 + EncodingWarning 当错误。范围=整套 p2pchat/tests（**无任何排除**）。
+          # 曾经排除过 tests/desktop/test_engine.py（4 条中文数据目录用例在 fs=ascii 下 mkdir 失败）；t36 把
+          # telemetry 的目录命名改成 ASCII 安全，t39 又把 python_desktop 的 engine/selftest/qt_ui 接到
+          # room_directory/records_directory，该文件在 C locale 下 13 passed，因此排除已移除（t37）。
+          # 前置：本步骤会导入 PySide6（整套测试含桌面用例），所以必须先跑上面那个
+          # "Qt runtime system libraries for PySide6 (Linux runner)" 步骤装系统库，否则这里会因缺 libEGL.so.1 而红。
           LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 PYTHONWARNDEFAULTENCODING=1 \
             "$ASCII_PY" -u p2pchat/ci/watchdog.py --timeout 600 -- \
             "$ASCII_PY" -u -X warn_default_encoding -W error::EncodingWarning \
-            -m pytest p2pchat/tests -q --ignore=p2pchat/tests/desktop/test_engine.py \
-            -o faulthandler_timeout=60 2>&1 | tee -a "$LOG"
+            -m pytest p2pchat/tests -q -o faulthandler_timeout=60 2>&1 | tee -a "$LOG"
           test -s "$LOG"
       - name: Build desktop client with PyInstaller (one-folder bundle)
         if: matrix.target != 'android'

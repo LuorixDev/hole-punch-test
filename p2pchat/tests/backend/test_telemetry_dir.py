@@ -142,3 +142,52 @@ def test_store_reports_clear_code_for_non_encodable_directory_name(tmp_path):
     # UTF-8 系统：原名目录照旧可建（行为不退化），只是新代码走 room_directory()。
     Store(raw).close()
     assert raw.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# locale 归一化：唯一实现在 telemetry，任何调用方直接传代理转义名字都不能崩，
+# 且必须与正常解码的形式落到同一个目录（否则同一房间按 locale 分裂成两份历史）。
+# ---------------------------------------------------------------------------
+
+def _surrogate(text):
+    """C locale 下 argv/环境变量/文件系统交回来的样子：每个 UTF-8 字节一个代理码位。"""
+    return text.encode('utf-8').decode('ascii', 'surrogateescape')
+
+
+@pytest.mark.parametrize('room', [UNICODE_ROOM, '房间', '房间A', 'lab-房间', '🌏', 'lab', ''])
+def test_surrogateescaped_room_maps_to_the_same_directory(room):
+    """关键不变量：同一房间名在任何 locale 下得到同一个目录名。"""
+    surrogate = _surrogate(room)
+    assert telemetry.room_text(surrogate) == telemetry.room_text(room)
+    assert telemetry.room_directory_name(surrogate) == telemetry.room_directory_name(room)
+    assert telemetry.room_directory(Path('/tmp'), surrogate) == telemetry.room_directory(Path('/tmp'), room)
+
+
+def test_surrogateescaped_input_never_raises_and_keeps_the_pinned_name(tmp_path):
+    """调用方漏做归一化也不会崩：命名实现自己就把 locale 输入收进来（t41 的目标）。"""
+    surrogate = _surrogate(UNICODE_ROOM)
+    assert any('\udc80' <= char <= '\udcff' for char in surrogate)   # 确实是代理转义形式
+    assert telemetry.room_directory_name(surrogate) == 'room-639058d6527971b8'   # 与 UTF-8 环境同一锚点
+    assert telemetry.room_directory_name(_surrogate(UNICODE_ROOM)) == telemetry.room_directory_name(UNICODE_ROOM)
+    directory = telemetry.room_directory(tmp_path, surrogate)
+    assert os.fsencode(str(directory))            # 非 UTF-8 文件系统编码下也放得下
+    Store(directory).close()                      # 真建目录：不再是 UnicodeEncodeError
+    # 非法 UTF-8 字节（不是合法 UTF-8 的原始字节）：不崩、稳定、文件名仍 ASCII 安全
+    broken = b'\xff\xfe\x80'.decode('ascii', 'surrogateescape')
+    assert telemetry.room_directory_name(broken) == telemetry.room_directory_name(broken)
+    assert SAFE_NAME.match(telemetry.room_directory_name(broken))
+
+
+def test_legacy_directory_is_found_from_both_decoded_forms(tmp_path):
+    """旧目录在两种解码形式下都认出来，且返回的路径与输入形式无关。"""
+    legacy = tmp_path / '房间'
+    if not _fs_can_encode(str(legacy)):
+        # 非 UTF-8 编码下这个旧目录建不出来：两种形式都必须安全返回新规则路径（不崩）
+        expected = tmp_path / telemetry.room_directory_name('房间')
+        assert telemetry.room_directory(tmp_path, '房间') == expected
+        assert telemetry.room_directory(tmp_path, _surrogate('房间')) == expected
+        return
+    legacy.mkdir()
+    (legacy / 'events.sqlite3').write_bytes(b'x')
+    assert telemetry.room_directory(tmp_path, '房间') == legacy
+    assert telemetry.room_directory(tmp_path, _surrogate('房间')) == legacy

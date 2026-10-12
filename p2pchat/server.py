@@ -21,7 +21,7 @@ import struct
 import time
 from pathlib import Path
 from aiohttp import web, WSMsgType
-from p2pchat.backend.telemetry import Store
+from p2pchat.backend.telemetry import Store, room_directory
 from p2pchat.backend.protocol import MECHANISMS, PROFILES, ProtocolError, check, fields, join, signal, string, uid
 
 BASE=Path(__file__).resolve().parent
@@ -621,6 +621,17 @@ class Stun(asyncio.DatagramProtocol):
             self.transport.sendto(reply,addr)
             self.store.event('','stun','stun.binding',{'family':ipaddress.ip_address(addr[0]).version,'requestBytes':len(data),'responseBytes':len(reply)})
 
+def data_directory(base,room=None):
+    """服务端数据目录：房间名走**共享**的房间目录规则（ASCII 安全、不碰撞、旧目录优先）。
+
+    * 给了 `--room`（一台机器/一个数据目录只服务一个房间的部署）：`base/<可读片段>-<哈希>`。
+      房间名不再原样进路径，所以 POSIX + 非 UTF-8 文件系统编码（LC_ALL=C 的容器/CI）下也能建目录；
+      旧版本已经按原名建过 `base/<房间名>` 且里面有数据时沿用旧目录，不会丢历史。
+    * 没给房间（默认，多房间部署）：就是 `base` 本身——与旧行为完全一致，
+      绝不会把一个 Store 按房间拆成多个。
+    """
+    return room_directory(base,room) if room else Path(base)
+
 def make_app(data_dir,ice_servers=None,origins=None,**limits):
     for server in ice_servers or []:
         check(set(server)=={'urls'})
@@ -717,7 +728,9 @@ async def main(args):
     context=None
     if args.cert:
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2;context.load_cert_chain(args.cert,args.key)
-    app=make_app(args.data,[{'urls':args.stun_url}] if args.stun_url else [],args.origin,
+    data_dir=data_directory(args.data,args.room)
+    LOG.info('data directory: %s (--room %s)',data_dir,args.room or '<shared across rooms>')
+    app=make_app(str(data_dir),[{'urls':args.stun_url}] if args.stun_url else [],args.origin,
                  allowNoOrigin=bool(getattr(args,'allow_no_origin',False)),
                  allowLegacyJoin=(True if getattr(args,'allow_legacy_join',False)
                                   else False if getattr(args,'deny_legacy_join',False) else None))
@@ -730,6 +743,9 @@ if __name__=='__main__':
     p.add_argument('--stun-host',action='append',help='Repeat for IPv4 and IPv6; defaults to both loopbacks')
     p.add_argument('--stun-port',type=int,default=3478);p.add_argument('--stun-url')
     p.add_argument('--data',default=str(BASE/'data'));p.add_argument('--cert');p.add_argument('--key');p.add_argument('--origin',action='append',default=[])
+    p.add_argument('--room',help='Single-room deployment: --data becomes the base and this room gets an ASCII-safe, '
+                                 'collision-free subdirectory (same rule as the desktop client; a legacy --data/<room> '
+                                 'directory with data in it is reused). Omit it to keep one shared data directory for all rooms.')
     p.add_argument('--allow-plaintext',action='store_true',
                    help='Explicitly allow a NON-loopback plaintext listener. Off by default (non-loopback still requires '
                         '--cert/--key). Plaintext means the link can be observed or tampered with; the room key is no longer '

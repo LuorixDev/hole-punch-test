@@ -23,13 +23,17 @@
 3. `actions/setup-python@v6`（3.12，pip 缓存指向 `requirements.txt` / `platform/build-requirements.txt` / `platform/constraints.txt`）；
 4. `Install locked npm dependencies (no unreviewed lifecycle scripts)`：`npm ci --ignore-scripts`；
 5. `Python dependencies and bundler`：按锁定约束安装运行时与打包依赖；
+5.1 **（t37 新增，插在 5 与 6 之间，仅 Linux runner：`if: runner.os == 'Linux'`）`Qt runtime system libraries for PySide6 (Linux runner)`**：
+   `apt-get install` PySide6 需要的 Qt 系统运行库（`libegl1` 等，清单见 2.1），随后断言 `ldd` 无 `not found` 且
+   `QT_QPA_PLATFORM=offscreen python -c "from PySide6 import QtWidgets; QtWidgets.QApplication([])"` 打印 `QT_RUNTIME_OK`；
+   日志 `p2pchat/releases/qt-runtime-libs.log`。详见 2.1；
 6. `Platform and client gates`：`node --test tests/platform/*.test.cjs tests/client/*.test.cjs`（**必须用 glob 形式**，目录形式在 Node 24 下会 `Cannot find module`，见 `p2pchat/tests/platform/README.md`）+ `npm audit --omit=dev --audit-level=moderate` + `npm audit --audit-level=high`；
-7. `Python gates (repository root, bounded diagnostic runner)`：`unittest discover -s p2pchat/ci`、**Windows 上的有界诊断**（`ci/watchdog.py` 包裹 `windows-analysis/diagnostic_runner.py`）、`ci/watchdog.py --timeout 600` 包裹的 `pytest p2pchat/tests` 全量套件。三个日志分别落到 `p2pchat/releases/`。
+7. `Python gates (repository root, bounded diagnostic runner)`：`unittest discover -s p2pchat/ci`、**Windows 上的有界诊断**（`ci/watchdog.py` 包裹 `windows-analysis/diagnostic_runner.py`）、`ci/watchdog.py --timeout 600` 包裹的 `pytest p2pchat/tests` 全量套件。三个日志分别落到 `p2pchat/releases/`；本步骤设 `QT_QPA_PLATFORM=offscreen`。
 
 桌面平台与 Windows 目标（`linux` / `windows`，即 `matrix.target != 'android'`）额外：
 
-8. `Python encoding gate (implicit encoding fails here, not on the next Windows run)`：`PYTHONWARNDEFAULTENCODING=1` + `-X warn_default_encoding` + `-W error::EncodingWarning` 跑 `p2pchat/tests/backend`（`ci/watchdog.py --timeout 600` 包裹）→ 日志 `p2pchat/releases/encoding-gate.log`。详见第三节；
-9. `Non-UTF-8 default encoding scan (LC_ALL=C, ASCII-only paths)`（仅 `linux`）：`LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0` + 同上钳制，从 `/tmp` 下的 ASCII 符号链接路径跑 `p2pchat/tests`（唯一排除 `tests/desktop/test_engine.py`，理由见 3.5）→ 日志 `p2pchat/releases/non-utf8-encoding-scan.log`。详见第三节。
+8. `Python encoding gate (implicit encoding fails here, not on the next Windows run)`：`PYTHONWARNDEFAULTENCODING=1` + `-X warn_default_encoding` + `-W error::EncodingWarning` 跑**整套 `p2pchat/tests`**（`ci/watchdog.py --timeout 600` 包裹，`QT_QPA_PLATFORM=offscreen`）→ 日志 `p2pchat/releases/encoding-gate.log`。详见第三节；
+9. `Non-UTF-8 default encoding scan (LC_ALL=C, ASCII-only paths)`（仅 `linux`）：`LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0` + 同上钳制，从 `/tmp` 下的 ASCII 符号链接路径跑**整套 `p2pchat/tests`**（**没有任何 `--ignore`/`--deselect`**，`QT_QPA_PLATFORM=offscreen`）→ 日志 `p2pchat/releases/non-utf8-encoding-scan.log`。详见第三节。
 
 桌面平台（`linux` / `windows`）额外：
 
@@ -48,6 +52,45 @@
 
 15. `Record artifact sha256 and dependency audit (no release, no deploy)`（`if: always()`）：写 `npm-audit.json`，并对 `p2pchat/releases/` 下所有产物生成 `SHA256SUMS.txt`；
 16. `Upload private build output and failure evidence (no release)`（`if: always()`）：`actions/upload-artifact@v6`，`retention-days: 14`，`if-no-files-found: error`。新增的两个编码日志（`*.log`）随既有 `p2pchat/releases/*.log` 一起上传，失败证据不会丢。
+
+### 2.1 Linux runner 的 Qt 系统库（t37 新增步骤 5.1）
+
+**问题（CI run 38193188589）**：`linux` 与 `android` 两个 target 在**收集** `p2pchat/tests/desktop/test_ui.py` 时红：
+`ImportError: libEGL.so.1: cannot open shared object file`。原因是 PySide6 的 Qt 库在**导入期**就要系统运行库
+（`from PySide6 import QtWidgets` → `libQt6Widgets.so.6` → `libQt6Gui.so.6`），而 runner 镜像没装。
+Windows 不红：PySide6 的 Windows wheel 自带运行库。
+
+**依赖清单（本机 `readelf -d` / `ldd` 实测，不是猜的）**：
+
+| Qt 库 | 直接 NEEDED 的系统库（节选） |
+| --- | --- |
+| `libQt6Gui.so.6` | **`libEGL.so.1`**、`libGL.so.1`、`libglib-2.0.so.0`、`libfontconfig.so.1`、`libfreetype.so.6`、`libX11.so.6`、`libxkbcommon.so.0` … |
+| `libQt6Widgets.so.6` | `libGL.so.1`、`libdbus-1.so.3`、`libfontconfig.so.1`、`libxcb.so.1` … |
+| `libQt6XcbQpa.so.6`（xcb 平台插件；offscreen 下不加载） | `libxcb-cursor.so.0`、`libxcb-icccm.so.4`、`libxcb-image.so.0`、`libxkbcommon-x11.so.0` … |
+| 随 wheel 自带、无需安装 | `libQt6*.so.6`、`libicu*.so.73`（在 `PySide6/Qt/lib/`） |
+
+安装清单（`apt-get install -y --no-install-recommends`）：`libegl1 libgl1 libglx0 libglvnd0 libegl-mesa0
+libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libfreetype6 libdbus-1-3 libglib2.0-0 libsystemd0
+libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1
+libxcb-randr0 libxcb-render0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-util1
+libxcb-xfixes0 libxcb-xkb1 libpng16-16 libbrotli1`（`libegl-mesa0` 只是防御：offscreen 不做 GL 上下文）。
+
+装完两道断言（缺库就大声失败，不静默）：
+1. `ldd` 那三个 Qt 库不得出现 `not found`；
+2. `QT_QPA_PLATFORM=offscreen python -c "…QApplication([])…"` 必须打印 `QT_RUNTIME_OK`。
+另外 `Python gates` 与两个编码门都设了 `QT_QPA_PLATFORM=offscreen`（桌面测试 fixture 自己也设，双保险）。
+
+**本机证据（本机是 Arch + 桌面环境，这些库本来就有，因此无法在本机复现"没装包"的状态）**：
+
+| 做法 | 结果 |
+| --- | --- |
+| `readelf -d PySide6/Qt/lib/libQt6Gui.so.6` | 直接 NEEDED 里就有 `[libEGL.so.1]`、`[libGL.so.1]`、`[libglib-2.0.so.0]` |
+| 用一个非法文件冒充 `libEGL.so.1` 放进 `LD_LIBRARY_PATH`（模拟 loader 拿不到可用的 libEGL） | `from PySide6 import QtWidgets` → **`ImportError: …/libEGL.so.1: file too short`**（exit 1）——与 CI 的 `libEGL.so.1: cannot open shared object file` 同类 |
+| 移除那个文件（等价于装上 `libegl1`） | `QT_RUNTIME_OK 6.12.0 6.12.0 offscreen`（exit 0） |
+| 把 5.1 的 run 块原样提取、只把 `apt-get` 两行换成 `echo`（本机没有 apt）后执行 | 断言 1/2 都通过并打印 `QT_RUNTIME_OK`（证明断言逻辑本身可用；**apt 部分只能在 runner 上验证**） |
+
+**只能在 runner 确认**：`apt-get install` 的实际结果（包名是否全对、镜像可用性）、真实"缺库→装库"的恢复过程、
+两个 target 的耗时，以及断言在 runner 上的输出（artifact：`p2pchat/releases/qt-runtime-libs.log`）。
 
 ## 三、编码防线（t32 建门，t35 扩到全域）
 
@@ -69,7 +112,7 @@ PYTHONWARNDEFAULTENCODING=1 python -u p2pchat/ci/watchdog.py --timeout 600 -- \
   于是"Windows 默认码页天然覆盖 cp1252"这件事有日志可查，而不是口头声明；
 - `set -o pipefail` 保证 `tee` 不吞退出码；没有 `continue-on-error`、没有 `|| true`、没有 deselect/`-k`。
 
-### 3.2 步骤 9：非 UTF-8 默认编码扫描（仅 linux；全域减去 1 个结构性不兼容文件）
+### 3.2 步骤 9：非 UTF-8 默认编码扫描（仅 linux；**整套 `p2pchat/tests`，无任何排除**）
 
 ```bash
 PREFIX="$(python -c 'import sys; print(sys.prefix)')"
@@ -79,8 +122,7 @@ cd /tmp/enc-scan/repo
 LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 PYTHONWARNDEFAULTENCODING=1 \
   /tmp/enc-scan/pyprefix/bin/python -u p2pchat/ci/watchdog.py --timeout 600 -- \
   /tmp/enc-scan/pyprefix/bin/python -u -X warn_default_encoding -W error::EncodingWarning \
-  -m pytest p2pchat/tests -q --ignore=p2pchat/tests/desktop/test_engine.py \
-  -o faulthandler_timeout=60 | tee -a p2pchat/releases/non-utf8-encoding-scan.log
+  -m pytest p2pchat/tests -q -o faulthandler_timeout=60 | tee -a p2pchat/releases/non-utf8-encoding-scan.log
 ```
 
 **为什么必须先建 ASCII 符号链接再 `cd` 进去（本机实测，不是推测）**：
@@ -102,51 +144,55 @@ GitHub runner 的路径本来就是 ASCII，符号链接是让**同一条命令�
    （`QApplication` 初始化）会因为 cwd 仍是中文路径而 `UnicodeEncodeError: ... surrogates not allowed`（ERROR）。
    要完整复现 CI（runner 的 workspace 本来就是 ASCII），需要**真实的 ASCII 副本**，例如：
    `mkdir -p /tmp/enc-ascii && tar -cf - --exclude=node_modules --exclude=.git --exclude=dist . | (cd /tmp/enc-ascii && mkdir -p repo && cd repo && tar -xf -) && mkdir -p /tmp/enc-ascii/repo/p2pchat/releases`
-   （实测：ASCII 副本下 Qt 用例正常，只剩 3.5 里那 4 条结构性失败）。
+   （实测：ASCII 副本下 Qt 用例正常，整套 522 条全绿；见 3.3）。
 2. 步骤 9 在 `cd` 之前 `mkdir -p p2pchat/releases`，`cd` 之后把日志写回同一个目录 —— 所以**副本里必须先有 `p2pchat/releases/`**，否则 `tee` 会报 `No such file or directory`（本机实测踩过一次）。
 
 ### 3.3 实测证据（本机 Linux，Python 3.12.14；两步命令从 `build.yml` 原样提取执行）
 
-成功（t35 最终状态）：
+成功（t37 最终状态；在**真实 ASCII 副本**上跑，等价 CI 的 ASCII workspace）：
 
 | 步骤 | 实测输出 | 退出码 | 耗时 |
 | --- | --- | --- | --- |
-| 8 EncodingWarning 当错误（全域 482 条） | `482 passed, 53 warnings` / `WATCHDOG_FINISHED exitCode=0`；日志 `default=utf-8 preferred=UTF-8 fs=utf-8`；**EncodingWarning 出现 0 次** | 0 | 123 s |
-| 9 C locale 扫描（469 条） | `469 passed, 49 warnings` / `WATCHDOG_FINISHED exitCode=0`；日志 `preferred=ANSI_X3.4-1968 fs=ascii` | 0 | 112 s |
+| 8 EncodingWarning 当错误（**全域 522 条**） | `522 passed, 53 warnings` / `WATCHDOG_FINISHED exitCode=0`；日志 `default=utf-8 preferred=UTF-8 fs=utf-8`；**EncodingWarning 出现 0 次** | 0 | 125 s |
+| 9 C locale 扫描（**全域 522 条，无排除**） | `522 passed, 53 warnings` / `WATCHDOG_FINISHED exitCode=0`；日志 `preferred=ANSI_X3.4-1968 fs=ascii` | 0 | 133 s |
 
-失败一次（负例）：把 `p2pchat/tests/test_core.py:58` 临时改回不带 `encoding` 的 `read_text()`，用步骤 8 的命令原样跑：
-`EncodingWarning: 'encoding' argument not specified` → `1 failed, 481 passed`，`WATCHDOG_FINISHED exitCode=1`（整体 exit=1）；
-随后撤销、`grep` 确认恢复成 `read_text(encoding='utf-8')`，再跑一次全绿。
-（t32 时的另一个负例仍然有效：C locale 下不带 `encoding` 读含中文的文件 → `UnicodeDecodeError: 'ascii' codec can't decode byte 0xe8 ...`。）
+原先被排除的那个文件（`p2pchat/tests/desktop/test_engine.py`）在 C locale 下逐条实测 **13 passed**
+（含当初被迫排除的 `test_real_webrtc_handshake_text_and_file`、`test_no_direct_path_is_reported_not_faked`、
+`test_gateway_methods_report_real_capability_but_never_message`、`test_udp_probe_reports_probe_only`）。
+
+失败一次（负例，只在 `/tmp` 的 ASCII 副本里做，仓库文件不动）：把该副本的 `p2pchat/tests/test_core.py:58`
+改回不带 `encoding` 的 `read_text()`，用步骤 9 命令原样跑：
+`EncodingWarning: 'encoding' argument not specified` → **`1 failed, 521 passed`**、`WATCHDOG_FINISHED exitCode=1`；
+随后从仓库文件复原副本并确认 `read_text(encoding='utf-8')` 仍在。
+（t32/t35 的另两个负例仍然有效：步骤 8 上同样一次临时改动 → `1 failed, 481 passed`；C locale 下不带 `encoding`
+读含中文的文件 → `UnicodeDecodeError: 'ascii' codec can't decode byte 0xe8 ...`。）
 
 ### 3.4 时间代价
 
 | 步骤 | 本机实测 | 对比 t32（只跑 backend） |
 | --- | --- | --- |
-| 8 EncodingWarning 当错误（482 条） | 123 s | +101 s |
-| 9 C locale 扫描（469 条） | 112 s | +90 s |
-| 合计 | **+235 s / job（约 3.9 min）** | t32 时为 +44 s |
+| 8 EncodingWarning 当错误（522 条） | 125 s | +103 s |
+| 9 C locale 扫描（522 条） | 133 s | +111 s |
+| 合计 | **+258 s / job（约 4.3 min）** | t32 时为 +44 s |
 
 两步各自 `timeout-minutes: 12`；job 总超时仍是 40 min。
 
-### 3.5 覆盖面与一处结构性边界（不掩盖）
+### 3.5 覆盖面：整套 `p2pchat/tests`，没有任何排除（历史偏差已闭环）
 
-- **步骤 8 覆盖整套 `p2pchat/tests`**（本机 482 条全集，EncodingWarning 0 次）。t32 报告里的 4 个根因（共 6 个写法）
-  都在 t35 修好，统一只加显式编码、不改行为：
+- **步骤 8 与步骤 9 都覆盖整套 `p2pchat/tests`**（本机 522 条全集，两步都 exit 0；步骤 8 的 EncodingWarning 0 次）。
+  两步都不含 `--ignore`、`--deselect`、`-k`、skip 或 `continue-on-error`（`grep` 复核）。
+- t32 报的 4 个根因（共 6 个写法）由 t35 修好，统一只加显式编码、不改行为：
   `p2pchat/native/adapter.py:69`（产品代码，读 `/proc/net/route`，仍保留原来的 `try/except OSError → return None` 降级）、
   `p2pchat/tests/test_core.py:58` 与 `:98`、`p2pchat/tests/native/test_security.py:102` 与 `:116`（`subprocess.run(..., text=True)` 补 `encoding="utf-8"`）、
   `p2pchat/tests/integration/test_cross_language.py:15`（同上）。
-- **步骤 9 覆盖 469 条**，唯一排除 `p2pchat/tests/desktop/test_engine.py`（13 条，其中 4 条触发）：
-  `test_real_webrtc_handshake_text_and_file`、`test_no_direct_path_is_reported_not_faked`、
-  `test_gateway_methods_report_real_capability_but_never_message`、`test_udp_probe_reports_probe_only`
-  用**中文标签**拼出数据目录（如 `lab.config("网关回声")`），在 `LC_ALL=C`（`fs=ascii`）下
-  `p2pchat/backend/telemetry.py:67` 的 `directory.mkdir(parents=True, exist_ok=True)` 必然
-  `UnicodeEncodeError: 'ascii' codec can't encode characters ...` —— 这是「ASCII 文件系统无法创建这个文件名」的
-  结构性限制，**不是**被测代码的隐式编码缺陷（这 4 条在步骤 8 的全域门里是绿的）。
-  归属：`p2pchat/tests/desktop/`；修法二选一：把那几条的标签/目录名改成 ASCII，或显式声明需要 UTF-8 文件系统。
-  修好后删掉步骤 9 的 `--ignore=...` 即可覆盖 482 条全集（命令其余部分不动）。
+- 曾经的一次临时排除（t35 的 `--ignore=p2pchat/tests/desktop/test_engine.py`，4 条中文数据目录用例在 `fs=ascii` 下
+  `directory.mkdir()` 失败）**已闭环**：t36 把 `telemetry` 的目录命名改成 ASCII 安全（`room_directory()`：可读片段 + 哈希，
+  旧目录优先沿用），t39 又把 `python_desktop/engine.py`、`selftest.py`、`qt_ui.py` 接到
+  `room_directory`/`records_directory`。t37 移除了排除并实测该文件 13 passed、全域 522 passed。
+- **前置依赖**：整套测试包含桌面用例，导入 `PySide6` 需要 Qt 系统库，所以步骤 7/8/9 都依赖上面的 5.1 步骤；
+  缺库时会在收集期就 `ImportError: libEGL.so.1`（CI run 38193188589 的 linux/android 红，见 2.1）。
 - 既有 `Python gates` 步骤里的 Windows 全量 `pytest p2pchat/tests`（不带钳制）仍在 cp1252 默认码页下运行，
-  属于"整套的非 UTF-8 运行时覆盖"；t32/t35 都没有改动它、也没有削弱它。
+  属于"整套的非 UTF-8 运行时覆盖"；t32/t35/t37 都没有改动它、也没有削弱它。
 - 易混淆点：`p2pchat/server.py:630` 在 C locale 日志里出现的那一行是 aiohttp 的 `NotAppKeyWarning`（`web.Application(...)`），
   **不是**隐式编码问题。
 
@@ -179,9 +225,11 @@ artifact 名称：`p2p-observatory-<target>-<commit sha>` 与 `p2p-observatory-a
 
 ## 六、诚实标注（未验证的东西不会被写成通过）
 
+- **Qt 系统库的结论只能在 runner 上确认**：本机是 Arch + 桌面环境，`libEGL.so.1` 等本来就在，**无法在本机复现"runner 没装包"**；
+  本机只证明依赖清单（`readelf -d`）、缺该库时导入会失败（用非法 libEGL 模拟，错误同类）、以及装好后 `QT_QPA_PLATFORM=offscreen` 能建 `QApplication`（见 2.1）。
 - **编码门的 runner 侧结论只能在 runner 上确认**：本机（Linux 开发机）只证明命令能跑通、能失败、以及本机路径含非 ASCII 时符号链接/ASCII 副本方案有效；
   `windows-2022` 上 `WINDOWS_DEFAULT_CODE_PAGE` 实际打印什么、`LC_ALL=C` 在 runner 上的行为、两步在 runner 上的耗时，
-  以及**步骤 8 在 Windows 上跑全域（482 条，含那 4 条中文标签用例）是否全绿**，都要看第一次 CI 的 artifact 日志（本任务不在 runner 上跑过）。
+  以及**步骤 7/8/9 在 Linux 上装了 Qt 系统库后能否全绿（本机 522 条：步骤 8 与步骤 9 都 exit 0）**、Windows 上跑全域是否全绿，都要看第一次 CI 的 artifact 日志（本任务不在 runner 上跑过）。
 - **本机（Linux 开发机）没有 Android SDK**，`android-native` job 的所有步骤在本地都是 **NOT_RUN**：Java/Gradle 只验证到 `gradlew --version` 与 `assembleRtcDebug` 因缺 SDK/JDK 25 而失败（可行性报告 G1/G2）。**这个 job 的第一次 CI 运行才是它的第一份真实证据**，本地没有、也不会有它的结果。
 - **构建成功 ≠ 应用可用**：`p2pchat/android-native` 目前只有构建脚手架与 AndroidManifest，没有 Kotlin 源码也没有 instrumentation 用例（可行性报告 G3）。所以模拟器 DataChannel 验证是 `NOT_RUN`（原因写在 `android-native-emulator-status.txt`）：没有可执行的用例，且按边界不下载系统镜像、不接受许可。
 - **Windows 桌面未验证**：spec 头注释与 `docs/DESKTOP-PYTHON.md` 都标注了 Windows/macOS 未实测；`build (windows)` 第一次运行的结果就是结论，**失败就留失败**。
@@ -194,9 +242,9 @@ artifact 名称：`p2p-observatory-<target>-<commit sha>` 与 `p2p-observatory-a
 # 质量门
 node --test p2pchat/tests/platform/*.test.cjs p2pchat/tests/client/*.test.cjs
 .venv/bin/python -m unittest discover -s p2pchat/ci -p 'test_*.py'
-.venv/bin/python -m pytest p2pchat/tests -q
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest p2pchat/tests -q
 
-# 编码防线（t32 建门 / t35 扩到全域；与工作流第 8、9 步同一条命令）
+# 编码防线（t32 建门 / t35 扩到全域 / t37 去掉排除；与工作流第 8、9 步同一条命令）
 PYTHONWARNDEFAULTENCODING=1 .venv/bin/python -u p2pchat/ci/watchdog.py --timeout 600 -- \
   .venv/bin/python -u -X warn_default_encoding -W error::EncodingWarning \
   -m pytest p2pchat/tests -q -o faulthandler_timeout=60
@@ -209,7 +257,13 @@ cd /tmp/enc-scan/repo
 LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 PYTHONWARNDEFAULTENCODING=1 \
   /tmp/enc-scan/pyprefix/bin/python -u p2pchat/ci/watchdog.py --timeout 600 -- \
   /tmp/enc-scan/pyprefix/bin/python -u -X warn_default_encoding -W error::EncodingWarning \
-  -m pytest p2pchat/tests -q --ignore=p2pchat/tests/desktop/test_engine.py -o faulthandler_timeout=60
+  -m pytest p2pchat/tests -q -o faulthandler_timeout=60
+
+# Qt 系统库（CI 的 5.1 步骤是 apt；本机是 Arch，等价检查就是下面这条断言）
+# Debian/Ubuntu 上等价于：sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0 libxcb-cursor0 …
+QT_QPA_PLATFORM=offscreen .venv/bin/python -c "from PySide6 import QtWidgets; QtWidgets.QApplication([]); print('QT_RUNTIME_OK')"
+QT_LIB="$(.venv/bin/python -c 'import PySide6, os; print(os.path.join(os.path.dirname(PySide6.__file__), "Qt", "lib"))')"
+ldd "$QT_LIB/libQt6Gui.so.6" "$QT_LIB/libQt6Widgets.so.6" | grep "not found" || echo "QT_DEPS_RESOLVED"
 
 # 桌面（Linux 已实测；Windows 用 Windows 上的 python 执行同一条命令）
 .venv/bin/python -m PyInstaller --noconfirm --clean p2pchat/tools/desktop.spec
@@ -227,8 +281,8 @@ python p2pchat/android-native/tools/probe_webrtc_aar.py "$AAR" --abis arm64-v8a,
 
 ## 八、本任务范围外的遗留（需 captain 另派）
 
-- 编码门的唯一结构性边界：`p2pchat/tests/desktop/test_engine.py` 的 4 条用例用中文标签拼数据目录，在 `fs=ascii` 下无法创建文件名（见 3.5）。
-  归属人把它改成 ASCII 标签后，删掉步骤 9 的 `--ignore=...` 即可覆盖 482 条全集。步骤 8（EncodingWarning 门）没有这个排除，跑的是全集。
+- 编码门的历史偏差**已闭环**（t36 + t39 + t37）：步骤 9 现在没有任何 `--ignore`/`--deselect`，覆盖面与步骤 8 一致（本机 522 条全集两步都 exit 0）。
+  唯一前置是 Linux runner 要先装 Qt 系统库（5.1 / 2.1）。
 - `p2pchat/tools/artifact-manifest.py:23`、`p2pchat/tools/freeze.py:8,17` 仍引用已删除的 `electron-builder.yml` / `platform/native_entry.py`。
 - `p2pchat/package-lock.json` 仍是旧锁文件：根条目里还写着 `electron` / `electron-builder`，全文 40 个条目提到 electron/asar（实测）。`npm ci` 的同步检查通过（exit 0），所以 CI 不会因此红，但每个 job 仍会装这些死包，`npm-audit.json` 也会带上它们的 advisory（当前 `--omit=dev --audit-level=moderate` 与 `--audit-level=high` 都是 exit 0，门没有被削弱）。清理方式（需要单独的 npm/依赖任务）：删掉锁里这两个包后 `npm install --package-lock-only --ignore-scripts`，再用 `grep -c "node_modules/electron" package-lock.json` 复核为 0。
 - `p2pchat/README.md` 的「Linux Electron / Windows Electron」两行与 `p2pchat/PLATFORMS.md` 的 Electron 表述需要归属人同步。

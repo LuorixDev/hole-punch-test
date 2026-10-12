@@ -210,6 +210,48 @@ def test_capability_output_is_utf8_even_under_a_cp1252_parent_codepage():
     assert frames[-1]["result"]["prediction"]["hitRateNote"] == note
 
 
+def test_frames_keep_canonical_newlines_when_the_text_stream_would_translate():
+    """Windows text mode rewrites \\n as \\r\\n; the bytes on the wire must stay canonical."""
+    import io
+
+    from p2pchat.native.bridge import serve
+
+    class OneRequest:
+        def __init__(self):
+            self.sent = False
+
+        async def readline(self):
+            if self.sent:
+                return b""
+            self.sent = True
+            # 输入侧本来就容忍 CRLF：JSON 把行尾 CR 当空白，这里正是 CRLF 输入。
+            return (json.dumps(dict(v=1, id=1, method="capabilities", params={})) + "\r\n").encode()
+
+    raw = io.BytesIO()
+    # newline="\r\n" 让 TextIOWrapper 在任何平台都把所有写出的 "\n" 翻成 CRLF——
+    # 与 CI 上 Windows 文本模式完全同一种行为。
+    translating = io.TextIOWrapper(raw, encoding="utf-8", newline="\r\n")
+    asyncio.run(serve(adapter=NativeAdapter(), reader=OneRequest(), output=translating))
+    written = raw.getvalue()
+    assert written.endswith(b"\n"), written[-8:]
+    assert b"\r" not in written, f"帧必须规范化成 \\n，不得出现 CRLF：{written[-16:]!r}"
+    frames = [json.loads(line) for line in written.decode(CLI_ENCODING).splitlines() if line.strip()]
+    assert frames[-1]["id"] == 1
+    assert not frames[-1]["result"]["prediction"]["hitRateNote"].isascii()
+
+
+def test_cli_emits_no_carriage_returns_in_either_mode():
+    """CLI 输出（一次性子命令与 stdio 帧模式）都必须是规范 \\n 字节。"""
+    once = run_bridge(args=["capabilities"], bytes_output=True)
+    assert once.returncode == 0, (once.returncode, once.stderr)
+    assert once.stdout.endswith(b"\n") and b"\r" not in once.stdout, once.stdout[-16:]
+    assert json.loads(once.stdout.decode(CLI_ENCODING))["v"] == 1
+    framed = run_bridge(requests=[dict(v=1, id=1, method="capabilities", params={})], bytes_output=True)
+    assert framed.returncode == 0, (framed.returncode, framed.stderr)
+    assert b"\r" not in framed.stdout, framed.stdout[-16:]
+    assert [json.loads(line)["id"] for line in framed.stdout.decode(CLI_ENCODING).splitlines() if line.strip()] == [1]
+
+
 def test_write_failure_is_reported_as_bridge_output_error():
     """Deterministic injection: a failing writer must not be swallowed silently."""
     from p2pchat.native.bridge import BridgeOutputError, serve

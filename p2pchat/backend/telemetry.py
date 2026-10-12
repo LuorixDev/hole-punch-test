@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
 import sqlite3
@@ -74,10 +75,31 @@ def validate_event(event,session):
 #     且与文件系统编码无关——这正是非 UTF-8 编码下也能建目录的原因。
 #   * 房间名里可能带 '/'、'..' 之类字符，片段化顺带把它们变成 '-'，不会形成路径穿越。
 # 路径里只有房间名与它的哈希，不含密钥/凭据；同一房间名无论 secret 是什么都映射到同一目录。
+# 输入归一化也在这里做（room_text）：非 UTF-8 文件系统/语言环境（LC_ALL=C 的容器/CI）下，
+# 命令行/环境变量/文件系统交回来的名字是 surrogateescape 形式，调用方不需要也不应该各自处理——
+# 归一化只有这一处，未来新增调用方直接传房间名即可。
+# **不变量**：正常解码的 `'房间'` 与代理转义形式（`b'房间'.decode('utf-8','surrogateescape')`）
+# 必须得到同一个目录名；否则同一个房间会按 locale 分裂成两份历史，比原缺陷更糟。
 ROOM_DIR_SLUG_MAX=32
 ROOM_DIR_HASH_CHARS=16
 ROOM_DIR_INFO=b'p2pchat/room-dir/v1\0'
 _UNSAFE_SLUG=re.compile(r'[^A-Za-z0-9_-]+')
+
+
+def room_text(room):
+    """把 locale 交回来的房间名还原成 UTF-8 文本——命名与哈希的**唯一**归一化点。
+
+    非 UTF-8 文件系统/语言环境（LC_ALL=C 的容器/CI）下，`--room 中文` 经 argv、环境变量或
+    文件系统交到 Python 手里是 surrogateescape 字符串（每个字节一个代理码位）。这里按
+    **原始字节**还原：正常解码的 str 与代理转义形式得到同一串字节 ⇒ 同一目录
+    （否则同一个房间会按 locale 分裂成两份历史）。
+    还原不出来的字节（不是合法 UTF-8）用 replacement 字符代替，绝不把编码错冒给调用方。
+    """
+    raw=str(room).encode('utf-8','surrogateescape')
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return raw.decode('utf-8','replace')
 
 
 def directory_slug(label,limit=ROOM_DIR_SLUG_MAX):
@@ -87,25 +109,44 @@ def directory_slug(label,limit=ROOM_DIR_SLUG_MAX):
 
 
 def room_directory_name(room):
-    """房间数据目录的**目录名**（不含父目录）：可读片段 + 稳定哈希，ASCII 安全且不碰撞。"""
-    digest=hashlib.sha256(ROOM_DIR_INFO+str(room).encode('utf-8')).hexdigest()[:ROOM_DIR_HASH_CHARS]
-    return '%s-%s' % (directory_slug(room),digest)
+    """房间数据目录的**目录名**（不含父目录）：可读片段 + 稳定哈希，ASCII 安全且不碰撞。
+
+    先经 :func:`room_text` 归一化（代理转义形式与正常解码形式同名同哈希），再算片段与哈希。
+    """
+    text=room_text(room)
+    digest=hashlib.sha256(ROOM_DIR_INFO+text.encode('utf-8')).hexdigest()[:ROOM_DIR_HASH_CHARS]
+    return '%s-%s' % (directory_slug(text),digest)
 
 
 def legacy_room_directory(base,room):
     """旧规则的目录（房间名直接当目录名）——只有里面有数据时才算数。
 
-    非 UTF-8 文件系统编码下，这个名字根本不可能存在于磁盘上（也就无从创建）；
-    探测本身也必须是有编码安全的：`os.stat` 在这种平台上会抛 UnicodeEncodeError，
-    这里按"旧目录不存在"处理，绝不因此崩溃。
+    两种形式都试，谁先命中算谁（顺序固定，结果确定）：`str(room)` 原样（在非 UTF-8
+    文件系统编码下，代理转义形式经 surrogateescape 正好落回磁盘上的真实字节，能认出旧目录）
+    与 `room_text(room)` 归一化后的名字（在 UTF-8 文件系统上正常解码的名字）。
+    探测与返回都必须编码安全：任何编码错误按"旧目录不存在"处理，绝不因此崩溃；
+    命中后只要本机编码放得下就返回归一化形式的路径，使返回值与输入的解码形式无关。
     """
-    try:
-        candidate=Path(base)/str(room)
-        if candidate.is_dir() and any(candidate.iterdir()):
-            return candidate
-    except (UnicodeError,OSError,ValueError):
+    base=Path(base)
+    hit=None
+    for text in dict.fromkeys((str(room),room_text(room))):
+        try:
+            candidate=base/text
+            if candidate.is_dir() and any(candidate.iterdir()):
+                hit=candidate
+                break
+        except (UnicodeError,OSError,ValueError):
+            continue
+    if hit is None:
         return None
-    return None
+    # 两种解码形式可能指向同一个目录：统一返回归一化形式的路径（本机编码放得下时），
+    # 使返回值与输入形式无关——否则同一房间会因为 locale 不同而看起来像两个目录。
+    canonical=base/room_text(room)
+    try:
+        os.fsencode(str(canonical))
+    except UnicodeEncodeError:
+        return hit
+    return canonical
 
 
 def room_directory(base,room,*,prefer_legacy=True):

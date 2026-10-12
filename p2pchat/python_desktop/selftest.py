@@ -28,7 +28,8 @@ from pathlib import Path
 
 from aiohttp import web
 
-from p2pchat.server import Stun, make_app
+from p2pchat.backend.telemetry import room_directory
+from p2pchat.server import Stun, data_directory, make_app
 
 from .engine import DesktopEngine, EngineConfig
 from .methods import METHOD_BY_ID
@@ -60,7 +61,8 @@ class SelfTestLab:
 
     async def start_server(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        app = make_app(str(self.root / "central"), [{"urls": self.stun_url}] if self.with_stun else [])
+        app = make_app(str(data_directory(self.root / "central", self.room)),
+                       [{"urls": self.stun_url}] if self.with_stun else [])
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         await web.TCPSite(self.runner, LOOPBACK, self.http_port).start()
@@ -98,7 +100,9 @@ class SelfTestLab:
             secret=self.secret,
             name=name,
             bind_host=host,
-            data_dir=str(self.root / name.replace(" ", "_")),
+            # 自检节点名可以是"网关回声"这类非 ASCII：经共享规则编码后再落盘，
+            # 否则 LC_ALL=C（fs encoding=ascii）下这里就会是第一个 UnicodeEncodeError。
+            data_dir=str(room_directory(self.root, name)),
             stun_url=self.stun_url if self.with_stun else None,
             echo=echo,
             allow_native=self.native,

@@ -27,6 +27,7 @@ import time
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import methods as plain
+from .engine import records_directory
 from .gateway_optin import GatewayOptIn
 from .lan_client import LanDirect
 from .audio import Recorder, recorder_status
@@ -729,7 +730,9 @@ class DesktopApp(QtWidgets.QMainWindow):
             self.engine._emit("send.failed", code=code)
             return
         name = f"voice-{time.strftime('%H%M%S')}.wav"
-        directory = os.path.join(os.path.expanduser("~"), ".p2pchat-desktop", "voice")
+        # 录音和记录放同一个房间目录（共享规则；旧 <data_dir>/voice 有数据时继续沿用），
+        # 房间名不进路径 ⇒ 非 UTF-8 文件系统编码下也能落盘。
+        directory = os.path.join(records_directory(self.engine.config.data_dir, self.engine.config.room), "voice")
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, name)
         with open(path, "wb") as handle:
