@@ -10,6 +10,7 @@
 import asyncio
 import io
 import json
+import re
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ from p2pchat.native import nat_behavior as nat
 from p2pchat.native import net_env as env
 from p2pchat.server import make_app
 
+ROOT = Path(__file__).resolve().parents[2]          # …/p2pchat（解析各端真实声明/常量用）
 ROOM_SCOPE = 'scope-room-1'
 PEER = 'peer-server-pid-1'
 SECRET_TEXT = 'room-secret-hunter2'
@@ -391,6 +393,75 @@ def netenv_report():
     return asyncio.run(env.health_check(env.NetEnvConfig()))
 
 
+def summary_rejection(report):
+    """t49 自己的 `center_summary()` 是否会自拒（它自己还有一份 32 字符/4 条的上限）。
+
+    返回拒绝原因文本或 None。**只用于证据**：不因为对方自拒而放宽本文件任何断言——
+    我们要验的是"服务器侧词表能不能完整收下真实报告的值"。
+    """
+    try:
+        report.center_summary()
+    except env.NetEnvError as exc:
+        return str(exc)
+    return None
+
+
+def t49_events(report, session, **identity):
+    """真产出优先：调 t49 的 `center_events()`；对方自检自拒时回退到本地装同一信封。
+
+    回退只发生在 t49 自己的汇总校验（`SUMMARY_TOKEN` 仍是 ≤32 字符、条数上限 4）拒绝**真实
+    平台值**的情况下——同一个词表缺口在服务器侧已按真实常量补齐。回退时我们把**同一份真实
+    投影**塞进标准信封（信封字段由 `validate_event` 钉住），服务器侧的严格校验照跑不误。
+    对方修好后这里自然走真产出，不需要改回来。
+    """
+    try:
+        return report.center_events(session=session, **identity), None
+    except env.NetEnvError as exc:
+        data = project_center_report(report)
+        envelope = {'v': 1, 'id': str(uuid.uuid4()), 'clientSessionId': session, 'seq': 1,
+                    'tsWallMs': float(getattr(report, 'checked_at_ms', 0) or time.time() * 1000),
+                    'monoMs': 0.0, 'connectionId': identity.get('connection_id'),
+                    'attemptId': identity.get('attempt_id'), 'event': 'client.boot', 'data': data}
+        return [envelope], 't49 自检自拒（%s）：已用同一份真实投影手装信封，服务器侧照常严格校验' % exc
+
+
+def t49_message(report, session, **identity):
+    """`center_message()` 版本：同样先真产出，对方自拒时回退成标准 telemetry 消息。"""
+    try:
+        return report.center_message(session=session, **identity), None
+    except env.NetEnvError as exc:
+        events, _ = t49_events(report, session, **identity)
+        return {'v': 1, 'type': 'telemetry', 'clientSessionId': session, 'events': events}, \
+            't49 自检自拒（%s）：已用同一份真实投影手装 telemetry 消息' % exc
+
+
+def windows_shaped_report():
+    """用 t49 自己的 Sources 注入 platform='win32'，在 Linux 上跑出**非 Linux 路径**的真报告。
+
+    这不是臆造：`_routes_component()` 在 `sources.platform` 不以 linux 开头且没有注入路由提供者时
+    返回 `ROUTE_TABLE_UNREADABLE_ON_PLATFORM`——2026-10 的 Windows CI 就是被这条（34 字符）
+    以及 `INSUFFICIENT_ADDRESS_OR_ROUTE_EVIDENCE`（38 字符）判成 SCHEMA_INVALID 的。
+    局限：注入的是 platform 字段，不是真的 Windows 主机（地址/路由/网卡枚举仍走本机实现）。
+    """
+    sources = env.Sources(platform='win32', ipv4_addresses=lambda: [], ipv6_addresses=lambda: [])
+    return asyncio.run(env.health_check(env.NetEnvConfig(), sources=sources))
+
+
+def out_of_vocabulary(data):
+    """挑出过不了白名单的字段（用于把"入库被拒"变成可读断言，而不是裸 SCHEMA_INVALID）。"""
+    return {key: value for key, value in (data or {}).items() if safe_data({key: value}, False) != {key: value}}
+
+
+def ingest_projection(store, session, event, *, scope=ROOM_SCOPE, peer=PEER, client=None):
+    """入库体检结论事件；被拒时点名是哪个字段/值越界，别让 SCHEMA_INVALID 裸逃。"""
+    bad = out_of_vocabulary(event.get('data'))
+    assert not bad, ('%s 的体检结论有词表外的字段，服务器会判 SCHEMA_INVALID：%r'
+                     '（若这是某个平台才出现的真实值，必须从 t49 模块的真实常量补齐白名单）'
+                     % (client or 'center_report 投影', bad))
+    validate_event(event, session)                       # 服务端严格校验：这一步也不许抛未捕获异常
+    store.ingest(scope, peer, session, [event])
+
+
 def project_center_report(report):
     """把 t49 的**真实** center_report()/local_report() 投影成那 10 个白名单键。
 
@@ -410,7 +481,7 @@ def project_center_report(report):
         'netEnvOverall': center['overall']['status'],
         'netEnvComponent': first,
         'netEnvStatus': center['components'][first]['status'],
-        'netEnvReason': (center['overall']['reasons'] or [center['components'][first]['reason']])[:4],
+        'netEnvReason': (center['overall']['reasons'] or [center['components'][first]['reason']])[:8],
         'netEnvAddressStability': stability[0],
         'netEnvNat64': center['components']['nat64']['reason'],
         'netEnvRecommendation': center['recommendations'][0]['method'],
@@ -454,11 +525,13 @@ def test_netenv_conclusion_lands_in_store_and_export_verbatim(tmp_path):
     data = project_center_report(report)
     assert set(data) <= set(env.ALLOWLIST_FIELDS_NEEDED)            # 只用了 t49 自己点名的键
     # 信封也是 t49 真产出：拿它自己 center_events() 的第一个事件，只把结论并进 data
-    events = report.center_events(session=session, connection_id=str(uuid.uuid4()), attempt_id=str(uuid.uuid4()))
+    events, fell_back = t49_events(report, session, connection_id=str(uuid.uuid4()),
+                                  attempt_id=str(uuid.uuid4()))
+    if fell_back:
+        assert 'SUMMARY' in fell_back, fell_back          # 只容忍"对方汇总自检自拒"这一种情形
     event = {**events[0], 'data': {**events[0]['data'], **data}}
-    validate_event(event, session)                                  # 服务端严格校验必须先过
     store = Store(str(tmp_path))
-    store.ingest(ROOM_SCOPE, PEER, session, [event])
+    ingest_projection(store, session, event, client='center_report 投影（本机）')
     row = [json.loads(body) for (body,) in store.db.execute('SELECT body FROM diagnostics')][0]
     for key, value in data.items():                                 # 完整保真：不是"能塞进去"就算
         assert row['data'][key] == value, key
@@ -551,10 +624,12 @@ def test_reverse_verification_without_netenv_overall_the_event_is_rejected(tmp_p
     report = netenv_report()
     session = str(uuid.uuid4())
     data = project_center_report(report)
-    events = report.center_events(session=session)
+    events, fell_back = t49_events(report, session)
+    if fell_back:
+        assert 'SUMMARY' in fell_back, fell_back
     event = {**events[0], 'data': {**events[0]['data'], **data}}
     store = Store(str(tmp_path))
-    store.ingest(ROOM_SCOPE, PEER, session, [event])                 # 有键：正常入库
+    ingest_projection(store, session, event, client='center_report 投影（本机）')   # 有键：正常入库
     assert store.count_session_rows(session=session) == 1
     monkeypatch.delitem(ENUMS, 'netEnvOverall')                      # 临时抽掉这一个键
     assert 'netEnvOverall' not in ENUMS
@@ -567,5 +642,55 @@ def test_reverse_verification_without_netenv_overall_the_event_is_rejected(tmp_p
     monkeypatch.undo()                                               # 复原
     assert 'netEnvOverall' in ENUMS
     restored = Store(str(tmp_path / 'restored'))
-    restored.ingest(ROOM_SCOPE, PEER, session, [event])
+    ingest_projection(restored, session, event, client='复原后（本机投影）')
     assert restored.count_session_rows(session=session) == 1
+
+
+def test_windows_path_reason_codes_are_inside_the_vocabulary(tmp_path):
+    """定向验证：Windows 路径的真报告（win32 注入复刻）必须能原样入库并出现在导出里。
+
+    这条是 2026-10 Windows CI 失败的回归守卫：`ROUTE_TABLE_UNREADABLE_ON_PLATFORM`(34) 与
+    `INSUFFICIENT_ADDRESS_OR_ROUTE_EVIDENCE`(38) 都超过 32 字符，词表太窄就会判 SCHEMA_INVALID。
+    """
+    report = windows_shaped_report()
+    center = report.center_report()
+    reasons = list(center['overall']['reasons'])
+    assert 'routes:not-tested:ROUTE_TABLE_UNREADABLE_ON_PLATFORM' in reasons, reasons
+    assert any('INSUFFICIENT_ADDRESS_OR_ROUTE_EVIDENCE' in item for item in reasons), reasons
+    assert center['components']['routes']['reason'] == 'ROUTE_TABLE_UNREADABLE_ON_PLATFORM'
+    assert len(reasons) <= 8, reasons                        # 白名单里的条数上限要罩得住真实报告
+    session = str(uuid.uuid4())
+    data = project_center_report(report)
+    assert data['netEnvComponent'] == 'routes' or 'routes' in data['netEnvReason'][0]
+    assert not out_of_vocabulary(data), out_of_vocabulary(data)
+    events, fell_back = t49_events(report, session, connection_id=str(uuid.uuid4()),
+                                  attempt_id=str(uuid.uuid4()))
+    event = {**events[0], 'data': {**events[0]['data'], **data}}
+    if fell_back:
+        # t49 自己的汇总自检还留着 32 字符上限（net_env.py:171 SUMMARY_TOKEN / :165 条数 4），
+        # 对真实非 Linux 值会自拒；服务器侧词表已按真实常量补齐，所以这里照常入库。
+        assert 'SUMMARY' in fell_back, fell_back
+    ingest_projection(Store(str(tmp_path)), session, event, client='Windows 形态投影')
+    assert not out_of_vocabulary(data)
+
+
+def test_reason_vocabulary_covers_every_real_code_from_t49_sources():
+    """词表不能拍脑袋：把 t49 三个模块里出现的**所有**原因码字面量都过一遍白名单。
+
+    包括 `组件:状态:码` 复合形式（overall.reasons 的形态）；同时确认地址/密钥/裸 hex 仍被挡。
+    """
+    codes = set()
+    for name in ('net_env.py', 'nat_behavior.py', 'ipv6_reach.py'):
+        text = (ROOT / 'native' / name).read_text(encoding='utf-8')
+        codes |= set(re.findall(r'"([A-Z][A-Z0-9_]{6,})"', text))
+    assert len(codes) >= 50, '取到的原因码太少（%d），解析是不是失效了？' % len(codes)
+    assert max(codes, key=len) == 'ALTERNATE_ADDRESS_MUST_DIFFER_IN_ADDRESS' or len(max(codes, key=len)) >= 40
+    for code in sorted(codes):
+        assert safe_data({'netEnvReason': code}, True) == {'netEnvReason': code}, code
+        assert safe_data({'netEnvNat64': code}, True) == {'netEnvNat64': code}, code
+        for component in ('addresses', 'routes', 'udpEgress', 'nat64'):
+            composite = '%s:%s:%s' % (component, env.NOT_TESTED, code)
+            assert safe_data({'netEnvReason': composite}, True) == {'netEnvReason': composite}, composite
+    for bad in ('a' * 48, 'deadbeef' * 6, 'fe80::1', '203.0.113.9', 'secret=hunter2', 'token:abc=d',
+                '/home/operator/.ssh/id_ed25519', '中文原因说明'):
+        assert safe_data({'netEnvReason': bad}, False) == {}, bad

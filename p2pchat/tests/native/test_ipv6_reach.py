@@ -12,6 +12,8 @@ import uuid
 
 import pytest
 
+from p2pchat import server
+from p2pchat.backend import telemetry
 from p2pchat.native import ipv6_reach as reach
 
 IP_ADDR_SAMPLE = """\
@@ -414,14 +416,218 @@ def test_verdict_parsing_rejects_unknown_shapes_and_mismatched_tokens():
     base = {"v": 1, "type": reach.SIGNAL_RESULT_TYPE, "connectionId": str(uuid.uuid4()),
             "attemptId": str(uuid.uuid4()), "verdict": reach.TIMEOUT, "token": "t" * 8}
     assert reach.parse_reach_verdict(base, token="t" * 8)["verdict"] == reach.TIMEOUT
-    for broken in ([], {**base, "verdict": "LOOKS_FINE"}, {**base, "extra": 1},
-                   {**base, "type": "signal"}, {**base, "v": 2}, {**base, "attemptId": 5}):
+    # Structural problems are INVALID; an unknown *word* is its own, explicit refusal.
+    for broken in ([], {**base, "extra": 1}, {**base, "type": "signal"}, {**base, "v": 2},
+                   {**base, "attemptId": 5}):
         with pytest.raises(reach.ReachError, match="INVALID_REACH_VERDICT"):
             reach.parse_reach_verdict(broken)
+    for unknown in ({**base, "verdict": "LOOKS_FINE"}, {**base, "code": "LOOKS_FINE", "ok": True},
+                    {**base, "code": 5}, {k: v for k, v in base.items() if k != "verdict"}):
+        with pytest.raises(reach.ReachError, match="UNRECOGNIZED_REACH_CODE"):
+            reach.parse_reach_verdict(unknown)
     with pytest.raises(reach.ReachError, match="REACH_TOKEN_MISMATCH"):
         reach.parse_reach_verdict(base, token="other-token")
     with pytest.raises(reach.ReachError, match="INVALID_REACH_VERDICT"):
         reach.parse_reach_verdict(None)
+
+
+def test_authoritative_code_and_ok_are_decoded_without_guessing():
+    """The server's `code`/`ok` is the conclusion; `verdict` is only a convenience word."""
+    identifiers = {"v": 1, "type": reach.SIGNAL_RESULT_TYPE,
+                   "connectionId": str(uuid.uuid4()), "attemptId": str(uuid.uuid4()), "port": 41000}
+    for code, verdict in reach.SERVER_CODE_VERDICT.items():
+        parsed = reach.parse_reach_verdict({**identifiers, "code": code, "ok": code == "REACHABLE"})
+        assert parsed["verdict"] == verdict and parsed["code"] == code
+        assert parsed["ok"] is (code == "REACHABLE")
+        # Never a pass, never a timeout, unless the authority really said so.
+        assert (parsed["verdict"] in reach.POSITIVE_VERDICTS) is (code == "REACHABLE")
+    for code, verdict in (("CONNECTION_REFUSED", reach.CONNECTION_REFUSED),
+                          ("TOKEN_MISMATCH", reach.TOKEN_MISMATCH),
+                          ("REJECTED_BY_POLICY", reach.REJECTED_BY_POLICY)):
+        parsed = reach.parse_reach_verdict({**identifiers, "code": code, "ok": False,
+                                            "failureCode": "DETAIL", "note": "服务端说明"})
+        assert parsed["verdict"] == verdict
+        assert parsed["verdict"] not in {reach.TIMEOUT, reach.NO_V6_ROUTE, reach.REACHED_BY_SERVER}
+        assert parsed["ok"] is False and parsed["failureCode"] == "DETAIL"
+    # The server's optional word must agree with the authority when both are present.
+    agree = reach.parse_reach_verdict({**identifiers, "code": "TOKEN_MISMATCH", "ok": False,
+                                       "verdict": reach.TOKEN_MISMATCH})
+    assert agree["verdict"] == reach.TOKEN_MISMATCH
+
+
+def test_disagreeing_authoritative_fields_are_refused_not_resolved():
+    identifiers = {"v": 1, "type": reach.SIGNAL_RESULT_TYPE,
+                   "connectionId": str(uuid.uuid4()), "attemptId": str(uuid.uuid4())}
+    for payload in ({"code": "REACHABLE", "ok": False},
+                    {"code": "TIMEOUT", "ok": True},
+                    {"code": "CONNECTION_REFUSED", "verdict": reach.TIMEOUT},
+                    {"code": "REACHABLE", "ok": True, "verdict": reach.TIMEOUT},
+                    {"verdict": reach.REACHED_BY_SERVER, "ok": False}):
+        with pytest.raises(reach.ReachError, match="INCONSISTENT_REACH_VERDICT"):
+            reach.parse_reach_verdict({**identifiers, **payload})
+
+
+def test_client_verdict_and_log_tables_match_the_server_contract():
+    """The two sides must agree word-for-word, or the merged timeline would lie."""
+    assert set(reach.SERVER_RESULT_CODES) == set(server.INBOUND_CHECK_LOG)
+    for code, (state, reason) in server.INBOUND_CHECK_LOG.items():
+        assert reach.SERVER_CODE_LOG[code] == (state, reason)
+        assert reach.CLIENT_VERDICT_LOG[reach.SERVER_CODE_VERDICT[code]] == (state, reason)
+    for code, word in server.INBOUND_CHECK_CLIENT_VERDICT.items():
+        assert reach.SERVER_CODE_VERDICT[code] == word
+    # The server deliberately fills no client word for the three refusals; we name them.
+    assert set(server.INBOUND_CHECK_LOG) - set(server.INBOUND_CHECK_CLIENT_VERDICT) == {
+        "CONNECTION_REFUSED", "TOKEN_MISMATCH", "REJECTED_BY_POLICY"}
+    for code in ("CONNECTION_REFUSED", "TOKEN_MISMATCH", "REJECTED_BY_POLICY"):
+        assert reach.SERVER_CODE_VERDICT[code] in reach.VERDICTS
+        assert reach.SERVER_CODE_VERDICT[code] not in reach.POSITIVE_VERDICTS
+
+
+@pytest.mark.asyncio
+async def test_probe_keeps_a_server_refusal_instead_of_a_timeout(monkeypatch):
+    """Real listener, real waiter payload: a refusal must survive as itself."""
+    for code, verdict in (("CONNECTION_REFUSED", reach.CONNECTION_REFUSED),
+                          ("TOKEN_MISMATCH", reach.TOKEN_MISMATCH),
+                          ("REJECTED_BY_POLICY", reach.REJECTED_BY_POLICY)):
+        loopback_global(monkeypatch)
+        identifiers = options(timeout=2.0)
+
+        async def waiter(offer, code=code, identifiers=identifiers):
+            return {"v": 1, "type": reach.SIGNAL_RESULT_TYPE, "connectionId": identifiers.connection_id,
+                    "attemptId": identifiers.attempt_id, "code": code, "ok": False,
+                    "note": server.INBOUND_CHECK_NOTES[code]}
+
+        probe = await reach.probe_reachability(identifiers, provider=lambda: [record("::1", interface="lo")],
+                                               route_check=lambda: True, verdict_waiter=waiter)
+        assert probe.verdict == verdict and not probe.reached
+        assert probe.verdict != reach.TIMEOUT and probe.result["code"] == code
+        assert probe.result["note"] == server.INBOUND_CHECK_NOTES[code]
+        assert probe.listening is False and probe.elapsed_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_probe_expresses_an_unrecognized_server_word_instead_of_guessing(monkeypatch):
+    loopback_global(monkeypatch)
+    identifiers = options(timeout=2.0)
+
+    async def waiter(offer):
+        return {"v": 1, "type": reach.SIGNAL_RESULT_TYPE, "connectionId": identifiers.connection_id,
+                "attemptId": identifiers.attempt_id, "code": "SOMETHING_NEW", "ok": True}
+
+    probe = await reach.probe_reachability(identifiers, provider=lambda: [record("::1", interface="lo")],
+                                           route_check=lambda: True, verdict_waiter=waiter)
+    assert probe.verdict == reach.RESULT_UNRECOGNIZED and not probe.reached
+    assert probe.verdict not in reach.POSITIVE_VERDICTS and probe.verdict != reach.TIMEOUT
+    assert "无法识别" in probe.note and "不猜" in probe.note
+    # The listener is closed even on this path: nothing is left listening.
+    assert probe.listening is False
+    assert await connect_after_close("::1", probe.port)
+    bind_again("::1", probe.port)
+
+
+def test_enumeration_subprocesses_are_encoding_explicit(monkeypatch):
+    """The encoding gate's last failure was a default-encoding `text=True` subprocess."""
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = IP_ADDR_SAMPLE
+        stderr = ""
+
+    def recording_run(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+        return Result()
+
+    monkeypatch.setattr(reach.subprocess, "run", recording_run)
+    assert reach.run_ip_command() == IP_ADDR_SAMPLE
+    assert calls and calls[0][0][:2] == ["ip", "-6"] and calls[0][1]["text"] is True
+    assert all(kwargs["encoding"] == "utf-8" and kwargs["errors"] == "replace" for _, kwargs in calls)
+
+    # The Windows ipconfig fallback must be just as explicit.
+    calls.clear()
+    monkeypatch.setattr(reach, "run_ip_command", lambda: None)
+    monkeypatch.setattr(reach, "enumerate_via_getifaddrs", lambda: None)
+    reach.enumerate_addresses()
+    assert [command for command, _ in calls] == [["ipconfig"]]
+    assert calls[0][1]["encoding"] == "utf-8" and calls[0][1]["errors"] == "replace"
+
+
+def test_telemetry_projection_lands_in_a_client_store_and_in_the_center(tmp_path):
+    """A conclusion must really be written, not silently dropped by the allowlist."""
+    queue = telemetry.LocalQueue(str(tmp_path / "local"))
+    cases = [(reach.REACHED_BY_SERVER, ("completed", None, True)),
+             (reach.CONNECTION_REFUSED, ("failed", "CLOSED", False)),
+             (reach.TIMEOUT, ("timeout", "TIMEOUT", False)),
+             (reach.TOKEN_MISMATCH, ("failed", "AUTH_FAILED", False)),
+             (reach.REJECTED_BY_POLICY, ("unsupported", "SCHEMA_INVALID", False)),
+             (reach.RESULT_UNRECOGNIZED, ("failed", "SCHEMA_INVALID", False)),
+             (reach.NO_GLOBAL_V6, ("unsupported", "UNSUPPORTED", False))]
+    try:
+        for verdict, (state, reason, ok) in cases:
+            probe = reach.ReachProbe(verdict=verdict, connection_id=str(uuid.uuid4()),
+                                     attempt_id=str(uuid.uuid4()), elapsed_ms=12.5)
+            stored = reach.emit_telemetry(queue, probe)
+            assert stored["event"] == reach.TELEMETRY_EVENT == "path.state"
+            assert stored["data"]["state"] == state and stored["data"]["ok"] is ok
+            assert stored["data"].get("reason") == reason
+            assert stored["data"]["family"] == 6 and stored["data"]["mechanism"] == "tcp"
+            assert stored["data"]["protocol"] == "tcp" and stored["data"]["rttMs"] == 12.5
+            assert stored["connectionId"] == probe.connection_id and stored["attemptId"] == probe.attempt_id
+        rows = queue.pending()
+        assert len(rows) == len(cases)
+        allowed = {"state", "reason", "ok", "family", "mechanism", "protocol", "rttMs", "error"}
+        for row in rows:
+            # Nothing was dropped: the strict allowlist returns the same keys unchanged.
+            assert set(row["data"]) <= allowed
+            assert row["data"] == telemetry.safe_data(row["data"], True)
+            telemetry.validate_event(row, queue.session)
+            assert "address" not in json.dumps(row) and "token" not in json.dumps(row["data"])
+        # The center's own strict ingest accepts and really stores the same rows.
+        center = telemetry.Store(str(tmp_path / "center"))
+        try:
+            assert center.ingest("room", "peer", queue.session, rows) == [row["id"] for row in rows]
+            stored_rows = center.db.execute("SELECT COUNT(*) FROM diagnostics").fetchone()[0]
+            assert stored_rows == len(cases)
+        finally:
+            center.close()
+    finally:
+        queue.close()
+
+
+@pytest.mark.asyncio
+async def test_telemetry_probe_writes_the_conclusion_when_a_store_is_given(monkeypatch, tmp_path):
+    loopback_global(monkeypatch)
+    identifiers = options(timeout=2.0)
+    queue = telemetry.LocalQueue(str(tmp_path / "probe-queue"))
+    try:
+        async def waiter(offer):
+            return {"v": 1, "type": reach.SIGNAL_RESULT_TYPE, "connectionId": identifiers.connection_id,
+                    "attemptId": identifiers.attempt_id, "code": "CONNECTION_REFUSED", "ok": False}
+
+        probe = await reach.probe_reachability(identifiers, provider=lambda: [record("::1", interface="lo")],
+                                               route_check=lambda: True, verdict_waiter=waiter,
+                                               telemetry_store=queue)
+        assert probe.verdict == reach.CONNECTION_REFUSED and probe.telemetry_event_id
+        rows = queue.pending()
+        assert len(rows) == 1
+        assert rows[0]["id"] == probe.telemetry_event_id
+        assert rows[0]["data"]["state"] == "failed" and rows[0]["data"]["reason"] == "CLOSED"
+        assert rows[0]["connectionId"] == identifiers.connection_id
+        assert rows[0]["attemptId"] == identifiers.attempt_id
+    finally:
+        queue.close()
+
+
+def test_telemetry_projection_refuses_a_verdict_it_cannot_log():
+    with pytest.raises(reach.ReachError, match="UNRECOGNIZED_REACH_VERDICT"):
+        reach.telemetry_payload("NOT_A_VERDICT")
+    with pytest.raises(reach.ReachError, match="UNRECOGNIZED_REACH_VERDICT"):
+        reach.emit_telemetry(_RefusingStore(), reach.ReachProbe(verdict="NOT_A_VERDICT"))
+
+
+class _RefusingStore:
+    def emit(self, *args, **kwargs):
+        raise AssertionError("无法识别的结论不允许写日志")
 
 
 @pytest.mark.asyncio

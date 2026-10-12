@@ -46,9 +46,16 @@ NET_ENV_STATUS = ({'determined', 'insufficient-evidence', 'not-tested', 'unavail
                   # 推荐项的状态词表（net_env.RECOMMENDATION_STATUSES）
                   {'recommended', 'possible', 'unknown'})
 # 原因码形态（t49 的组件/推荐项原因码，以及 overall 的 `组件:状态:码` 复合形式）：
-# 每段必须字母开头、≤32 字符、最多 3 段。形态上装不下地址（数字开头/点号/空段都不行）、
-# 装不下密钥赋值（没有 '='），自由文本也被挡在外；导出还有 ≥32 位 hex 兜底。
-NET_ENV_TOKEN = re.compile(r'^[A-Za-z][A-Za-z0-9_-]{0,31}(?::[A-Za-z][A-Za-z0-9_-]{0,31}){0,2}$')
+# 每段必须字母开头、≤48 字符、最多 3 段。
+#   长度上限是从 t49 **真实词表**量出来的，不是拍的：net_env/nat_behavior/ipv6_reach 里所有
+#   原因码最长 40（ALTERNATE_ADDRESS_MUST_DIFFER_IN_ADDRESS），紧随其后的是
+#   INSUFFICIENT_ADDRESS_OR_ROUTE_EVIDENCE(38) / NAT64_SYNTHESIZED_PROBE_NO_RESPONSE(35) /
+#   ROUTE_TABLE_UNREADABLE_ON_PLATFORM(34，**只有非 Linux 路径才会出现**，Windows 上必现)。
+#   2026-10 的 Windows CI 就是被这些 >32 的码判成 SCHEMA_INVALID 的，所以这里留 8 个字符余量。
+# 形态上装不下地址（数字开头/点号/空段都不行）、装不下密钥赋值（没有 '='），
+# 纯 hex（≥32 位裸 token 那种）也被单独挡掉；导出还有 ≥32 位 hex 与 localOnly 兜底。
+NET_ENV_TOKEN = re.compile(r'^[A-Za-z][A-Za-z0-9_-]{0,47}(?::[A-Za-z][A-Za-z0-9_-]{0,47}){0,2}$')
+NET_ENV_PURE_HEX = re.compile(r'^[0-9a-f]{8,}$')          # 形态像 token 的整段一律不算原因码
 NET_ENV_COMPONENTS = {'addresses', 'routes', 'udpEgress', 'natBehavior', 'inboundReachability',
                       'ipv6Only', 'nat64'}
 NET_ENV_NAT_BEHAVIOR = {'endpoint-independent', 'address-dependent', 'address-and-port-dependent',
@@ -72,7 +79,7 @@ ENUMS.update({
 #   netEnvUnmeasured —— 未测项清单（闭词表，最多 8 条）
 #   netEnvNat64      —— NAT64 结论 token（t49 的 nat64 原因码，单值）
 LIST_KEYS = {
-    'netEnvReason': (4, None, NET_ENV_TOKEN),
+    'netEnvReason': (8, None, NET_ENV_TOKEN),          # 最多 7 条（每组件一条）+ 余量
     'netEnvUnmeasured': (8, NET_ENV_UNMEASURED, None),
     'netEnvNat64': (1, None, NET_ENV_TOKEN),
 }
@@ -92,6 +99,11 @@ def uid(value):
     except (ValueError,AttributeError): raise ValueError('SCHEMA_INVALID') from None
     return value
 
+def _not_pure_hex(value):
+    """纯 hex 的整串不是原因码（那是 token/哈希的形态）：形态正则放行的长度里再挡一次。"""
+    return not NET_ENV_PURE_HEX.match(value)
+
+
 def safe_data(data, strict=True):
     if not isinstance(data,dict): raise ValueError('SCHEMA_INVALID')
     result={}
@@ -106,7 +118,7 @@ def safe_data(data, strict=True):
             values = value if isinstance(value,list) else [value]
             # 上限 1 的键只收单值：避免把一个结论塞成数组混进去。
             good = (not (limit == 1 and isinstance(value,list)) and 0 < len(values) <= limit and all(
-                isinstance(item,str) and not isinstance(item,bool) and
+                isinstance(item,str) and not isinstance(item,bool) and _not_pure_hex(item) and
                 ((vocab is not None and item in vocab) or (pattern is not None and pattern.match(item)))
                 for item in values))
         elif key in ENUMS:

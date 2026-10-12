@@ -18,6 +18,27 @@ The peer/server side (task t47) receives ``SIGNAL_TYPE`` over signaling, tries t
 back, and returns ``SIGNAL_RESULT_TYPE``. Both sides log the same fields (see
 ``LOG_FIELDS``); the full address is only logged when the user agreed to share it,
 otherwise just the prefix length and the scope are recorded.
+
+Result contract (aligned with the live server)
+----------------------------------------------
+The server's ``code``/``ok`` is the **authoritative** conclusion; its ``verdict`` is
+only a convenience word and must agree with ``code``. ``CONNECTION_REFUSED``,
+``TOKEN_MISMATCH`` and ``REJECTED_BY_POLICY`` are decoded into their own client
+verdicts - they are never folded into ``TIMEOUT``/``NO_V6_ROUTE``/a success. A word
+this module does not know raises ``UNRECOGNIZED_REACH_CODE`` from
+``parse_reach_verdict`` and ends a probe as ``RESULT_UNRECOGNIZED`` ("don't
+understand" is stated, never guessed); disagreeing fields raise
+``INCONSISTENT_REACH_VERDICT`` instead of silently picking one.
+
+Central log
+-----------
+``telemetry_payload``/``emit_telemetry`` project a conclusion onto the existing
+telemetry allowlist (``path.state`` plus state/reason/ok/family/mechanism/protocol and
+a probe-round-trip ``rttMs``), using exactly the ``(state, reason)`` pairs the server
+writes for the same conclusion so the two sides merge. Pass ``telemetry_store`` to
+``probe_reachability`` and the conclusion is really written (see
+``ReachProbe.telemetry_event_id``); ``rttMs`` here is the offer-to-conclusion probe
+round trip and is never chat latency.
 """
 from __future__ import annotations
 
@@ -39,10 +60,53 @@ REFUSED_BY_LOCAL_POLICY = "REFUSED_BY_LOCAL_POLICY"
 NO_GLOBAL_V6 = "NO_GLOBAL_V6"
 NO_V6_ROUTE = "NO_V6_ROUTE"
 ADDRESS_ROTATED = "ADDRESS_ROTATED"
-VERDICTS = (REACHED_BY_SERVER, TIMEOUT, REFUSED_BY_LOCAL_POLICY, NO_GLOBAL_V6, NO_V6_ROUTE, ADDRESS_ROTATED)
+# Server-reported refusals keep their own names: folding "the port refused" or "the
+# token did not match" into TIMEOUT/NO_V6_ROUTE/a success would be a lie. "We could
+# not read the server's word" is also its own name, never a guess.
+CONNECTION_REFUSED = "CONNECTION_REFUSED"
+TOKEN_MISMATCH = "TOKEN_MISMATCH"
+REJECTED_BY_POLICY = "REJECTED_BY_POLICY"
+RESULT_UNRECOGNIZED = "RESULT_UNRECOGNIZED"
+VERDICTS = (REACHED_BY_SERVER, TIMEOUT, REFUSED_BY_LOCAL_POLICY, NO_GLOBAL_V6, NO_V6_ROUTE, ADDRESS_ROTATED,
+            CONNECTION_REFUSED, TOKEN_MISMATCH, REJECTED_BY_POLICY, RESULT_UNRECOGNIZED)
 # A "pass" must never be inferred: only a callback we observed (or that the server
 # reported with a matching token) counts.
 POSITIVE_VERDICTS = frozenset({REACHED_BY_SERVER})
+
+# ------------------------------------------- server result contract (t47, live)
+# The server's `v6-reach-result` carries `code` + `ok` as the AUTHORITATIVE conclusion
+# and fills `verdict` only for the words that have an honest client counterpart
+# (server.py's INBOUND_CHECK_CLIENT_VERDICT). A word we do not know is refused by the
+# parser and surfaced as RESULT_UNRECOGNIZED by the probe - never guessed.
+SERVER_RESULT_CODES = ("REACHABLE", "TIMEOUT", "CONNECTION_REFUSED", "UNREACHABLE_NO_ROUTE",
+                       "TOKEN_MISMATCH", "REJECTED_BY_POLICY")
+SERVER_CODE_VERDICT = {
+    "REACHABLE": REACHED_BY_SERVER,
+    "TIMEOUT": TIMEOUT,
+    "UNREACHABLE_NO_ROUTE": NO_V6_ROUTE,
+    "CONNECTION_REFUSED": CONNECTION_REFUSED,
+    "TOKEN_MISMATCH": TOKEN_MISMATCH,
+    "REJECTED_BY_POLICY": REJECTED_BY_POLICY,
+}
+#: Central-log projection: for every server code this is exactly the (state, reason)
+#: pair the server writes for the same conclusion (server.py's INBOUND_CHECK_LOG), so
+#: the two sides' records merge; the client-local verdicts get their own allowlisted
+#: pairs. Keys and values must stay inside the backend telemetry allowlist.
+CLIENT_VERDICT_LOG = {
+    REACHED_BY_SERVER: ("completed", None),
+    TIMEOUT: ("timeout", "TIMEOUT"),
+    CONNECTION_REFUSED: ("failed", "CLOSED"),
+    NO_V6_ROUTE: ("failed", "ENDPOINT_UNOBSERVABLE"),
+    TOKEN_MISMATCH: ("failed", "AUTH_FAILED"),
+    REJECTED_BY_POLICY: ("unsupported", "SCHEMA_INVALID"),
+    REFUSED_BY_LOCAL_POLICY: ("unsupported", "SCHEMA_INVALID"),
+    NO_GLOBAL_V6: ("unsupported", "UNSUPPORTED"),
+    ADDRESS_ROTATED: ("failed", "ENDPOINT_UNOBSERVABLE"),
+    RESULT_UNRECOGNIZED: ("failed", "SCHEMA_INVALID"),
+}
+SERVER_CODE_LOG = {code: CLIENT_VERDICT_LOG[verdict] for code, verdict in SERVER_CODE_VERDICT.items()}
+#: Event name both sides use for a reachability conclusion's central-log record.
+TELEMETRY_EVENT = "path.state"
 
 # --------------------------------------------------------------- address kinds
 STABLE = "stable"
@@ -68,8 +132,8 @@ SIGNAL_RESULT_TYPE = "v6-reach-result"   # server -> client conclusion
 REACH_PATH = "/p2p-reach"
 OFFER_FIELDS = ("v", "type", "connectionId", "attemptId", "session", "address", "addressType",
                 "scope", "prefixLength", "port", "token", "mechanism", "expiresInMs", "fullAddressShared")
-RESULT_FIELDS = ("v", "type", "connectionId", "attemptId", "verdict", "token", "port", "addressType",
-                 "elapsedMs", "failureCode", "note")
+RESULT_FIELDS = ("v", "type", "connectionId", "attemptId", "verdict", "code", "ok", "token", "port",
+                 "addressType", "elapsedMs", "failureCode", "note")
 #: Central-log schema shared by both sides: same names, correlatable, redacted.
 LOG_FIELDS = ("event", "connectionId", "attemptId", "session", "addressType", "scope",
               "prefixLength", "port", "verdict", "tokenConsumed", "rejected", "note")
@@ -257,10 +321,17 @@ def enumerate_via_getifaddrs():
 
 
 def run_ip_command():
-    """Run `ip -6 addr show` without a shell; no other command is ever invoked."""
+    """Run `ip -6 addr show` without a shell; no other command is ever invoked.
+
+    The encoding is explicit: a default-encoding `text=True` subprocess raises
+    `EncodingWarning` under the project's encoding gate, and the platform default is
+    not UTF-8 everywhere (Windows cp1252). Undecodable bytes become replacement
+    characters instead of crashing the enumeration.
+    """
     for command in (["ip", "-6", "addr", "show"], ["ip", "addr", "show"]):
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False,
+                                    encoding="utf-8", errors="replace")
         except (OSError, subprocess.SubprocessError):
             continue
         if result.returncode == 0 and "inet6" in (result.stdout or ""):
@@ -279,7 +350,8 @@ def enumerate_addresses(runner=None):
     if fallback is not None:
         return fallback
     try:
-        result = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=2, check=False)
+        result = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=2, check=False,
+                                encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         return []
     return parse_ipconfig_output(result.stdout)
@@ -392,6 +464,10 @@ class ReachProbe:
     valid_requests: int = 0
     rejected_requests: int = 0
     listening: bool = False
+    #: Offer-to-conclusion duration of this probe (a probe round trip, never chat latency).
+    elapsed_ms: float | None = None
+    #: Id of the allowlisted telemetry record, when the caller supplied a store.
+    telemetry_event_id: str | None = None
 
     def log_event(self, event, share_full_address=False):
         """Central-log payload; the full address only with explicit user consent."""
@@ -518,24 +594,47 @@ def build_offer(options, choice, port, token, *, now=None, expires_in_ms=None):
 
 
 def parse_reach_verdict(payload, *, token=None):
-    """Parse the server's callback conclusion; unknown shapes never become a pass."""
+    """Parse the server's callback conclusion; unknown shapes never become a pass.
+
+    The server's ``code``/``ok`` are the authoritative conclusion (t47 contract);
+    ``verdict`` is its optional convenience word and must agree with ``code``. A word
+    in the shared vocabulary is decoded to the matching client verdict; a word we do
+    not know raises ``UNRECOGNIZED_REACH_CODE`` ("don't understand" is never guessed
+    into TIMEOUT, NO_V6_ROUTE or a success), and fields that disagree raise
+    ``INCONSISTENT_REACH_VERDICT`` instead of silently picking one of them.
+    """
     if not isinstance(payload, dict):
         raise ReachError("INVALID_REACH_VERDICT")
-    required = {"v", "type", "connectionId", "attemptId", "verdict"}
-    if not required <= set(payload) or set(payload) - set(RESULT_FIELDS):
+    if set(payload) - set(RESULT_FIELDS):
         raise ReachError("INVALID_REACH_VERDICT")
-    if payload["v"] != 1 or payload["type"] != SIGNAL_RESULT_TYPE:
+    if payload.get("v") != 1 or payload.get("type") != SIGNAL_RESULT_TYPE:
         raise ReachError("INVALID_REACH_VERDICT")
-    if payload["verdict"] not in VERDICTS:
-        raise ReachError("INVALID_REACH_VERDICT")
+    for name in ("connectionId", "attemptId"):
+        value = payload.get(name)
+        if not isinstance(value, str) or not _SESSION_RE.match(value):
+            raise ReachError("INVALID_REACH_VERDICT")
+    code, word, ok = payload.get("code"), payload.get("verdict"), payload.get("ok")
+    if code is None and word is None:
+        raise ReachError("UNRECOGNIZED_REACH_CODE")
+    if code is not None:
+        if not isinstance(code, str) or code not in SERVER_RESULT_CODES:
+            raise ReachError("UNRECOGNIZED_REACH_CODE")
+        verdict = SERVER_CODE_VERDICT[code]
+        expected_ok = code == "REACHABLE"
+    else:
+        if not isinstance(word, str) or word not in VERDICTS:
+            raise ReachError("UNRECOGNIZED_REACH_CODE")
+        verdict = word
+        expected_ok = word in POSITIVE_VERDICTS
+    if word is not None and word != verdict:
+        raise ReachError("INCONSISTENT_REACH_VERDICT")
+    if ok is not None and (not isinstance(ok, bool) or ok != expected_ok):
+        raise ReachError("INCONSISTENT_REACH_VERDICT")
     if token is not None and payload.get("token") not in (None, token):
         raise ReachError("REACH_TOKEN_MISMATCH")
-    for name in ("connectionId", "attemptId"):
-        if not isinstance(payload[name], str) or not _SESSION_RE.match(payload[name]):
-            raise ReachError("INVALID_REACH_VERDICT")
-    return {"verdict": payload["verdict"], "note": str(payload.get("note", ""))[:200],
-            "elapsedMs": payload.get("elapsedMs"), "failureCode": payload.get("failureCode", ""),
-            "tokenConsumed": payload.get("token") == token}
+    return {"verdict": verdict, "code": code, "ok": expected_ok,
+            "note": str(payload.get("note", ""))[:200], "elapsedMs": payload.get("elapsedMs"),
+            "failureCode": payload.get("failureCode", ""), "tokenConsumed": payload.get("token") == token}
 
 
 def log_fields(event, *, connection_id="", attempt_id="", session="", address_type=None, scope=None,
@@ -551,16 +650,74 @@ def log_fields(event, *, connection_id="", attempt_id="", session="", address_ty
     return record
 
 
+def telemetry_payload(verdict, *, rtt_ms=None, error=None):
+    """Project one conclusion onto the existing telemetry allowlist.
+
+    This mirrors what the server writes for the same conclusion (same ``state`` and
+    ``reason`` pairs), which is what lets the two sides' records be merged. Every key
+    here is in ``backend/telemetry.py``'s allowlist, so a client store keeps the row
+    instead of silently dropping unknown keys.
+    """
+    if verdict not in CLIENT_VERDICT_LOG:
+        raise ReachError("UNRECOGNIZED_REACH_VERDICT")
+    state, reason = CLIENT_VERDICT_LOG[verdict]
+    data = {"state": state, "family": 6, "ok": verdict in POSITIVE_VERDICTS,
+            "mechanism": "tcp", "protocol": "tcp"}
+    if reason is not None:
+        data["reason"] = reason
+    if rtt_ms is not None:
+        data["rttMs"] = rtt_ms
+    if error:
+        data["error"] = error
+    return data
+
+
+def emit_telemetry(store, probe, *, rtt_ms=None, error=None):
+    """Write one conclusion into an existing telemetry store; returns the stored event.
+
+    ``store`` is the caller's store/queue (``backend.telemetry.LocalQueue`` exposes
+    ``emit(kind, data, connection_id=..., attempt_id=...)``); the emitted record uses
+    only allowlisted keys, so it survives both the local queue and the server's strict
+    ingest instead of being dropped or rejected. Failures propagate: a reachability
+    probe must not look successfully logged when the log write failed.
+    """
+    verdict = getattr(probe, "verdict", probe)
+    if verdict not in CLIENT_VERDICT_LOG:
+        raise ReachError("UNRECOGNIZED_REACH_VERDICT")
+    if rtt_ms is None:
+        rtt_ms = getattr(probe, "elapsed_ms", None)
+    return store.emit(TELEMETRY_EVENT, telemetry_payload(verdict, rtt_ms=rtt_ms, error=error),
+                      connection_id=getattr(probe, "connection_id", None) or None,
+                      attempt_id=getattr(probe, "attempt_id", None) or None)
+
+
 async def probe_reachability(options=None, *, provider=None, route_check=None, on_event=None,
                              on_listening=None, verdict_waiter=None, listener_factory=None,
-                             token=None, clock=time.monotonic):
+                             token=None, clock=time.monotonic, telemetry_store=None):
     """Run one inbound-reachability probe and return an honest verdict.
 
     Only the user's explicit consent (``options.consent``) opens a listener. The
     verdict is one of ``VERDICTS``; "no address" and "no route" are never reported as
     a firewall problem and nothing is reported as reachable without a real callback
     (or a matching server verdict carrying the same one-time token).
+
+    When ``telemetry_store`` is given, the conclusion is also written there as one
+    allowlisted ``path.state`` event (the same fields the server logs), so a probe is
+    never only a local variable.
     """
+    probe = await _run_reach_probe(options, provider=provider, route_check=route_check, on_event=on_event,
+                                   on_listening=on_listening, verdict_waiter=verdict_waiter,
+                                   listener_factory=listener_factory, token=token, clock=clock)
+    if telemetry_store is not None:
+        recorded = emit_telemetry(telemetry_store, probe)
+        probe.telemetry_event_id = recorded.get("id") if isinstance(recorded, dict) else None
+    return probe
+
+
+async def _run_reach_probe(options=None, *, provider=None, route_check=None, on_event=None,
+                           on_listening=None, verdict_waiter=None, listener_factory=None,
+                           token=None, clock=time.monotonic):
+    """The probe itself. Returns a ReachProbe; never infers a pass from silence."""
     options = (options or ReachOptions()).validate()
     if not options.consent:
         # Local policy refuses before any socket is created.
@@ -614,6 +771,7 @@ async def probe_reachability(options=None, *, provider=None, route_check=None, o
             await awaited
 
     waiter = asyncio.create_task(verdict_waiter(offer)) if verdict_waiter is not None else None
+    started = clock()
     deadline = clock() + float(options.timeout)
     next_watch = clock() + float(options.watch_interval)
     while True:
@@ -629,7 +787,14 @@ async def probe_reachability(options=None, *, provider=None, route_check=None, o
             except Exception:
                 payload = None
             if payload is not None:
-                parsed = parse_reach_verdict(payload, token=token)
+                try:
+                    parsed = parse_reach_verdict(payload, token=token)
+                except ReachError:
+                    # "We do not understand this word" is its own outcome: it is never
+                    # a pass, never a timeout, and the listener is still closed below.
+                    probe.verdict = RESULT_UNRECOGNIZED
+                    probe.note = "服务端回报的结论无法识别；看不懂就不猜，既不当作成功也不当作超时"
+                    break
                 probe.result = parsed
                 probe.verdict = parsed["verdict"]
                 probe.reached = parsed["verdict"] in POSITIVE_VERDICTS
@@ -658,6 +823,7 @@ async def probe_reachability(options=None, *, provider=None, route_check=None, o
             pass
     probe.valid_requests = listener.valid_requests
     probe.rejected_requests = listener.rejected_requests
+    probe.elapsed_ms = round((clock() - started) * 1000, 3)
     await listener.close()
     probe.listening = False
     if on_event is not None:
