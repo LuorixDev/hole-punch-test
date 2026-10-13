@@ -1,0 +1,285 @@
+import asyncio
+import uuid
+
+import aiohttp
+import pytest
+from aiohttp import web
+
+from p2plab.client import Client
+from p2plab.common import Identity
+from p2plab.journal import Journal
+from p2plab.server import Hub
+from p2plab.stun import StunServer
+
+
+async def start_hub(tmp_path):
+    journal = Journal(tmp_path / "central.db", role="server", console=False)
+    hub = Hub(journal, admin_token="admin")
+    runner = web.AppRunner(hub.app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+        lambda: StunServer(journal, {}, ("127.0.0.1", 0), None), local_addr=("127.0.0.1", 0)
+    )
+    hub.stun_port = transport.get_extra_info("sockname")[1]
+    tcp = await asyncio.start_server(hub.observe_tcp, "127.0.0.1", 0)
+    hub.tcp_port = tcp.sockets[0].getsockname()[1]
+    return hub, journal, runner, transport, tcp, f"ws://127.0.0.1:{port}/ws"
+
+
+async def join(session, url, directory, room="test", client=None):
+    identity = Identity(directory)
+    client = client or str(uuid.uuid4())
+    ws = await session.ws_connect(url)
+    challenge = await ws.receive_json()
+    proof = identity.sign(
+        {
+            "v": 1,
+            "kind": "join",
+            "nonce": challenge["nonce"],
+            "room": room,
+            "client": client,
+            "public": identity.public,
+            "name": "test",
+            "certificate_fingerprint": identity.fingerprint,
+        }
+    )
+    await ws.send_json(
+        {
+            "v": 1,
+            "type": "join",
+            "client": client,
+            "room": room,
+            "name": "test",
+            "public": identity.public,
+            "certificate": identity.cert_pem,
+            "proof": proof,
+        }
+    )
+    welcome = await ws.receive_json()
+    identity.close()
+    return ws, welcome
+
+
+async def cleanup_hub(journal, runner, transport, tcp):
+    tcp.close()
+    await tcp.wait_closed()
+    transport.close()
+    await runner.cleanup()
+    journal.close()
+
+
+async def test_two_person_rooms_no_relay_and_admin_export(tmp_path):
+    hub, journal, runner, transport, tcp, url = await start_hub(tmp_path)
+    try:
+        async with aiohttp.ClientSession() as session:
+            a, wa = await join(session, url, tmp_path / "a")
+            assert wa["type"] == "welcome"
+            assert (await a.receive_json())["type"] == "waiting"
+            b, wb = await join(session, url, tmp_path / "b")
+            assert wb["type"] == "welcome"
+            pa, pb = await asyncio.gather(a.receive_json(), b.receive_json())
+            assert pa["pair"] == pb["pair"]
+            c, error = await join(session, url, tmp_path / "c")
+            assert error["code"] == "ROOM_FULL"
+            await c.close()
+            async with session.get(url.replace("ws://", "http://").replace("/ws", "/logs")) as response:
+                assert response.status == 401
+            async with session.get(
+                url.replace("ws://", "http://").replace("/ws", "/logs"),
+                headers={"Authorization": "Bearer admin"},
+                params={"room": "test"},
+            ) as response:
+                assert response.status == 200
+                assert any(e["event"] == "room.join" for e in (await response.json())["events"])
+            await a.send_json(
+                {
+                    "v": 1,
+                    "type": "signal",
+                    "pair": pa["pair"],
+                    "data": {"kind": "chat", "attempt": "x", "text": "must-not-relay"},
+                }
+            )
+            assert (await a.receive_json())["code"] == "SIGNAL_ONLY_NO_APPLICATION_RELAY"
+            await a.close()
+            await b.close()
+    finally:
+        await cleanup_hub(journal, runner, transport, tcp)
+
+
+async def test_identity_binding_prevents_client_id_takeover(tmp_path):
+    hub, journal, runner, transport, tcp, url = await start_hub(tmp_path)
+    try:
+        async with aiohttp.ClientSession() as session:
+            client = str(uuid.uuid4())
+            original, first = await join(session, url, tmp_path / "original", client=client)
+            assert first["type"] == "welcome"
+            impostor, denied = await join(session, url, tmp_path / "impostor", client=client)
+            assert denied["code"] == "CLIENT_IDENTITY_CHANGED"
+            assert not original.closed
+            await impostor.close()
+            await original.close()
+    finally:
+        await cleanup_hub(journal, runner, transport, tcp)
+
+
+async def test_research_signal_shapes_and_retry_attempt_bookkeeping(tmp_path):
+    hub, journal, runner, transport, tcp, url = await start_hub(tmp_path)
+    try:
+        async with aiohttp.ClientSession() as session:
+            a, _ = await join(session, url, tmp_path / "research-a")
+            await a.receive_json()
+            b, _ = await join(session, url, tmp_path / "research-b")
+            pa, _ = await asyncio.gather(a.receive_json(), b.receive_json())
+            signal = {"kind": "raw_meta", "attempt": "x", "meta": {"sequence": 12345}}
+            await a.send_json({"v": 1, "type": "signal", "pair": pa["pair"], "data": signal})
+            assert (await b.receive_json())["data"] == signal
+            for peer in hub.rooms["test"]:
+                peer["signals"]["previous-matrix"] = 100
+            retry = {"kind": "phase", "attempt": "setup", "phase": "retry"}
+            await a.send_json({"v": 1, "type": "signal", "pair": pa["pair"], "data": retry})
+            assert (await b.receive_json())["data"] == retry
+            assert all("previous-matrix" not in peer["signals"] for peer in hub.rooms["test"])
+            await a.close()
+            await b.close()
+    finally:
+        await cleanup_hub(journal, runner, transport, tcp)
+
+
+@pytest.mark.parametrize("data,expected,follower", [
+    ({"kind": "path_park", "attempt": "x", "request": None}, "PATH_PARK_SCHEMA", False),
+    ({"kind": "path_park_ack", "attempt": "x", "request": "0" * 16, "allowed": 1}, "PATH_PARK_SCHEMA", False),
+    ({"kind": "path_reopen_request", "attempt": "x", "request": "0" * 16, "mode": "chat"}, "PATH_REOPEN_SCHEMA", False),
+    ({"kind": "path_reopen", "attempt": "x", "source": "old", "request": "0" * 16, "mode": "use"}, "ONLY_COORDINATOR_CAN_REOPEN", True),
+    ({"kind": "path_reopen_reject", "attempt": "x", "request": "0" * 16, "reason": "text"}, "PATH_REOPEN_REJECT_SCHEMA", False),
+    ({"kind": "raw_meta", "attempt": "x", "meta": {"sequence": 1, "text": "no"}}, "RAW_METADATA_SCHEMA", False),
+    ({"kind": "raw_meta", "attempt": "x", "meta": {"sequence": True}}, "RAW_METADATA_RANGE", False),
+    ({"kind": "plan_part", "attempt": "setup", "index": 0, "total": 65, "plan": []}, "PLAN_PART_SCHEMA", False),
+    ({"kind": "phase", "attempt": "setup", "phase": "unexpected"}, "PHASE_SCHEMA", False),
+    ({"kind": "phase", "attempt": "setup", "phase": "retry"}, "ONLY_COORDINATOR_CAN_RESTART_MATRIX", True),
+])
+async def test_research_invalid_signals_rejected_and_closed(tmp_path, data, expected, follower):
+    hub, journal, runner, transport, tcp, url = await start_hub(tmp_path)
+    try:
+        async with aiohttp.ClientSession() as session:
+            a, _ = await join(session, url, tmp_path / "bad-a")
+            await a.receive_json()
+            b, _ = await join(session, url, tmp_path / "bad-b")
+            pa, _ = await asyncio.gather(a.receive_json(), b.receive_json())
+            sender = b if follower else a
+            await sender.send_json({"v": 1, "type": "signal", "pair": pa["pair"], "data": data})
+            assert (await sender.receive_json())["code"] == expected
+            await a.close()
+            await b.close()
+    finally:
+        await cleanup_hub(journal, runner, transport, tcp)
+
+
+async def test_automatic_ipv6_callback_while_alone_and_central_logging(tmp_path, capsys):
+    hub, journal, runner, transport, tcp, url = await start_hub(tmp_path)
+    hub.allow_inbound = hub.allow_loopback = True
+    client = Client(
+        {
+            "server": url,
+            "loopback": True,
+            "data_dir": str(tmp_path / "callback"),
+            "experiment": {"diagnostics": False, "gateway": False, "stun": []},
+        },
+        "callback",
+        console=True,
+    )
+    task = asyncio.create_task(client.signaling())
+    upload = asyncio.create_task(client.uploader())
+    try:
+        await asyncio.wait_for(client.connected.wait(), 5)
+        client.network = {"addresses": [{"address": "::1", "family": 6}]}
+        client.network_ready.set()
+        await asyncio.wait_for(client.inbound_task, 10)
+        results = [record for record in client.log.query() if record["event"] == "ipv6.inbound_result"]
+        assert len(results) == 1
+        assert results[0]["fields"]["code"] == "REACHABLE"
+        assert results[0]["fields"]["listener_received"] is True
+        assert results[0]["fields"]["firewall_assessment"] == "HTTP_ALLOWED_FOR_THIS_PROBE"
+        assert results[0]["fields"]["address"] == "::1"
+        assert results[0]["fields"]["port"] >= 1024
+        assert results[0]["fields"]["elapsed_ms"] >= 0
+        assert client.pair is None
+        assert client.manager is None
+        async with asyncio.timeout(5):
+            while client.log.pending():
+                await asyncio.sleep(0.05)
+        assert any(record["event"] == "ipv6.inbound" for record in journal.query(room="callback"))
+        assert any(record["id"] == results[0]["id"] for record in journal.query(room="callback"))
+        assert "IPv6 HTTP callback reached the client" in capsys.readouterr().out
+    finally:
+        await client.close()
+        task.cancel()
+        upload.cancel()
+        await asyncio.gather(task, upload, return_exceptions=True)
+        await cleanup_hub(journal, runner, transport, tcp)
+
+
+async def test_full_client_pair_matrix_and_central_upload(tmp_path):
+    hub, journal, runner, transport, tcp, url = await start_hub(tmp_path)
+    options = {
+        "timeout": 1,
+        "profiles": ["fast"],
+        "gateway": False,
+        "diagnostics": False,
+        "stun": [],
+        "max_pairs": 1,
+        "port_prediction": False,
+    }
+    clients = [
+        Client(
+            {
+                "server": url,
+                "data_dir": str(tmp_path / name),
+                "name": name,
+                "loopback": True,
+                "experiment": options,
+            },
+            "matrix",
+            console=False,
+        )
+        for name in ("a", "b")
+    ]
+    tasks = []
+    try:
+        for client in clients:
+            tasks.extend(
+                [
+                    asyncio.create_task(client.signaling()),
+                    asyncio.create_task(client.uploader()),
+                    asyncio.create_task(client.collect_network()),
+                ]
+            )
+        await asyncio.wait_for(asyncio.gather(*(c.paired.wait() for c in clients)), 10)
+        while any(c.manager.task is None for c in clients):
+            await asyncio.sleep(0.01)
+        await asyncio.wait_for(asyncio.gather(*(c.manager.task for c in clients)), 90)
+        assert all(len(c.manager.results) == len(c.manager.plan) for c in clients)
+        assert all(any(r["data_path"] for r in c.manager.results) for c in clients)
+        await clients[0].chat("integration chat")
+        await clients[0].command("/ping")
+        await clients[0].command("/speed 1")
+        async with asyncio.timeout(10):
+            while any(c.log.pending() for c in clients):
+                await asyncio.sleep(0.05)
+        events = journal.query(room="matrix")
+        assert any(e["event"] == "chat.delivered" for e in events)
+        assert any(e["event"] == "experiment.completed" for e in events)
+        assert all(client.peer_network for client in clients)
+        assert sum(e["event"] == "network.peer_status" for e in events) >= 2
+        assert all("integration chat" not in str(e) for e in events)
+        for client in clients:
+            assert any(r["state"] != "success" for r in client.manager.results)
+    finally:
+        for client in clients:
+            await client.close()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await cleanup_hub(journal, runner, transport, tcp)

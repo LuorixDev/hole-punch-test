@@ -1,5 +1,0 @@
-# Toolchain pinned separately; runtime dependency ranges owned by captain.
-pyinstaller==6.20.0
-pyinstaller-hooks-contrib==2026.8
-altgraph==0.17.5
-setuptools==84.0.0

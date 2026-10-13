@@ -1,0 +1,53 @@
+# Copy to client.local.toml, or pass --config with this file after editing.
+server = "wss://YOUR_SERVER:8443/ws"
+# To use a server without TLS or Nginx, set server to "ws://YOUR_SERVER:8443/ws"
+# and explicitly enable this option (or pass --allow-insecure):
+# allow_insecure = true
+name = "peer"
+data_dir = "data/client"
+# For a private/self-signed signaling certificate, configure ca_file.
+# ca_file = "/absolute/path/server.crt"
+# Shared server admission token, not a room encryption key.
+# token_file = "/absolute/path/access.token"
+
+[logs]
+# Lossless compressed upload batches; all entries are retained, including RTT samples.
+upload_interval = 5.0
+retry_interval = 10.0
+batch_events = 1024
+
+[experiment]
+timeout = 12.0
+profiles = ["balanced", "fast", "staggered"]
+gateway = true
+diagnostics = true
+max_addresses = 4
+port_prediction = true
+# Comprehensive finite matrix; every selected strategy still runs after any success.
+comprehensive = true
+auto_retry = true
+# Raw ICMP/NATBlaster need Linux CAP_NET_RAW; disabled is recorded, never counted as failure.
+raw_probes = false
+# Optional known NAT64 prefixes. Normally use RFC 7050 DNS64 discovery, never guess /96.
+# nat64_prefixes = ["64:ff9b::/96"]
+# Native ICE-TCP/UDP use system libnice; uTP: .venv/bin/python tools/install_libutp.py
+# Additional trusted STUN observers; a single IP cannot fully classify NAT.
+stun = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"]
+
+[wan]
+# Public tests consume substantial traffic. Disabled with diagnostics=false or --loopback.
+# Install once with: .venv/bin/python tools/install_librespeed.py
+enabled = true
+duration = 8
+servers_per_family = 2
+# executable = "/absolute/path/librespeed-cli"
+# server_ids = [1, 2]
+# Optional ISP contract limits, in Mbps; measured values are references, not theoretical limits.
+# upload_mbps = 100
+# download_mbps = 1000
+
+[transfer]
+# Received files/images are saved under data_dir/downloads by default.
+# download_dir = "/absolute/path/received-files"
+auto_accept = true
+max_mib = 10240

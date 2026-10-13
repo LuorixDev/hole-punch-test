@@ -1,0 +1,12 @@
+server = "ws://127.0.0.1:8443/ws"
+name = "local-test"
+
+[experiment]
+timeout = 2.0
+profiles = ["balanced", "fast", "staggered"]
+gateway = false
+diagnostics = false
+stun = []
+max_addresses = 2
+max_pairs = 2
+port_prediction = true

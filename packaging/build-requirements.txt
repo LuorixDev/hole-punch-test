@@ -1,0 +1,5 @@
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8
+pytest>=8,<10
+pytest-asyncio>=0.25,<2
+ruff>=0.11,<1

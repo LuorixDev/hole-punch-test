@@ -1,7 +1,0 @@
-{
-  "appId": "dev.p2pobservatory.chat",
-  "appName": "P2P Observatory",
-  "webDir": "dist-web",
-  "server": {"androidScheme": "http"},
-  "android": {"allowMixedContent": false}
-}

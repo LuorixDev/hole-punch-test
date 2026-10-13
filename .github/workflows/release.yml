@@ -1,0 +1,122 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: windows-2022
+            target: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.12'
+          python-version: '3.12.15'
+          python-arch: x86_64
+          activate-environment: true
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements.lock
+            packaging/build-requirements.txt
+      - name: Install locked runtime and build tools
+        run: |
+          uv pip install --only-binary=:all: -r requirements.lock -r packaging/build-requirements.txt
+      - name: Linux native experiment libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y iproute2 libnice10 make g++
+          python tools/install_libutp.py
+      - name: Lint
+        run: python -m ruff check p2plab tests tools
+      - name: Linux full regression suite
+        if: runner.os == 'Linux'
+        run: python -m pytest -q --junitxml=build/source-tests.xml
+      - name: Windows startup, native network and UI regression suite
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_public_ip.py tests/test_tui.py --junitxml=build/source-tests.xml
+      - name: Build and verify real single-file programs
+        run: python tools/build_release.py
+      - name: Upload release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: p2plab-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+          compression-level: 0
+      - name: Retain compressed diagnostics and test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verification-${{ matrix.target }}
+          path: |
+            build/source-tests.xml
+            build/frozen-smoke-*/report.json
+            build/frozen-smoke-*/*.log.gz
+          if-no-files-found: warn
+          retention-days: 14
+
+  release:
+    name: Publish Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: p2plab-*
+          path: dist/release
+          merge-multiple: true
+      - name: Combine checksums and publish both platforms together
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          directory = Path('dist/release')
+          required = ('P2PLab-Client-linux-x64', 'P2PLab-Server-linux-x64',
+                      'P2PLab-Client-windows-x64.exe', 'P2PLab-Server-windows-x64.exe')
+          assert all((directory / name).is_file() for name in required), 'Missing platform binaries'
+          rows = []
+          for path in sorted(directory.iterdir()):
+              if path.is_file() and not path.name.startswith('SHA256SUMS'):
+                  with path.open('rb') as stream:
+                      rows.append(f'{hashlib.file_digest(stream, "sha256").hexdigest()}  {path.name}')
+          (directory / 'SHA256SUMS.txt').write_text('\n'.join(rows) + '\n')
+          PY
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/release/* --clobber
+          else
+            gh release create "$TAG" dist/release/* --verify-tag --draft --title "P2P Lab $TAG" --notes-file RELEASE-NOTES.md
+          fi
+          gh release edit "$TAG" --draft=false
