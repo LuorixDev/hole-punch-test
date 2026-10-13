@@ -34,7 +34,6 @@ jobs:
         with:
           version: '0.12.12'
           python-version: '3.12.15'
-          python-arch: x86_64
           activate-environment: true
           enable-cache: true
           cache-dependency-glob: |
