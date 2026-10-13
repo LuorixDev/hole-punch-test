@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from p2plab.journal import Journal
+from p2plab.runtime import configure_console_encoding
 
 
 def free_port(kind):
@@ -177,6 +178,7 @@ async def smoke(client, server, output):
 
 
 def main():
+    configure_console_encoding()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client", type=Path, required=True)
     parser.add_argument("--server", type=Path, required=True)
