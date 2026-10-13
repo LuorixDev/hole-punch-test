@@ -7,6 +7,7 @@ import gzip
 import json
 import os
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,41 @@ def free_port(kind):
     with socket.socket(socket.AF_INET, kind) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+async def stop_process(process, timeout=10):
+    if process.returncode is not None:
+        return
+    if sys.platform == "win32":
+        # One-file bootloaders have an application child holding the output pipe.
+        result = await asyncio.to_thread(
+            subprocess.run, ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True, timeout=timeout, check=False,
+        )
+        if result.returncode and process.returncode is None:
+            raise RuntimeError(f"Could not stop test process tree {process.pid}: {result.stderr!r}")
+    else:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout)
+    except TimeoutError:
+        if process.returncode is None:
+            process.kill()
+        await asyncio.wait_for(process.wait(), timeout)
+
+
+async def finish_pumps(pumps, timeout=10):
+    done, pending = await asyncio.wait(pumps, timeout=timeout) if pumps else (set(), set())
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        task.result()
+    if pending:
+        raise RuntimeError("Timed out closing frozen test log pipes")
 
 
 async def smoke(client, server, output):
@@ -36,6 +72,7 @@ async def smoke(client, server, output):
             stderr=asyncio.subprocess.STDOUT,
         )
         processes[name] = process
+        print(f"smoke: started {name}, pid={process.pid}", flush=True)
         lines[name] = collections.deque(maxlen=4000)
 
         async def pump():
@@ -49,11 +86,15 @@ async def smoke(client, server, output):
         return process
 
     async def contains(name, needle, timeout=60):
-        async with asyncio.timeout(timeout):
-            while not any(needle in line for line in lines[name]):
-                if processes[name].returncode is not None:
-                    raise RuntimeError(f"{name} exited before {needle}: " + "".join(lines[name])[-6000:])
-                await asyncio.sleep(0.05)
+        try:
+            async with asyncio.timeout(timeout):
+                while not any(needle in line for line in lines[name]):
+                    if processes[name].returncode is not None:
+                        raise RuntimeError(f"{name} exited before {needle}: " + "".join(lines[name])[-6000:])
+                    await asyncio.sleep(0.05)
+        except TimeoutError as error:
+            raise RuntimeError(f"{name} timed out waiting for {needle}: " + "".join(lines[name])[-12000:]) from error
+        print(f"smoke: {name} observed {needle}", flush=True)
 
     def send(name, text):
         processes[name].stdin.write(text.encode("utf-8"))
@@ -104,16 +145,12 @@ async def smoke(client, server, output):
         if any(processes[name].returncode != 0 for name in ("a", "b")):
             raise RuntimeError("Frozen client did not exit cleanly")
     finally:
-        for process in processes.values():
-            if process.returncode is None:
-                process.terminate()
-        for process in processes.values():
-            try:
-                await asyncio.wait_for(process.wait(), 10)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-        await asyncio.gather(*pumps)
+        cleanup = await asyncio.gather(*(stop_process(process) for process in processes.values()),
+                                       return_exceptions=True)
+        await finish_pumps(pumps)
+        for result in cleanup:
+            if isinstance(result, BaseException):
+                raise result
     journal = Journal(output / "server/central.sqlite3", role="server", console=False)
     try:
         events = journal.query(room="release", limit=10000)

@@ -1,12 +1,53 @@
 import ast
+import asyncio
 import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from tools.build_release import collect_licenses, write_checksums
+from tools.smoke_frozen import finish_pumps, stop_process
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.asyncio
+async def test_windows_frozen_cleanup_targets_only_test_process_tree(monkeypatch):
+    import tools.smoke_frozen as frozen
+
+    process = SimpleNamespace(pid=1234, returncode=None, wait=AsyncMock(), terminate=Mock(), kill=Mock())
+    run = Mock(return_value=SimpleNamespace(returncode=0))
+    monkeypatch.setattr(frozen.sys, "platform", "win32")
+    monkeypatch.setattr(frozen.subprocess, "run", run)
+    await stop_process(process)
+    run.assert_called_once_with(["taskkill.exe", "/PID", "1234", "/T", "/F"],
+                                capture_output=True, timeout=10, check=False)
+    process.terminate.assert_not_called()
+    process.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_frozen_cleanup_does_not_signal_exited_process(monkeypatch):
+    import tools.smoke_frozen as frozen
+
+    process = SimpleNamespace(pid=1234, returncode=0, wait=AsyncMock(), terminate=Mock(), kill=Mock())
+    run = Mock()
+    monkeypatch.setattr(frozen.sys, "platform", "win32")
+    monkeypatch.setattr(frozen.subprocess, "run", run)
+    await stop_process(process)
+    run.assert_not_called()
+    process.wait.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_frozen_log_cleanup_cancels_stuck_pipe_and_fails():
+    pump = asyncio.create_task(asyncio.Event().wait())
+    with pytest.raises(RuntimeError, match="log pipes"):
+        await finish_pumps([pump], timeout=0.01)
+    assert pump.cancelled()
 
 
 def test_both_specs_are_actual_onefile_and_do_not_collect_device_data():
