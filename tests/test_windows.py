@@ -43,7 +43,7 @@ def test_windows_redirected_console_handles_chinese_independent_of_environment(t
         assert journal.query()[-1]["message"] == content.strip()
         streams.stderr.write(content)
         streams.stderr.flush()
-        assert error.getvalue().decode("utf-8") == content
+        assert error.getvalue().decode("utf-8") == content.replace("\n", os.linesep)
     finally:
         journal.close()
 
