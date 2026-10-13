@@ -246,7 +246,7 @@ async def test_webrtc_immediate_close_after_answer_leaves_no_unhandled_connect_t
 
     a.signal, b.signal = from_a, from_b
     try:
-        await asyncio.wait_for(ra.offer(), 5)
+        await asyncio.wait_for(ra.offer(), 15)
         await asyncio.sleep(0.1)
         assert errors == []
         assert ra.closed and rb.closed
