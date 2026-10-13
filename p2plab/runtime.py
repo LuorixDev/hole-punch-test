@@ -5,6 +5,16 @@ import sys
 from pathlib import Path
 
 
+def configure_console_encoding():
+    if sys.platform != "win32":
+        return
+    # Frozen Python does not necessarily honor PYTHONIOENCODING for pipes.
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace" if name == "stdin" else "backslashreplace")
+
+
 def application_directory():
     return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
 

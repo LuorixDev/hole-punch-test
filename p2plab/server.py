@@ -23,6 +23,7 @@ from .common import VERSION, Identity, endpoint, packed, unb64
 from .inbound import SCOPE, assessment, message
 from .journal import Journal
 from .logcodec import CODEC, decode_batch
+from .runtime import configure_console_encoding
 from .stun import StunServer
 
 
@@ -618,6 +619,7 @@ async def serve(args):
 
 
 def main():
+    configure_console_encoding()
     parser = argparse.ArgumentParser(description="IPv4 rendezvous + STUN + persistent diagnostics; no relay")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8443)

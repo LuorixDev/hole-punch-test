@@ -15,9 +15,37 @@ from p2plab.client import Client
 from p2plab.common import Identity
 from p2plab.console import ConsoleReader
 from p2plab.network import command, query_ip, read_address_inventory, select_addresses, snapshot
-from p2plab.runtime import application_directory, default_client_data
+from p2plab.runtime import application_directory, configure_console_encoding, default_client_data
 from tests.test_network import Evidence
 from tools.install_librespeed import install_archive
+
+
+def test_windows_redirected_console_handles_chinese_independent_of_environment(tmp_path, monkeypatch):
+    import p2plab.runtime as runtime
+    from p2plab.journal import Journal
+
+    content = "\u4e2d\u6587\u6d88\u606f\n"
+    output = io.BytesIO()
+    error = io.BytesIO()
+    streams = SimpleNamespace(
+        platform="win32", stdin=io.TextIOWrapper(io.BytesIO(content.encode("utf-8")), encoding="cp1252"),
+        stdout=io.TextIOWrapper(output, encoding="cp1252"),
+        stderr=io.TextIOWrapper(error, encoding="cp1252"),
+    )
+    monkeypatch.setattr(runtime, "sys", streams)
+    configure_console_encoding()
+    assert streams.stdin.readline() == content
+    monkeypatch.setattr("p2plab.journal.sys.stdout", streams.stdout)
+    journal = Journal(tmp_path / "unicode.sqlite3", role="client")
+    try:
+        journal.event("network.status", content.strip())
+        assert content.strip() in output.getvalue().decode("utf-8")
+        assert journal.query()[-1]["message"] == content.strip()
+        streams.stderr.write(content)
+        streams.stderr.flush()
+        assert error.getvalue().decode("utf-8") == content
+    finally:
+        journal.close()
 
 
 @pytest.fixture

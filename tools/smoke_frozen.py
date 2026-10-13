@@ -102,7 +102,7 @@ async def smoke(client, server, output):
     port, tcp_port = free_port(socket.SOCK_STREAM), free_port(socket.SOCK_STREAM)
     while tcp_port == port:
         tcp_port = free_port(socket.SOCK_STREAM)
-    message = "release-smoke-private-chat"
+    message = "release-smoke-private-chat-\u4e2d\u6587\u6d88\u606f"
     try:
         await launch("server", server, "--host", "127.0.0.1", "--port", port,
                      "--stun-port", free_port(socket.SOCK_DGRAM), "--tcp-port", tcp_port,
@@ -159,14 +159,16 @@ async def smoke(client, server, output):
     failures = [event for event in events if event["event"] in (
         "runtime.asyncio_error", "client.background_failed", "runtime.unhandled_exception",
     )]
-    if failures or message in json.dumps(events) or "private-release-file-bytes" in json.dumps(events):
+    serialized = json.dumps(events, ensure_ascii=False)
+    if failures or message in serialized or "private-release-file-bytes" in serialized:
         raise RuntimeError("Runtime errors or chat content leaked into central diagnostics")
     counts = collections.Counter(event["event"] for event in events)
     if counts["client.stopped"] != 2 or counts["speed.result"] != 2 or not counts["chat.delivered"]:
         raise RuntimeError("Central logs are missing acknowledged client/chat/speed events")
     if counts["file.received"] != 1 or counts["file.delivered"] != 1:
         raise RuntimeError("Central logs are missing file transfer receipts")
-    report = {"state": "passed", "chat": True, "ping": True, "bidirectional_speed": True, "file_transfer": True,
+    report = {"state": "passed", "chat": True, "unicode_chat": True, "ping": True,
+              "bidirectional_speed": True, "file_transfer": True,
               "central_client_stops": counts["client.stopped"], "central_chat_deliveries": counts["chat.delivered"],
               "central_speed_results": counts["speed.result"], "background_errors": len(failures),
               "scope": "IPv4/IPv6 loopback only, not WAN or cross-ISP acceptance"}

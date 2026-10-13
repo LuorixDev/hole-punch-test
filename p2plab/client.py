@@ -40,7 +40,7 @@ from .network import (
     snapshot,
 )
 from .performance import bottleneck_assessment
-from .runtime import application_directory, default_client_data
+from .runtime import application_directory, configure_console_encoding, default_client_data
 from .session import PATH_LIFECYCLE_CAPABILITY, Dedup
 from .status import direction_reference, public_ip_evidence, speed_assessment, utcnow, validate_status
 from .transfers import RECEIPT_CAPABILITY, TransferManager, disk_call, open_source, validate_receipt
@@ -1735,6 +1735,7 @@ class Client:
 
 
 def main():
+    configure_console_encoding()
     parser = argparse.ArgumentParser(description="Two-person terminal P2P connectivity lab")
     parser.add_argument("--config", default="client.local.toml")
     parser.add_argument("--server")
