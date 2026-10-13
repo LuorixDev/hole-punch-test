@@ -22,6 +22,11 @@ def save_preview(app, name):
 
 
 def session_diagnostics(app, peer):
+    def recent_events(client):
+        with client.log.lock:
+            cursor = client.log.db.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
+        return client.log.query(after=max(0, cursor - 60), limit=60)
+
     return json.dumps({name: {
         "batch_state": client.batch_speed_state,
         "matrix_results": client.manager.results[-4:] if client.manager else [],
@@ -29,7 +34,7 @@ def session_diagnostics(app, peer):
         "matrix_total": len(client.manager.plan) if client.manager else 0,
         "paths": [{"attempt": p.attempt, "closed": p.closed,
                    "speed_state": getattr(p, "speed_state", None)} for p in client.paths],
-        "recent_events": client.log.query(limit=60),
+        "recent_events": recent_events(client),
     } for name, client in (("tui", app.client), ("peer", peer))}, ensure_ascii=False, default=str)
 
 

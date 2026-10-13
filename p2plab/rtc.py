@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
@@ -44,7 +45,7 @@ class RtcAttempt:
     def __init__(self, owner, spec):
         self.owner, self.spec = owner, spec
         self.attempt = spec["attempt"]
-        servers = [RTCIceServer(urls="stun:" + value) for value in owner.observers[:2]]
+        servers = [] if owner.loopback else [RTCIceServer(urls="stun:" + value) for value in owner.observers[:2]]
         self.pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
         self.channels = {}
         self.buffers = {}
@@ -61,6 +62,7 @@ class RtcAttempt:
         self.signaling_lock = asyncio.Lock()
         self.close_complete = asyncio.Event()
         self.writable = asyncio.Event()
+        self.loopback_gatherer_configured = False
 
         @self.pc.on("datachannel")
         def on_channel(channel):
@@ -122,6 +124,24 @@ class RtcAttempt:
             raise ValueError("WEBRTC_PROFILE_NO_CANDIDATES")
         return sdp
 
+    def configure_loopback_gatherer(self):
+        if not self.owner.loopback or self.loopback_gatherer_configured:
+            return
+        # aioice excludes loopback by default; adapt only this connection, never global discovery.
+        connection = self.pc.sctp.transport.transport.iceGatherer._connection
+        gather = getattr(connection, "get_component_candidates", None)
+        if not callable(gather) or not {"component", "addresses", "timeout"} <= set(inspect.signature(gather).parameters):
+            raise RuntimeError("WEBRTC_LOOPBACK_ADAPTER_UNAVAILABLE")
+        profile = self.spec["profile"]
+        hosts = [host for host in ("127.0.0.1", "::1")
+                 if profile == "dual" or ipaddress.ip_address(host).version == int(profile)]
+
+        async def gather_loopback(component, addresses, timeout=5):
+            return await gather(component=component, addresses=hosts, timeout=timeout)
+
+        connection.get_component_candidates = gather_loopback
+        self.loopback_gatherer_configured = True
+
     async def offer(self):
         async with self.signaling_lock:
             if self.closed:
@@ -129,6 +149,7 @@ class RtcAttempt:
             try:
                 self.attach(self.pc.createDataChannel("chat", ordered=True))
                 self.attach(self.pc.createDataChannel("benchmark", ordered=True))
+                self.configure_loopback_gatherer()
                 await self.pc.setLocalDescription(await self.pc.createOffer())
                 sdp = self.local_sdp()
             finally:
@@ -158,6 +179,7 @@ class RtcAttempt:
                         )
                     )
                     if not self.closed:
+                        self.configure_loopback_gatherer()
                         await self.pc.setLocalDescription(await self.pc.createAnswer())
                         response = {"kind": "answer", "attempt": self.attempt, "sdp": self.local_sdp()}
                 elif data["kind"] == "answer":

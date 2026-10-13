@@ -321,7 +321,7 @@ async def read_address_inventory(*, loopback=False):
 async def powershell(script):
     encoding = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); "
     return await command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
-                         "-Command", encoding + script, timeout=8)
+                         "-Command", encoding + script, timeout=30)
 
 
 async def windows_address_inventory(fallback, *, loopback=False):

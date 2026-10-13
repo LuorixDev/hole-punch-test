@@ -239,3 +239,14 @@ def test_regular_file_sender_does_not_require_posix_nonblocking_flag(tmp_path, m
         assert stream.read() == content and info.st_size == len(content)
     finally:
         stream.close()
+async def test_windows_cim_queries_allow_bounded_cold_start(monkeypatch):
+    from p2plab.network import powershell
+
+    async def command(*args, **kwargs):
+        assert args[0] == "powershell.exe"
+        assert kwargs["timeout"] == 30
+        return {"state": "completed", "output": []}
+
+    monkeypatch.setattr("p2plab.network.command", command)
+    assert (await powershell("Get-NetIPAddress"))["state"] == "completed"
+

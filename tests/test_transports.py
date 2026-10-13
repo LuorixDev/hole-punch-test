@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import secrets
 
 import pytest
@@ -119,9 +120,10 @@ async def test_tcp_listener_can_close_first_without_waiting_for_peer_shutdown(pe
         await asyncio.gather(ta.close(), tb.close())
 
 
-async def test_webrtc_real_data_channels_mutual_auth_and_bidirectional_speed(peers, task_scheduling):
+@pytest.mark.parametrize("profile", ["4", "6", "dual"])
+async def test_webrtc_real_data_channels_mutual_auth_and_bidirectional_speed(peers, task_scheduling, profile):
     a, b = peers
-    sa, sb = specs("webrtc", "127.0.0.1", profile="4")
+    sa, sb = specs("webrtc", "127.0.0.1", profile=profile)
     ra, rb = RtcAttempt(a, sa), RtcAttempt(b, sb)
     a.observers = b.observers = []
 
@@ -135,6 +137,11 @@ async def test_webrtc_real_data_channels_mutual_auth_and_bidirectional_speed(pee
     try:
         pa, pb = await asyncio.gather(ra.connect(), rb.connect())
         assert pa.ready.is_set() and pb.ready.is_set()
+        for rtc in (ra, rb):
+            addresses = [ipaddress.ip_address(line.split()[4]) for line in rtc.local_sdp().splitlines()
+                         if line.startswith("a=candidate:")]
+            assert addresses and all(address.is_loopback for address in addresses)
+            assert profile == "dual" or all(address.version == int(profile) for address in addresses)
         await a.chat("webrtc verified")
         assert (await pa.speed(1024 * 1024))["bytes"] == 1024 * 1024
         assert (await pa.reverse_speed(1024 * 1024))["bytes"] == 1024 * 1024
@@ -143,6 +150,22 @@ async def test_webrtc_real_data_channels_mutual_auth_and_bidirectional_speed(pee
             for path in peer.paths:
                 await path.close()
         await asyncio.gather(ra.close(), rb.close())
+
+
+async def test_webrtc_real_network_gatherer_remains_unmodified(peers):
+    client, _ = peers
+    client.loopback = False
+    spec, _ = specs("webrtc", "127.0.0.1", profile="4")
+    rtc = RtcAttempt(client, spec)
+    try:
+        rtc.pc.createDataChannel("chat")
+        connection = rtc.pc.sctp.transport.transport.iceGatherer._connection
+        original = connection.get_component_candidates
+        rtc.configure_loopback_gatherer()
+        assert connection.get_component_candidates == original
+        assert not rtc.loopback_gatherer_configured
+    finally:
+        await rtc.close()
 
 
 @pytest.mark.parametrize("kind", ["offer", "answer"])
