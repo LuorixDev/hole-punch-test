@@ -442,7 +442,7 @@ class TransferManager:
         ):
             raise ValueError("FILE_CHUNK_INVALID")
         if item["started"] is None:
-            item["started"] = time.monotonic()
+            item["started"] = time.perf_counter()
         item["prefix"].extend(raw[: max(0, 32 - len(item["prefix"]))])
         item["digest"].update(raw)
         item["buffer"].extend(raw)
@@ -473,7 +473,8 @@ class TransferManager:
                     item["destination"].name + "." + extension
                 )
         await disk_call(commit_file, item)
-        metrics = receipt(item["bytes"], time.monotonic() - (item["started"] or item["progress"]))
+        duration = time.perf_counter() - item["started"] if item["started"] is not None else 0.0
+        metrics = receipt(item["bytes"], duration)
         self.record(
             tid, state="completed", completed=item["bytes"], saved_path=str(item["destination"]), **metrics
         )

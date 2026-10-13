@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import ipaddress
+import sys
 
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
-from .common import encode_frame, extract_frames
+from .common import encode_frame, extract_frames, sockaddr
 from .session import Path
 
 
@@ -41,6 +42,19 @@ def filter_sdp(sdp, profile, *, allow_loopback=False):
     return "\r\n".join(result) + "\r\n"
 
 
+def normalize_ice_transport(transport):
+    if getattr(transport, "_p2plab_sockaddr", False):
+        return
+    original = transport.sendto
+
+    def sendto(data, address=None):
+        # Python 3.12's Windows overlapped API selects IPv6 from a four-tuple.
+        return original(data, sockaddr(address) if address is not None and len(address) == 2 else address)
+
+    transport.sendto = sendto
+    transport._p2plab_sockaddr = True
+
+
 class RtcAttempt:
     def __init__(self, owner, spec):
         self.owner, self.spec = owner, spec
@@ -62,7 +76,7 @@ class RtcAttempt:
         self.signaling_lock = asyncio.Lock()
         self.close_complete = asyncio.Event()
         self.writable = asyncio.Event()
-        self.loopback_gatherer_configured = False
+        self.gatherer_configured = False
 
         @self.pc.on("datachannel")
         def on_channel(channel):
@@ -124,23 +138,30 @@ class RtcAttempt:
             raise ValueError("WEBRTC_PROFILE_NO_CANDIDATES")
         return sdp
 
-    def configure_loopback_gatherer(self):
-        if not self.owner.loopback or self.loopback_gatherer_configured:
+    def configure_gatherer(self):
+        if (not self.owner.loopback and sys.platform != "win32") or self.gatherer_configured:
             return
         # aioice excludes loopback by default; adapt only this connection, never global discovery.
         connection = self.pc.sctp.transport.transport.iceGatherer._connection
         gather = getattr(connection, "get_component_candidates", None)
-        if not callable(gather) or not {"component", "addresses", "timeout"} <= set(inspect.signature(gather).parameters):
-            raise RuntimeError("WEBRTC_LOOPBACK_ADAPTER_UNAVAILABLE")
+        if (not callable(gather)
+                or not {"component", "addresses", "timeout"} <= set(inspect.signature(gather).parameters)
+                or sys.platform == "win32" and not isinstance(getattr(connection, "_protocols", None), list)):
+            raise RuntimeError("WEBRTC_GATHERER_ADAPTER_UNAVAILABLE")
         profile = self.spec["profile"]
         hosts = [host for host in ("127.0.0.1", "::1")
                  if profile == "dual" or ipaddress.ip_address(host).version == int(profile)]
 
         async def gather_loopback(component, addresses, timeout=5):
-            return await gather(component=component, addresses=hosts, timeout=timeout)
+            candidates = await gather(component=component, addresses=hosts if self.owner.loopback else addresses,
+                                      timeout=timeout)
+            if sys.platform == "win32":
+                for protocol in connection._protocols:
+                    normalize_ice_transport(protocol.transport)
+            return candidates
 
         connection.get_component_candidates = gather_loopback
-        self.loopback_gatherer_configured = True
+        self.gatherer_configured = True
 
     async def offer(self):
         async with self.signaling_lock:
@@ -149,7 +170,7 @@ class RtcAttempt:
             try:
                 self.attach(self.pc.createDataChannel("chat", ordered=True))
                 self.attach(self.pc.createDataChannel("benchmark", ordered=True))
-                self.configure_loopback_gatherer()
+                self.configure_gatherer()
                 await self.pc.setLocalDescription(await self.pc.createOffer())
                 sdp = self.local_sdp()
             finally:
@@ -179,7 +200,7 @@ class RtcAttempt:
                         )
                     )
                     if not self.closed:
-                        self.configure_loopback_gatherer()
+                        self.configure_gatherer()
                         await self.pc.setLocalDescription(await self.pc.createAnswer())
                         response = {"kind": "answer", "attempt": self.attempt, "sdp": self.local_sdp()}
                 elif data["kind"] == "answer":

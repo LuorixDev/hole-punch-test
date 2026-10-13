@@ -250,3 +250,15 @@ async def test_windows_cim_queries_allow_bounded_cold_start(monkeypatch):
     monkeypatch.setattr("p2plab.network.command", command)
     assert (await powershell("Get-NetIPAddress"))["state"] == "completed"
 
+
+def test_windows_ice_ipv6_send_uses_four_tuple_without_changing_scope_or_ipv4():
+    from p2plab.rtc import normalize_ice_transport
+
+    sent = []
+    transport = SimpleNamespace(sendto=lambda data, address: sent.append((data, address)))
+    normalize_ice_transport(transport)
+    normalize_ice_transport(transport)
+    for address in (("::1", 3000), ("127.0.0.1", 3001), ("fe80::1", 3002, 4, 7)):
+        transport.sendto(b"test", address)
+    assert sent == [(b"test", ("::1", 3000, 0, 0)), (b"test", ("127.0.0.1", 3001)),
+                    (b"test", ("fe80::1", 3002, 4, 7))]

@@ -35,6 +35,8 @@ def session_diagnostics(app, peer):
         "paths": [{"attempt": p.attempt, "closed": p.closed,
                    "speed_state": getattr(p, "speed_state", None)} for p in client.paths],
         "recent_events": recent_events(client),
+        "failures": [event for event in client.log.query(limit=1000)
+                     if event["event"] in ("speed.batch_path_failed", "path.reopen_failed", "runtime.asyncio_error")],
     } for name, client in (("tui", app.client), ("peer", peer))}, ensure_ascii=False, default=str)
 
 
@@ -77,6 +79,9 @@ async def test_activity_history_survives_hidden_writes_resize_and_repeated_tab_c
         app.refresh_state()
         await pilot.pause()
         sidebar = app.query_one("#activity", HistoryLog)
+        async with asyncio.timeout(5):
+            while "历史消息-A" not in "".join(s.text for s in sidebar.lines):
+                await pilot.pause(0.05)
         assert "历史消息-A" in "".join(s.text for s in sidebar.lines)
         app.action_tab("matrix")
         await pilot.pause()

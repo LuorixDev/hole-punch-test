@@ -188,7 +188,7 @@ class Path:
                 raise ValueError("CHAT_LIMIT")
             if len(self.chat_starts) >= 128 and mid not in self.chat_starts:
                 raise ValueError("CHAT_RECEIPT_LIMIT")
-            self.chat_starts[mid] = (time.monotonic(), size)
+            self.chat_starts[mid] = (time.perf_counter(), size)
             await self.send({"kind": "chat_ready", "id": mid})
         elif kind == "chat_ready":
             pending = self.chat_ready.get(body.get("id"))
@@ -203,7 +203,7 @@ class Path:
             size = len(text.encode())
             if start and size != start[1]:
                 raise ValueError("CHAT_RECEIPT_SIZE_MISMATCH")
-            metrics = receipt(size, time.monotonic() - start[0] if start else None)
+            metrics = receipt(size, time.perf_counter() - start[0] if start else None)
             if self.owner.remember_chat(mid):
                 self.owner.chat_receipts[mid] = metrics
                 while len(self.owner.chat_receipts) > 10000:
@@ -228,7 +228,7 @@ class Path:
             entry = self.pings.pop(body.get("id"), None)
             if entry:
                 started, future, measure = entry
-                rtt = (time.monotonic() - started) * 1000
+                rtt = (time.perf_counter() - started) * 1000
                 if measure:
                     self.last_rtt = rtt
                     self.rtt_measured_at = time.monotonic()
@@ -271,7 +271,7 @@ class Path:
                 "bytes": 0,
                 "expected": size,
                 "seq": 0,
-                "start": time.monotonic(),
+                "start": time.perf_counter(),
                 "progress": time.monotonic(),
                 "binary": binary,
                 "next_ack": BENCH_ACK_BYTES,
@@ -317,7 +317,7 @@ class Path:
                 runtime = bench["probe"].finish()
             if not bench or bench["bytes"] != bench["expected"]:
                 raise ValueError("BENCH_INCOMPLETE")
-            duration = time.monotonic() - bench["start"]
+            duration = max(time.perf_counter() - bench["start"], 1e-9)
             result = {
                 "kind": "bench_result",
                 "id": body["id"],
@@ -359,7 +359,7 @@ class Path:
     async def ping(self, timeout=5, *, measure=True):
         pid = secrets.token_hex(8)
         future = asyncio.get_running_loop().create_future()
-        self.pings[pid] = (time.monotonic(), future, measure)
+        self.pings[pid] = (time.perf_counter(), future, measure)
         try:
             await self.send({"kind": "ping", "id": pid})
             return await asyncio.wait_for(future, timeout)
@@ -417,7 +417,7 @@ class Path:
                     raise ValueError("BENCH_ACK_MISMATCH")
                 acknowledged = count
 
-            started, cpu_started = time.monotonic(), time.process_time()
+            started, cpu_started = time.perf_counter(), time.process_time()
             probe = BenchProbe(self)
             while sent < size:
                 while not queue.empty():
@@ -439,7 +439,7 @@ class Path:
                 )
                 sent += len(raw)
                 seq += 1
-                if time.monotonic() - started > 120:
+                if time.perf_counter() - started > 120:
                     raise TimeoutError("BENCH_HARD_DEADLINE")
             while acknowledged < size:
                 acknowledge(await asyncio.wait_for(queue.get(), 20))
@@ -447,7 +447,7 @@ class Path:
             result = await asyncio.wait_for(queue.get(), 20)
             if result["kind"] != "bench_result" or result.get("bytes") != acknowledged:
                 raise ValueError("BENCH_RESULT_MISMATCH")
-            duration = time.monotonic() - started
+            duration = max(time.perf_counter() - started, 1e-9)
             return {
                 "bytes": acknowledged,
                 "seconds": duration,

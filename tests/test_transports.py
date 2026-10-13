@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import secrets
+import sys
 
 import pytest
 
@@ -152,7 +153,7 @@ async def test_webrtc_real_data_channels_mutual_auth_and_bidirectional_speed(pee
         await asyncio.gather(ra.close(), rb.close())
 
 
-async def test_webrtc_real_network_gatherer_remains_unmodified(peers):
+async def test_webrtc_real_network_retains_normal_host_discovery(peers):
     client, _ = peers
     client.loopback = False
     spec, _ = specs("webrtc", "127.0.0.1", profile="4")
@@ -160,10 +161,20 @@ async def test_webrtc_real_network_gatherer_remains_unmodified(peers):
     try:
         rtc.pc.createDataChannel("chat")
         connection = rtc.pc.sctp.transport.transport.iceGatherer._connection
+        observed = []
+
+        async def gather(component, addresses, timeout=5):
+            observed.extend(addresses)
+            return []
+
+        connection.get_component_candidates = gather
         original = connection.get_component_candidates
-        rtc.configure_loopback_gatherer()
-        assert connection.get_component_candidates == original
-        assert not rtc.loopback_gatherer_configured
+        rtc.configure_gatherer()
+        assert (connection.get_component_candidates == original) == (sys.platform != "win32")
+        assert rtc.gatherer_configured == (sys.platform == "win32")
+        addresses = ["192.0.2.1", "2001:db8::1"]
+        await connection.get_component_candidates(component=1, addresses=addresses)
+        assert observed == addresses
     finally:
         await rtc.close()
 

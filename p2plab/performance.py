@@ -37,7 +37,7 @@ class BenchProbe:
 
     def __init__(self, path):
         self.path = path
-        self.start = time.monotonic()
+        self.start = time.perf_counter()
         self.cpu = time.process_time()
         self.thread_cpu = time.thread_time()
         self.udp_start = udp_errors()
@@ -66,7 +66,7 @@ class BenchProbe:
         return {}
 
     def sample(self):
-        now = time.monotonic()
+        now = time.perf_counter()
         self.lag.append(max(0, now - self.deadline) * 1000)
         self.competing = self.competing or self.competing_work()
         self.lag = self.lag[-2400:]
@@ -87,7 +87,7 @@ class BenchProbe:
 
     def finish(self):
         self.cancel()
-        seconds = max(1e-6, time.monotonic() - self.start)
+        seconds = max(1e-6, time.perf_counter() - self.start)
         transport = self.transport()
         for key, value in tuple(transport.items()):
             if key in self.transport_start and key in (

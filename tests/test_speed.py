@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,8 @@ from tests.test_transports import specs
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-async def test_actual_tcp_speed_format_and_receiver_confirmations(peers, legacy):
+@pytest.mark.parametrize("coarse_clock", [False, True])
+async def test_actual_tcp_speed_format_and_receiver_confirmations(peers, legacy, coarse_clock, monkeypatch):
     a, b = peers
     sa, sb = specs("tcp", "127.0.0.1")
     ta, tb = TcpAttempt(a, sa, "127.0.0.1"), TcpAttempt(b, sb, "127.0.0.1")
@@ -21,6 +23,10 @@ async def test_actual_tcp_speed_format_and_receiver_confirmations(peers, legacy)
         pa, pb = await asyncio.gather(ta.connect(), tb.connect())
         if legacy:
             pa.remote_capabilities.clear()
+        if coarse_clock:
+            monkeypatch.setattr("p2plab.session.time", SimpleNamespace(
+                monotonic=lambda: 100.0, perf_counter=time.perf_counter, process_time=time.process_time,
+            ))
         result = await pa.speed(2 * 1024 * 1024 + 17)
         assert result["bytes"] == 2 * 1024 * 1024 + 17
         assert result["format"] == ("legacy-json-base64" if legacy else "binary-v1")
@@ -28,6 +34,8 @@ async def test_actual_tcp_speed_format_and_receiver_confirmations(peers, legacy)
         assert result["chunk_bytes"] == (8192 if legacy else BENCH_CHUNK)
         assert result["sender_runtime"]["seconds"] > 0
         assert result["receiver_runtime"]["seconds"] > 0
+        assert result["seconds"] > 0 and result["receiver_seconds"] > 0
+        assert await pa.ping() > 0
         assert not pa.benches and not pb.receive_benches
         await asyncio.wait_for(pa.close(), 4)
     finally:
