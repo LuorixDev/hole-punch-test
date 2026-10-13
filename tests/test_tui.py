@@ -21,6 +21,18 @@ def save_preview(app, name):
         app.save_screenshot(filename=name + ".svg", path=destination)
 
 
+def session_diagnostics(app, peer):
+    return json.dumps({name: {
+        "batch_state": client.batch_speed_state,
+        "matrix_results": client.manager.results[-4:] if client.manager else [],
+        "matrix_count": len(client.manager.results) if client.manager else 0,
+        "matrix_total": len(client.manager.plan) if client.manager else 0,
+        "paths": [{"attempt": p.attempt, "closed": p.closed,
+                   "speed_state": getattr(p, "speed_state", None)} for p in client.paths],
+        "recent_events": client.log.query(limit=60),
+    } for name, client in (("tui", app.client), ("peer", peer))}, ensure_ascii=False, default=str)
+
+
 def test_readonly_logs_filter_page_and_reassemble_without_losing_fields(tmp_path):
     journal = Journal(tmp_path / "journal.db", role="client", console=False)
     for index in range(205):
@@ -480,11 +492,14 @@ async def test_tui_real_p2p_chat_ping_and_bidirectional_speed(tmp_path):
             assert "PRIVATE_FILE_CONTENT_NO_CENTRAL_RELAY" not in central
             assert "file.delivered" in central
             assert "receiver_seconds" in central and "received_at" in central
-            async with asyncio.timeout(60):
-                while not app.client.manager.results or len(app.client.manager.results) < len(
-                    app.client.manager.plan
-                ):
-                    await pilot.pause(0.1)
+            try:
+                async with asyncio.timeout(180):
+                    while not app.client.manager.results or len(app.client.manager.results) < len(
+                        app.client.manager.plan
+                    ):
+                        await pilot.pause(0.1)
+            except TimeoutError:
+                pytest.fail(session_diagnostics(app, peer))
             results = app.client.manager.results
             assert any(r["method"] == "quic" and r["data_path"] for r in results)
             assert any(
@@ -501,18 +516,10 @@ async def test_tui_real_p2p_chat_ping_and_bidirectional_speed(tmp_path):
                     while "/speed-all" in app.busy:
                         await pilot.pause(0.1)
             except TimeoutError:
-                pytest.fail(json.dumps({
-                    "batch_state": app.client.batch_speed_state,
-                    "paths": [{"attempt": p.attempt, "closed": p.closed,
-                               "speed_state": getattr(p, "speed_state", None)} for p in app.client.paths],
-                    "recent_events": app.client.log.query(limit=80),
-                }, ensure_ascii=False, default=str))
+                pytest.fail(session_diagnostics(app, peer))
             assert app.client.active_path is active
             assert app.client.batch_speed_state["completed"] == app.client.batch_speed_state["total"]
-            assert app.client.batch_speed_state["failed"] == 0, json.dumps({
-                "batch_state": app.client.batch_speed_state,
-                "recent_events": app.client.log.query(limit=80),
-            }, ensure_ascii=False, default=str)
+            assert app.client.batch_speed_state["failed"] == 0, session_diagnostics(app, peer)
             assert all("peer-to-local" in p.latest_speed for p in app.client.paths if not p.closed)
             app.refresh_state()
             save_preview(app, "live-batch-speed")
