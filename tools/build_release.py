@@ -40,7 +40,7 @@ def collect_licenses(destination):
             target = destination / name / Path(*[part for part in file.parts if part != ".."])
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
-            files.append(str(target.relative_to(destination)))
+            files.append(target.relative_to(destination).as_posix())
         inventory.append({
             "name": name, "version": distribution.version,
             "license": distribution.metadata.get("License-Expression") or distribution.metadata.get("License"),
