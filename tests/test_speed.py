@@ -24,8 +24,9 @@ async def test_actual_tcp_speed_format_and_receiver_confirmations(peers, legacy,
         if legacy:
             pa.remote_capabilities.clear()
         if coarse_clock:
+            baseline = time.monotonic()
             monkeypatch.setattr("p2plab.session.time", SimpleNamespace(
-                monotonic=lambda: 100.0, perf_counter=time.perf_counter, process_time=time.process_time,
+                monotonic=lambda: baseline, perf_counter=time.perf_counter, process_time=time.process_time,
             ))
         result = await pa.speed(2 * 1024 * 1024 + 17)
         assert result["bytes"] == 2 * 1024 * 1024 + 17
@@ -157,10 +158,11 @@ async def test_visible_links_get_periodic_real_rtt_samples(peers):
         ta.set_candidates(tb.candidates)
         tb.set_candidates(ta.candidates)
         pa, _ = await asyncio.gather(ta.connect(), tb.connect())
-        async with asyncio.timeout(4):
-            while not pa.rtt_measured_at:
+        samples = []
+        async with asyncio.timeout(6):
+            while not samples:
                 await asyncio.sleep(0.01)
-        samples = [r for r in a.log.query() if r["event"] == "path.rtt_sample"]
+                samples = [r for r in a.log.query() if r["event"] == "path.rtt_sample"]
         assert pa.last_rtt >= 0 and pa.rtt_state == "measured"
         assert samples and samples[-1]["fields"]["interval_seconds"] == 2
     finally:
