@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          version: '0.12.12'
+          version: '0.13.0'
           python-version: '3.12.15'
           activate-environment: true
           enable-cache: true
@@ -110,7 +110,10 @@ jobs:
           for path in sorted(directory.iterdir()):
               if path.is_file() and not path.name.startswith('SHA256SUMS'):
                   with path.open('rb') as stream:
-                      rows.append(f'{hashlib.file_digest(stream, "sha256").hexdigest()}  {path.name}')
+                      digest = hashlib.sha256()
+                      for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                          digest.update(chunk)
+                      rows.append(f'{digest.hexdigest()}  {path.name}')
           (directory / 'SHA256SUMS.txt').write_text('\n'.join(rows) + '\n')
           PY
           if gh release view "$TAG" >/dev/null 2>&1; then
