@@ -10,6 +10,7 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -56,6 +57,8 @@ def collect_licenses(destination):
                    ROOT / ".tools/LIBRESPEED-LICENSE", ROOT / "data/native/libutp.LICENSE"):
         if source.is_file():
             shutil.copyfile(source, destination / source.name)
+    for source in (ROOT / ".tools/libnice").glob("COPYING*"):
+        shutil.copyfile(source, destination / ("libnice-" + source.name))
     if sys.platform == "linux":
         for name in ("libnice10", "libglib2.0-0", "libglib2.0-0t64"):
             copyright = Path("/usr/share/doc") / name / "copyright"
@@ -76,6 +79,12 @@ def collect_sources(output, licenses):
         ("LibreSpeed-source-1.0.14.tar.gz", "https://codeload.github.com/librespeed/speedtest-cli/tar.gz/refs/tags/v1.0.14"),
     ]
     records = []
+    nice_source = ROOT / ".tools/libnice-source-0.1.22.tar.gz"
+    if nice_source.is_file():
+        source_copy = output / "libnice-source-0.1.22.tar.gz"
+        shutil.copyfile(nice_source, source_copy)
+        records.append({"file": source_copy.name, "url": "https://github.com/libnice/libnice/tree/0.1.22",
+                        "sha256": sha256(source_copy)})
     for name, url in archives:
         path = output / name
         if not path.is_file():
@@ -143,7 +152,8 @@ def main():
         for path in sorted(licenses.rglob("*")):
             if path.is_file():
                 archive.write(path, path.relative_to(licenses).as_posix())
-    smoke = ROOT / "build" / f"frozen-smoke-{target}"
+    (ROOT / "build").mkdir(exist_ok=True)
+    smoke = Path(tempfile.mkdtemp(prefix=f"frozen-smoke-{target}-", dir=ROOT / "build"))
     run(sys.executable, ROOT / "tools/smoke_frozen.py", "--client", binaries["client"],
         "--server", binaries["server"], "--output", smoke)
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,

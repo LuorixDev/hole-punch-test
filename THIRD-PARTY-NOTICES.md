@@ -33,10 +33,11 @@ with an independently installed program; neither uses an application relay.
   The executable is unmodified, checksum-verified by `tools/install_librespeed.py`.
 - Optional Linux libutp: MIT, exact revision and source in
   `tools/install_libutp.py`; its original license is bundled when present.
-- Optional Linux libnice/GLib: upstream LGPL licenses and system package source
-  information are included when these libraries are bundled. Linux builds use
-  Ubuntu 22.04 packages; see https://launchpad.net/ubuntu/+source/libnice and
-  https://launchpad.net/ubuntu/+source/glib2.0.
+- Optional Linux libnice 0.1.22: exact revision/checksum/build in
+  `tools/install_libnice.py`; original LGPL/MPL notices and source archive are
+  bundled. Source: https://github.com/libnice/libnice/tree/0.1.22.
+  GLib uses Ubuntu 22.04 packages; original license/source information is included
+  with the binaries. See https://launchpad.net/ubuntu/+source/glib2.0.
 
 For source distributions of a Python dependency, use its exact version's PyPI
 source distribution and the recorded upstream URLs, not a moving default branch.

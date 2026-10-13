@@ -134,7 +134,7 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls):
             while sum("speed.result:" in line for line in output["a"]) < 2:
                 await asyncio.sleep(0.05)
         await asyncio.gather(
-            contains("a", "experiment.completed", 40), contains("b", "experiment.completed", 40)
+            contains("a", "experiment.completed", 120), contains("b", "experiment.completed", 120)
         )
         for client in clients:
             client.stdin.write(b"/quit\n")

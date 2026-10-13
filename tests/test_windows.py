@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import os
 import socket
 import sys
 import zipfile
@@ -224,3 +225,17 @@ async def test_native_windows_read_only_network_snapshot():
     assert result["system_commands"][0]["state"] == "completed", json.dumps(result["system_commands"])
     assert result["address_inventory"]
     assert all(r["source"] == "windows-netipaddress" for r in result["address_inventory"])
+
+
+def test_regular_file_sender_does_not_require_posix_nonblocking_flag(tmp_path, monkeypatch):
+    from p2plab.transfers import open_source
+
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+    source = tmp_path / "binary.dat"
+    content = b"binary\r\n\x00data\n"
+    source.write_bytes(content)
+    stream, info = open_source(source, False)
+    try:
+        assert stream.read() == content and info.st_size == len(content)
+    finally:
+        stream.close()

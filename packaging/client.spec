@@ -22,6 +22,12 @@ if sys.platform == "linux" and utp.is_file():
     binaries.append((str(utp), "data/native"))
     datas.append((str(root / "data/native/libutp.LICENSE"), "data/native"))
 
+nice = root / ".tools/libnice/lib/libnice.so.10"
+if sys.platform == "linux" and nice.is_file():
+    binaries.append((str(nice), ".tools/libnice/lib"))
+    for name in ("COPYING", "COPYING.LGPL", "COPYING.MPL"):
+        datas.append((str(root / ".tools/libnice" / name), ".tools/libnice"))
+
 speedtest = root / ".tools" / ("librespeed-cli.exe" if sys.platform == "win32" else "librespeed-cli")
 if speedtest.is_file():
     binaries.append((str(speedtest), ".tools"))

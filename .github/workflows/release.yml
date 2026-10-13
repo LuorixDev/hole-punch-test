@@ -42,11 +42,13 @@ jobs:
       - name: Install locked runtime and build tools
         run: |
           uv pip install --only-binary=:all: -r requirements.lock -r packaging/build-requirements.txt
+          uv pip install --no-deps -e .
       - name: Linux native experiment libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y iproute2 libnice10 make g++
+          sudo apt-get install --no-install-recommends -y iproute2 libnice10 make g++ meson ninja-build libglib2.0-dev libgnutls28-dev pkg-config
+          python tools/install_libnice.py
           python tools/install_libutp.py
       - name: Lint
         run: python -m ruff check p2plab tests tools

@@ -409,6 +409,13 @@ class HistoryLog(RichLog):
         self.serial += 1
         self.history.append((self.serial, content.copy()))
 
+    def on_show(self):
+        self.call_after_refresh(self.flush_history)
+
+    def on_resize(self, event):
+        super().on_resize(event)
+        self.call_after_refresh(self.flush_history)
+
     def flush_history(self):
         width = self.scrollable_content_region.width
         if not self.is_on_screen or width < 2 or not self._size_known:
@@ -956,6 +963,7 @@ class P2PApp(App):
     def on_resize(self, event):
         self.set_class(event.size.width < 100, "compact")
         self.set_class(event.size.width < 75, "narrow")
+        self.call_after_refresh(self.flush_chat_logs)
 
     def action_tab(self, name):
         self.main_screen.set_focus(None)

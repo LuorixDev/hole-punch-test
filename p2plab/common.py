@@ -95,8 +95,8 @@ class Identity:
         elif os.name == "nt":
             import msvcrt
 
-            self.lock_file.seek(0)
-            if not self.lock_file.read(1):
+            # Windows denies reads of another process's locked byte; size queries are safe.
+            if not os.fstat(self.lock_file.fileno()).st_size:
                 self.lock_file.write(b"\0")
                 self.lock_file.flush()
             self.lock_file.seek(0)

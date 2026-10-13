@@ -87,7 +87,7 @@ async def disk_call(function, *args, cleanup=None):
 
 
 def open_source(path, image):
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     stream = os.fdopen(fd, "rb")
     try:
         info = os.fstat(stream.fileno())

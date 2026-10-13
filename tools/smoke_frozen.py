@@ -21,6 +21,8 @@ def free_port(kind):
 
 
 async def smoke(client, server, output):
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("SMOKE_OUTPUT_MUST_BE_EMPTY; existing logs and identities will not be deleted")
     output.mkdir(parents=True, exist_ok=True)
     processes, pumps, lines = {}, [], {}
     environment = {**os.environ, "NO_COLOR": "1", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
@@ -85,6 +87,15 @@ async def smoke(client, server, output):
                 if processes["a"].returncode is not None:
                     raise RuntimeError("Client exited during bidirectional speed test")
                 await asyncio.sleep(0.05)
+        attachment = output / "private release file.bin"
+        content = b"private-release-file-bytes\x00\r\n" * 4096
+        attachment.write_bytes(content)
+        send("a", "/file " + json.dumps(attachment.as_posix(), ensure_ascii=False) + "\n")
+        await processes["a"].stdin.drain()
+        await asyncio.gather(contains("a", "file.delivered"), contains("b", "file.received"))
+        received = list((output / "b/downloads").glob("*.bin"))
+        if len(received) != 1 or received[0].read_bytes() != content:
+            raise RuntimeError("Frozen file transfer did not preserve binary content")
         await asyncio.gather(contains("a", "experiment.completed", 120), contains("b", "experiment.completed", 120))
         for name in ("a", "b"):
             send(name, "/quit\n")
@@ -111,12 +122,14 @@ async def smoke(client, server, output):
     failures = [event for event in events if event["event"] in (
         "runtime.asyncio_error", "client.background_failed", "runtime.unhandled_exception",
     )]
-    if failures or message in json.dumps(events):
+    if failures or message in json.dumps(events) or "private-release-file-bytes" in json.dumps(events):
         raise RuntimeError("Runtime errors or chat content leaked into central diagnostics")
     counts = collections.Counter(event["event"] for event in events)
     if counts["client.stopped"] != 2 or counts["speed.result"] != 2 or not counts["chat.delivered"]:
         raise RuntimeError("Central logs are missing acknowledged client/chat/speed events")
-    report = {"state": "passed", "chat": True, "ping": True, "bidirectional_speed": True,
+    if counts["file.received"] != 1 or counts["file.delivered"] != 1:
+        raise RuntimeError("Central logs are missing file transfer receipts")
+    report = {"state": "passed", "chat": True, "ping": True, "bidirectional_speed": True, "file_transfer": True,
               "central_client_stops": counts["client.stopped"], "central_chat_deliveries": counts["chat.delivered"],
               "central_speed_results": counts["speed.result"], "background_errors": len(failures),
               "scope": "IPv4/IPv6 loopback only, not WAN or cross-ISP acceptance"}
