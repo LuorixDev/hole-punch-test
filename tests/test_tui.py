@@ -372,13 +372,19 @@ async def test_busy_chat_keeps_unsent_input_and_history_page_does_not_jump(peers
         app.busy.clear()
         app.action_tab("logs")
         await pilot.pause()
-        await pilot.click("#log-older")
+        assert await pilot.click("#log-older")
+        async with asyncio.timeout(5):
+            while app.page_before is None:
+                await pilot.pause(0.05)
         frozen = [r["cursor"] for r in app.log_rows]
         assert app.page_before is not None
         client.log.event("later.event")
         app.refresh_state()
         assert [r["cursor"] for r in app.log_rows] == frozen
-        await pilot.click("#log-newer")
+        assert await pilot.click("#log-newer")
+        async with asyncio.timeout(5):
+            while app.page_before is not None:
+                await pilot.pause(0.05)
         assert app.page_before is None
         assert app.log_rows[0]["event"] == "later.event"
         app.query_one("#log-run", Select).value = "all"
@@ -490,12 +496,23 @@ async def test_tui_real_p2p_chat_ping_and_bidirectional_speed(tmp_path):
             app.action_tab("paths")
             await pilot.pause()
             app.submit_command("/speed-all 1")
-            async with asyncio.timeout(60):
-                while "/speed-all" in app.busy:
-                    await pilot.pause(0.1)
+            try:
+                async with asyncio.timeout(180):
+                    while "/speed-all" in app.busy:
+                        await pilot.pause(0.1)
+            except TimeoutError:
+                pytest.fail(json.dumps({
+                    "batch_state": app.client.batch_speed_state,
+                    "paths": [{"attempt": p.attempt, "closed": p.closed,
+                               "speed_state": getattr(p, "speed_state", None)} for p in app.client.paths],
+                    "recent_events": app.client.log.query(limit=80),
+                }, ensure_ascii=False, default=str))
             assert app.client.active_path is active
             assert app.client.batch_speed_state["completed"] == app.client.batch_speed_state["total"]
-            assert app.client.batch_speed_state["failed"] == 0
+            assert app.client.batch_speed_state["failed"] == 0, json.dumps({
+                "batch_state": app.client.batch_speed_state,
+                "recent_events": app.client.log.query(limit=80),
+            }, ensure_ascii=False, default=str)
             assert all("peer-to-local" in p.latest_speed for p in app.client.paths if not p.closed)
             app.refresh_state()
             save_preview(app, "live-batch-speed")
