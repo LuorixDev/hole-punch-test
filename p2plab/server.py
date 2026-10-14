@@ -36,12 +36,14 @@ class Hub:
         access_token="",
         stun_port=3478,
         tcp_port=3479,
+        tcp_observer_protocol="raw",
         allow_inbound=False,
         allow_loopback=False,
         inbound_prefixes=(),
     ):
         self.log, self.admin_token, self.access_token = journal, admin_token, access_token
         self.stun_port, self.tcp_port = stun_port, tcp_port
+        self.tcp_observer_protocol = tcp_observer_protocol
         self.allow_inbound, self.allow_loopback = allow_inbound, allow_loopback
         self.rooms, self.peers, self.observation_tokens = {}, {}, {}
         self.reach_active = asyncio.Semaphore(2)
@@ -54,6 +56,7 @@ class Hub:
         app.router.add_get("/health", self.health)
         app.router.add_get("/ws", self.websocket)
         app.router.add_get("/logs", self.logs)
+        app.router.add_post("/tcp-observe", self.observe_http)
         return app
 
     async def health(self, request):
@@ -167,6 +170,7 @@ class Hub:
                     "observation_token": obs,
                     "stun_port": self.stun_port,
                     "tcp_port": self.tcp_port,
+                    "tcp_observer_protocol": self.tcp_observer_protocol,
                     "inbound_check": self.allow_inbound,
                     "inbound_ipv4_check": self.allow_inbound,
                     "inbound_max_checks": 2,
@@ -394,19 +398,36 @@ class Hub:
         else:
             raise ValueError("UNKNOWN_MESSAGE_TYPE")
 
+    def observed_mapping(self, token, remote):
+        record = self.observation_tokens.get(token)
+        if not record or record[1] < time.monotonic():
+            raise ValueError("OBSERVATION_TOKEN_INVALID")
+        peer = self.peers.get(record[0])
+        if not peer or not remote or remote[0] != peer["source"]:
+            raise ValueError("OBSERVATION_SOURCE_MISMATCH")
+        self.log.event("tcp.observation", room=peer["room"], peer=peer["id"], mapped=remote[:2])
+        return {"mapped": remote[:2]}
+
+    async def observe_http(self, request):
+        try:
+            if any(name in request.headers for name in ("Forwarded", "X-Forwarded-For", "X-Real-IP")):
+                raise ValueError("TCP_OBSERVER_REQUIRES_DIRECT_CONNECTION")
+            authorization = request.headers.get("Authorization", "")
+            token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+            remote = request.transport.get_extra_info("peername")
+            response = web.json_response(self.observed_mapping(token, remote))
+            response.force_close()
+            return response
+        except ValueError as exc:
+            self.log.event("tcp.observation_rejected", str(exc), "WARNING")
+            raise web.HTTPForbidden(text=str(exc)) from None
+
     async def observe_tcp(self, reader, writer):
         try:
             request = json.loads(await asyncio.wait_for(reader.readline(), 3))
             token = request.get("token", "")
-            record = self.observation_tokens.get(token)
-            if not record or record[1] < time.monotonic():
-                raise ValueError("OBSERVATION_TOKEN_INVALID")
-            peer = self.peers[record[0]]
             remote = writer.get_extra_info("peername")
-            if remote[0] != peer["source"]:
-                raise ValueError("OBSERVATION_SOURCE_MISMATCH")
-            self.log.event("tcp.observation", room=peer["room"], peer=peer["id"], mapped=remote[:2])
-            writer.write(packed({"mapped": remote[:2]}) + b"\n")
+            writer.write(packed(self.observed_mapping(token, remote)) + b"\n")
             await writer.drain()
         except Exception as exc:
             self.log.exception("tcp.observation_failed", exc)
@@ -542,6 +563,7 @@ async def serve(args):
         access_token=Path(args.token_file).read_text().strip() if args.token_file else "",
         stun_port=args.stun_port,
         tcp_port=args.tcp_port,
+        tcp_observer_protocol="http" if args.tcp_port == args.port else "raw",
         allow_inbound=args.allow_inbound_check,
         allow_loopback=args.allow_loopback_check,
     )
@@ -585,12 +607,15 @@ async def serve(args):
                 family=socket.AF_INET,
             )
             udp_transports.append(transport)
-        tcp = await asyncio.start_server(hub.observe_tcp, args.host, args.tcp_port, limit=4096)
+        if args.tcp_port != args.port:
+            tcp = await asyncio.start_server(hub.observe_tcp, args.host, args.tcp_port, limit=4096)
         journal.event(
             "server.started",
             signaling=f"{'https' if context else 'http'}://{args.host}:{args.port}",
             stun=points,
             tcp_observer=args.tcp_port,
+            tcp_observer_protocol=hub.tcp_observer_protocol,
+            shared_port=args.port == args.stun_port == args.tcp_port,
             log_database=str(data / "central.sqlite3"),
             admin_token_file=str(token_file),
             inbound_check=args.allow_inbound_check,
@@ -624,9 +649,9 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--stun-host")
-    parser.add_argument("--stun-port", type=int, default=3478)
+    parser.add_argument("--stun-port", type=int, help="UDP STUN port; defaults to --port")
     parser.add_argument("--stun-alt-ip", help="Second IPv4 on this host for complete RFC 5780 tests")
-    parser.add_argument("--tcp-port", type=int, default=3479)
+    parser.add_argument("--tcp-port", type=int, help="TCP observer port; defaults to the shared HTTP --port")
     parser.add_argument("--data", default="data/server")
     parser.add_argument("--cert")
     parser.add_argument("--key")
@@ -640,6 +665,14 @@ def main():
         help="Optional global IPv6 callback prefix restriction; omit to allow any global IPv6; repeatable",
     )
     args = parser.parse_args()
+    if args.stun_port is None:
+        args.stun_port = args.port
+    if args.tcp_port is None:
+        args.tcp_port = args.port
+    if not all(1 <= port <= 65535 for port in (args.port, args.stun_port, args.tcp_port)):
+        parser.error("Ports must be between 1 and 65535")
+    if args.stun_alt_ip and args.stun_port == 65535:
+        parser.error("--stun-alt-ip needs an alternate UDP port below 65536")
     if args.stun_alt_ip and (not args.stun_host or ipaddress.ip_address(args.stun_host).is_unspecified):
         parser.error("--stun-alt-ip requires an explicit non-wildcard --stun-host")
     try:

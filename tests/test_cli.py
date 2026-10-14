@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from tools.smoke_frozen import free_shared_port
+
 
 def free_port(kind):
     with socket.socket(socket.AF_INET, kind) as sock:
@@ -32,7 +34,8 @@ def local_certificate(directory):
         .not_valid_after(now + dt.timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .add_extension(
-            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                                        x509.DNSName("localhost")]), critical=False
         )
         .sign(key, hashes.SHA256())
     )
@@ -47,11 +50,12 @@ def local_certificate(directory):
     return cert_path, key_path
 
 
-@pytest.mark.parametrize("tls", [True, False], ids=["tls", "plaintext-wildcard"])
-async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls):
+@pytest.mark.parametrize("tls,shared", [(True, True), (False, True), (False, False)],
+                         ids=["tls-shared", "plaintext-wildcard-shared", "plaintext-legacy"])
+async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, shared):
     cert, key = local_certificate(tmp_path) if tls else (None, None)
     port, stun_port, tcp_port = (
-        free_port(socket.SOCK_STREAM),
+        free_shared_port() if shared else free_port(socket.SOCK_STREAM),
         free_port(socket.SOCK_DGRAM),
         free_port(socket.SOCK_STREAM),
     )
@@ -64,10 +68,7 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls):
         "127.0.0.1" if tls else "0.0.0.0",
         "--port",
         str(port),
-        "--stun-port",
-        str(stun_port),
-        "--tcp-port",
-        str(tcp_port),
+        *([] if shared else ["--stun-port", str(stun_port), "--tcp-port", str(tcp_port)]),
         *(["--cert", str(cert), "--key", str(key)] if tls else []),
         "--allow-inbound-check",
         "--allow-loopback-check",
@@ -107,7 +108,7 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls):
                 )
                 + f'data_dir = "{tmp_path / name}"\nname = "{name}"\n'
                 '[experiment]\ntimeout = 1.0\nprofiles = ["fast"]\ngateway = false\n'
-                "diagnostics = false\nstun = []\nmax_pairs = 1\nport_prediction = false\n"
+                "diagnostics = false\nstun = []\nmax_pairs = 2\nport_prediction = false\n"
             )
             client = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -164,6 +165,10 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls):
         assert sum(e["event"] == "client.stopped" for e in events) == 2
         assert any(e["event"] == "chat.delivered" for e in events)
         assert sum(e["event"] == "speed.result" for e in events) == 2
+        mapped = [e for e in events if e["event"] == "tcp.mapped"]
+        assert mapped and all(e["fields"]["observer_protocol"] == ("http" if shared else "raw") for e in mapped)
+        if shared:
+            assert any(e["event"] == "stun.observed" and e["fields"]["observer"][1] == port for e in events)
         callbacks = [e for e in events if e["event"] == "ipv6.inbound_result"]
         assert len(callbacks) == 2
         assert all(e["fields"]["code"] == "REACHABLE" for e in callbacks)

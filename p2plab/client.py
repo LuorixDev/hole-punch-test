@@ -150,6 +150,7 @@ class Client:
         self.log = Journal(self.data / "client.sqlite3", role="client", room=room, console=console)
         self.observers = []
         self.tcp_observer = None
+        self.tcp_observer_protocol = "raw"
         self.observation_token = None
         self.inbound_supported = False
         self.inbound_task = None
@@ -900,6 +901,10 @@ class Client:
             ipv4 = rows[0][4][0]
             self.observers = [f"{ipv4}:{body['stun_port']}", *self.extra_observers]
             self.tcp_observer = (ipv4, body["tcp_port"])
+            protocol = body.get("tcp_observer_protocol", "raw")
+            if protocol not in ("raw", "http"):
+                raise ValueError("TCP_OBSERVER_PROTOCOL_UNSUPPORTED")
+            self.tcp_observer_protocol = protocol
             self.inbound_supported = body.get("inbound_check", False)
             self.inbound_ipv4_supported = body.get("inbound_ipv4_check", False)
             if self.inbound_task and not self.inbound_task.done():
@@ -910,6 +915,9 @@ class Client:
                 "signaling.connected",
                 peer_id=self.peer_id,
                 server_ipv4=ipv4,
+                stun_port=body["stun_port"],
+                tcp_observer_port=body["tcp_port"],
+                tcp_observer_protocol=protocol,
                 strict_p2p=body.get("strict_p2p"),
                 admission="room-number-only-trusted-signaling-server",
                 log_encoding=self.log_encoding or "legacy-json",

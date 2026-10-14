@@ -16,10 +16,18 @@ from p2plab.journal import Journal
 from p2plab.runtime import configure_console_encoding
 
 
-def free_port(kind):
-    with socket.socket(socket.AF_INET, kind) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def free_shared_port():
+    for _ in range(32):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.bind(("127.0.0.1", 0))
+            port = tcp.getsockname()[1]
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                try:
+                    udp.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+                return port
+    raise RuntimeError("NO_FREE_SHARED_TCP_UDP_PORT")
 
 
 async def stop_process(process, timeout=10):
@@ -100,13 +108,10 @@ async def smoke(client, server, output):
     def send(name, text):
         processes[name].stdin.write(text.encode("utf-8"))
 
-    port, tcp_port = free_port(socket.SOCK_STREAM), free_port(socket.SOCK_STREAM)
-    while tcp_port == port:
-        tcp_port = free_port(socket.SOCK_STREAM)
+    port = free_shared_port()
     message = "release-smoke-private-chat-\u4e2d\u6587\u6d88\u606f"
     try:
         await launch("server", server, "--host", "127.0.0.1", "--port", port,
-                     "--stun-port", free_port(socket.SOCK_DGRAM), "--tcp-port", tcp_port,
                      "--data", output / "server")
         await contains("server", "server.started")
         for name in ("a", "b"):
@@ -116,7 +121,7 @@ async def smoke(client, server, output):
                 f'data_dir = {json.dumps((output / name).as_posix())}\n'
                 f'name = "{name}"\n'
                 '[experiment]\ntimeout = 1.0\nprofiles = ["fast"]\ngateway = false\n'
-                'diagnostics = false\nstun = []\nmax_pairs = 1\nport_prediction = false\n'
+                'diagnostics = false\nstun = []\nmax_pairs = 2\nport_prediction = false\n'
                 'comprehensive = false\n', encoding="utf-8",
             )
             await launch(name, client, "--config", config, "--loopback", "--room", "release", "--plain")
@@ -168,8 +173,15 @@ async def smoke(client, server, output):
         raise RuntimeError("Central logs are missing acknowledged client/chat/speed events")
     if counts["file.received"] != 1 or counts["file.delivered"] != 1:
         raise RuntimeError("Central logs are missing file transfer receipts")
+    if not any(event["event"] == "tcp.mapped" and event["fields"].get("observer_protocol") == "http"
+               for event in events):
+        raise RuntimeError("Shared-port HTTP TCP observation was not verified")
+    if not any(event["event"] == "stun.observed" and event["fields"]["observer"][1] == port
+               for event in events):
+        raise RuntimeError("Same-number UDP STUN observation was not verified")
     report = {"state": "passed", "chat": True, "unicode_chat": True, "ping": True,
               "bidirectional_speed": True, "file_transfer": True,
+              "shared_tcp_udp_port": port, "http_tcp_observation": True, "same_port_stun": True,
               "central_client_stops": counts["client.stopped"], "central_chat_deliveries": counts["chat.delivered"],
               "central_speed_results": counts["speed.result"], "background_errors": len(failures),
               "scope": "IPv4/IPv6 loopback only, not WAN or cross-ISP acceptance"}

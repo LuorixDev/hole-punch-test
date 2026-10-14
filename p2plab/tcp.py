@@ -5,6 +5,10 @@ import hashlib
 import ipaddress
 import json
 import socket
+import ssl
+
+import aiohttp
+from yarl import URL
 
 from .common import encode_frame, endpoint, new_socket, packed, read_frame, sockaddr
 from .session import Path
@@ -35,28 +39,31 @@ class TcpAttempt:
         if ":" not in self.host and self.owner.tcp_observer:
             port = local[1]
             try:
-                await asyncio.wait_for(
-                    asyncio.get_running_loop().sock_connect(self.sock, self.owner.tcp_observer), 2
-                )
-                reader, writer = await asyncio.open_connection(sock=self.sock)
-                self.sock = None
-                try:
-                    writer.write(packed({"token": self.owner.observation_token}) + b"\n")
-                    await writer.drain()
-                    reply = json.loads(await asyncio.wait_for(reader.readline(), 2))
-                    self.observed = list(endpoint(*reply["mapped"]))
-                    if self.observed not in self.candidates:
-                        self.candidates.append(self.observed)
-                    self.owner.log.event(
-                        "tcp.mapped",
-                        attempt=self.attempt,
-                        local=local,
-                        mapped=self.observed,
-                        evidence="tcp-observer-same-local-port-rebind-not-guaranteed",
+                if self.owner.tcp_observer_protocol == "http":
+                    reply = await self.observe_http()
+                else:
+                    await asyncio.wait_for(
+                        asyncio.get_running_loop().sock_connect(self.sock, self.owner.tcp_observer), 2
                     )
-                finally:
-                    writer.close()
-                    await writer.wait_closed()
+                    reader, writer = await asyncio.open_connection(sock=self.sock)
+                    self.sock = None
+                    try:
+                        writer.write(packed({"token": self.owner.observation_token}) + b"\n")
+                        await writer.drain()
+                        reply = json.loads(await asyncio.wait_for(reader.readline(), 2))
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                self.observed = list(endpoint(*reply["mapped"]))
+                if ipaddress.ip_address(self.observed[0]).version != 4:
+                    raise ValueError("TCP_OBSERVER_FAMILY_MISMATCH")
+                if self.observed not in self.candidates:
+                    self.candidates.append(self.observed)
+                self.owner.log.event(
+                    "tcp.mapped", attempt=self.attempt, local=local, mapped=self.observed,
+                    observer_protocol=self.owner.tcp_observer_protocol,
+                    evidence="tcp-observer-same-local-port-rebind-not-guaranteed",
+                )
             except Exception as exc:
                 self.owner.log.event("tcp.observer_failed", str(exc), "WARNING", attempt=self.attempt)
             finally:
@@ -81,6 +88,38 @@ class TcpAttempt:
             local=self.candidates[0],
             listening=self.server is not None,
         )
+
+    async def observe_http(self):
+        original = URL(self.owner.server_url)
+        secure = original.scheme == "wss"
+        address, port = self.owner.tcp_observer
+        url = original.with_scheme("https" if secure else "http").with_host(address).with_port(port)
+        url = url.with_path("/tcp-observe").with_query(None).with_fragment(None)
+        context = ssl.create_default_context(cafile=self.owner.config.get("ca_file")) if secure else True
+
+        def socket_factory(address_info):
+            if self.sock is None:
+                raise OSError("TCP_OBSERVER_SOCKET_ALREADY_CONSUMED")
+            sock, self.sock = self.sock, None
+            return sock
+
+        # Supply the actual experiment socket; a pooled control connection gives false mapping evidence.
+        connector = aiohttp.TCPConnector(socket_factory=socket_factory, ssl=context, family=socket.AF_INET,
+                                        force_close=True, limit=1)
+        async with aiohttp.ClientSession(connector=connector, trust_env=False,
+                                        timeout=aiohttp.ClientTimeout(total=4)) as session:
+            async with session.post(url, allow_redirects=False, server_hostname=original.host if secure else None,
+                                    headers={"Authorization": "Bearer " + self.owner.observation_token,
+                                             "Host": original.authority}) as response:
+                response.raise_for_status()
+                if response.status != 200:
+                    raise ValueError("TCP_OBSERVER_UNEXPECTED_STATUS")
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(1024):
+                    body.extend(chunk)
+                    if len(body) > 4096:
+                        raise ValueError("TCP_OBSERVER_RESPONSE_LIMIT")
+                return json.loads(body)
 
     def listener_context(self):
         return self.owner.identity.context(self.owner.peer["certificate"], server=True)

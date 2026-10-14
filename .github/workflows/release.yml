@@ -60,7 +60,7 @@ jobs:
         run: python -m pytest -q --junitxml=build/source-tests.xml
       - name: Windows startup, native network and UI regression suite
         if: runner.os == 'Windows'
-        run: python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_public_ip.py tests/test_tui.py tests/test_speed.py tests/test_transports.py tests/test_release.py --junitxml=build/source-tests.xml
+        run: python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_public_ip.py tests/test_tui.py tests/test_speed.py tests/test_transports.py tests/test_server.py tests/test_server_ports.py tests/test_release.py --junitxml=build/source-tests.xml
       - name: Build and verify real single-file programs
         run: python tools/build_release.py
       - name: Upload release assets
