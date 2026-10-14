@@ -10,6 +10,7 @@ import math
 import os
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import ssl
@@ -31,6 +32,7 @@ from .experiments import Experiments
 from .inbound import SCOPE, assessment, message
 from .journal import Journal
 from .logcodec import CODEC, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, encode_batch
+from .nat import assess_nat
 from .network import (
     address_fingerprint,
     address_rejection,
@@ -191,8 +193,10 @@ class Client:
         self.park_futures = {}
         self.batch_speed_state = {}
         self.inbound_results = {}
+        self.nat_probe = None
         self.peer_network = {}
         self.server_observed_ipv4 = None
+        self.signaling_source_mode = "unknown"
         self.last_ip_evidence = None
         self.inbound_ipv4_supported = False
         self.wan_options = config.get("wan", {})
@@ -205,6 +209,7 @@ class Client:
         self.status_revision = 0
         self.chat_receipts = collections.OrderedDict()
         self.retry_lock = asyncio.Lock()
+        self.active_path_lock = asyncio.Lock()
         self.auto_retry = bool(options.get("auto_retry", not self.loopback))
         self.auto_retry_task = None
         self.last_auto_retry = 0.0
@@ -230,6 +235,7 @@ class Client:
             self.path_maintenance_task = self.spawn(self.maintain_paths(), "path-maintenance")
         if self.active_path is None or self.active_path.closed:
             self.active_path = path
+            path.lifecycle_pins = max(1, getattr(path, "lifecycle_pins", 0))
         self.log.event(
             "path.opened",
             attempt=path.attempt,
@@ -399,8 +405,11 @@ class Client:
                 self.paths.remove(path)
                 self.paths[self.paths.index(original)] = path
             if data["mode"] == "use":
+                if self.active_path is not path:
+                    if self.active_path:
+                        self.active_path.lifecycle_pins = 0
                 self.active_path = path
-                path.lifecycle_pins = 0
+                path.lifecycle_pins = 1
             self.log.event("path.reopen_verified", attempt=path.attempt, source=path.source_attempt,
                            evidence="fresh-punch-and-bilateral-data-channel-verification")
             future = self.reopen_futures.get(data["request"])
@@ -475,17 +484,21 @@ class Client:
                 future.cancel()
 
     async def active_data_path(self):
-        try:
-            return self.choose_path()
-        except ConnectionError:
-            candidates = sorted((p for p in self.paths if self.can_reopen(p)),
-                                key=lambda p: (p.family != 6, p.last_rtt or float("inf")))
-            for path in candidates[:3]:
-                try:
-                    return await self.ensure_path(path, activate=True)
-                except (ConnectionError, TimeoutError):
-                    continue
-            raise ConnectionError("NO_AUTHENTICATED_P2P_DATA_PATH_YET") from None
+        # Several TUI commands can be submitted before the first cold-path
+        # rebuild finishes. Serialize that one expensive operation so later
+        # messages reuse the newly activated path instead of punching again.
+        async with self.active_path_lock:
+            try:
+                return self.choose_path()
+            except ConnectionError:
+                candidates = sorted((p for p in self.paths if self.can_reopen(p)),
+                                    key=lambda p: (p.family != 6, p.last_rtt or float("inf")))
+                for path in candidates[:3]:
+                    try:
+                        return await self.ensure_path(path, activate=True)
+                    except (ConnectionError, TimeoutError):
+                        continue
+                raise ConnectionError("NO_AUTHENTICATED_P2P_DATA_PATH_YET") from None
 
     def remember_chat(self, mid):
         return self.dedup.remember(mid)
@@ -506,6 +519,11 @@ class Client:
                 line.append(" · 均速 ", style="italic grey62")
                 line.append(f"{speed:.3f}" if speed is not None else "未测", style="italic yellow")
                 line.append(" Mbps", style="italic grey62")
+                duration = metrics.get("receiver_seconds")
+                if duration is not None:
+                    line.append(" · 耗时 ", style="italic grey62")
+                    line.append(f"{duration:.3f}", style="italic bright_green")
+                    line.append(" s", style="italic grey62")
             Console().print(line, markup=False, highlight=False)
 
     def choose_path(self):
@@ -519,6 +537,34 @@ class Client:
             "path.failover", attempt=self.active_path.attempt, mechanism=self.active_path.mechanism
         )
         return self.active_path
+
+    def experiment_matrix_running(self):
+        task = self.manager.task if self.manager else None
+        return bool(task and not task.done())
+
+    def handle_asyncio_exception(self, loop, context, previous_handler=None):
+        exception = context.get("exception")
+        details = {
+            key: repr(context[key])[:512]
+            for key in ("message", "task", "future", "handle", "protocol", "transport", "socket")
+            if context.get(key) is not None
+        }
+        source_traceback = context.get("source_traceback")
+        if source_traceback:
+            import traceback
+
+            details["source_traceback"] = "".join(traceback.format_list(source_traceback))[-4096:]
+        if exception is None:
+            self.log.event(
+                "runtime.asyncio_error",
+                str(context.get("message", "asyncio error")),
+                "ERROR",
+                asyncio_context=details,
+            )
+        else:
+            self.log.exception("runtime.asyncio_error", exception, asyncio_context=details)
+        if previous_handler:
+            previous_handler(loop, context)
 
     async def signal(self, data):
         if not self.pair:
@@ -655,9 +701,37 @@ class Client:
             "addresses": addresses,
             "public_ips": public_ips,
             "inbound": list(self.inbound_results.values())[:8],
+            "nat": self.nat_assessment(),
+            "signaling_source_mode": self.signaling_source_mode,
             "wan": {"state": wan_state, "families": families},
             "updated_at": utcnow(),
         }
+
+    def record_nat_probe(self, *, attempt, local, mapping, filtering, samples):
+        self.nat_probe = {
+            "attempt": attempt,
+            "local": local,
+            "mapping": mapping,
+            "filtering": filtering,
+            "samples": samples[:8],
+            "tested_at": utcnow(),
+        }
+        assessment = self.nat_assessment()
+        self.log.event(
+            "network.nat_assessment",
+            "IPv4 NAT 等级依据本次同 socket STUN 映射与独立过滤探测；过滤超时可能受丢包影响",
+            state=assessment["state"],
+            level=assessment["level"],
+            label=assessment["label"],
+            evidence=assessment["evidence"],
+            tested_at=assessment.get("tested_at"),
+        )
+
+    def nat_assessment(self):
+        result = assess_nat([self.nat_probe] if self.nat_probe else [])
+        if self.nat_probe:
+            result["tested_at"] = self.nat_probe["tested_at"]
+        return result
 
     async def publish_status(self):
         if self.closed:
@@ -702,7 +776,25 @@ class Client:
             return
         await self.connected.wait()
         if self.inbound_task:
-            await asyncio.shield(self.inbound_task)
+            await asyncio.gather(asyncio.shield(self.inbound_task), return_exceptions=True)
+        deferred = False
+        while not self.stop.is_set():
+            setup = self.pair_task and not self.pair_task.done()
+            matrix = self.manager and self.manager.task and not self.manager.task.done()
+            busy = self.speed_lock.locked() or any(
+                p.benches or p.receive_benches for p in self.paths if not p.closed
+            ) or self.transfers.incoming or self.transfers.outgoing
+            if not setup and not matrix and not busy:
+                break
+            if not deferred:
+                deferred = True
+                self.log.event("wan.deferred", "等待打洞矩阵和传输空闲后自动进行公网测速")
+            try:
+                await asyncio.wait_for(self.stop.wait(), 0.25)
+            except TimeoutError:
+                pass
+        if self.stop.is_set():
+            return
         await self.test_wan()
 
     async def test_wan(self):
@@ -712,6 +804,10 @@ class Client:
             raise ValueError("WAIT_FOR_CURRENT_MATRIX_TO_FINISH_BEFORE_WAN")
         if any(getattr(path, "receive_benches", {}) for path in self.paths):
             raise ValueError("P2P_BENCH_RECEIVER_BUSY")
+        if self.speed_lock.locked() or any(getattr(p, "benches", {}) for p in self.paths):
+            raise ValueError("P2P_BENCH_SENDER_BUSY")
+        if self.transfers.incoming or self.transfers.outgoing:
+            raise ValueError("FILE_TRANSFER_BUSY")
         if self.loopback or not self.diagnostics_enabled:
             self.log.event("wan.not_tested", reason="WAN_TEST_DISABLED_OR_ISOLATED")
             return
@@ -726,7 +822,7 @@ class Client:
             )
             await self.publish_status()
             try:
-                async with asyncio.timeout(150):
+                async with asyncio.timeout(360):
                     # A VPN toggle or IPv6 rotation can invalidate the startup snapshot.
                     await self.refresh_address_inventory()
                     self.wan_result = await measure_wan(
@@ -899,6 +995,9 @@ class Client:
         if kind == "welcome":
             await self.invalidate_pair()
             self.server_observed_ipv4 = None
+            self.signaling_source_mode = (
+                "forwarded" if body.get("observation_mode") == "forwarded" else "direct"
+            )
             self.cold_paths_supported = body.get("cold_paths") is True
             self.log_encoding = CODEC if CODEC in body.get("log_encodings", []) else None
             observed = body.get("observed_ipv4")
@@ -1011,8 +1110,11 @@ class Client:
                         return
                     if (path and path.ready.is_set() and path.pair == self.pair
                             and PATH_LIFECYCLE_CAPABILITY in path.remote_capabilities):
+                        if self.active_path is not path:
+                            if self.active_path:
+                                self.active_path.lifecycle_pins = 0
                         self.active_path = path
-                        path.lifecycle_pins = 0
+                        path.lifecycle_pins = 1
                         # The WS reader must stay free to receive the cleanup ACKs.
                         self.spawn(self.park_idle_paths(), "path-idle-cleanup")
                     return
@@ -1116,10 +1218,10 @@ class Client:
                 self.log.event("experiment.setup_waiting", "等待入站基线探测完成", reason="INBOUND_BASELINE")
             await asyncio.shield(self.inbound_task)
         await self.publish_status()
-        if self.wan_task:
-            if not self.wan_task.done():
-                self.log.event("experiment.setup_waiting", "等待启动公网测速完成，再运行打洞矩阵", reason="STARTUP_WAN")
-            await asyncio.shield(self.wan_task)
+        if self.wan_task and not self.wan_task.done():
+            # WAN measurement is reference data only. It must not delay the
+            # connectivity matrix or make chat wait behind external servers.
+            self.log.event("experiment.setup_parallel", "公网测速继续后台运行，不阻塞打洞矩阵", reason="STARTUP_WAN")
         if self.paired.is_set() and manager is self.manager and pair == self.pair and not self.closed:
             await manager.start()
 
@@ -1487,7 +1589,8 @@ class Client:
                     raise ValueError("IMAGE_PATH_INVALID")
                 stream, _ = await disk_call(open_source, target, True, cleanup=lambda result: result[0].close())
                 await disk_call(stream.close)
-            await self.open_desktop(target)
+            if not await self.open_desktop(target):
+                return "目录或图片已就绪，但当前环境没有可用的图形桌面打开器。"
         elif cmd == "/quit":
             self.stop.set()
         elif cmd == "/ping":
@@ -1508,9 +1611,19 @@ class Client:
         elif cmd in ("/speed", "/speed-all"):
             if self.wan_lock.locked() or self.peer_network.get("wan", {}).get("state") == "running":
                 raise ValueError("WAN_TEST_RUNNING_SPEED_DEFERRED")
-            mib = int(parts[1]) if len(parts) > 1 else 4
+            if self.experiment_matrix_running():
+                self.log.event(
+                    "speed.deferred",
+                    "打洞矩阵运行期间不启动测速，以免污染链路结果",
+                    reason="EXPERIMENT_MATRIX_RUNNING",
+                    command=cmd,
+                )
+                raise ValueError("WAIT_FOR_EXPERIMENT_MATRIX_TO_FINISH_BEFORE_SPEED")
+            mib = int(parts[1]) if len(parts) > 1 else 128
             if not 1 <= mib <= 1024:
                 raise ValueError("SPEED_SIZE_MUST_BE_1_TO_1024_MIB")
+            if self.speed_lock.locked():
+                raise ValueError("P2P_BENCH_SENDER_BUSY")
             async with self.speed_lock:
                 if cmd == "/speed-all":
                     await self.speed_all(mib * 1024 * 1024)
@@ -1538,8 +1651,11 @@ class Client:
             index = int(parts[1])
             path = self.paths[index]
             path = await self.ensure_path(path, activate=True)
+            if self.active_path is not path:
+                if self.active_path:
+                    self.active_path.lifecycle_pins = 0
             self.active_path = path
-            path.lifecycle_pins = 0
+            path.lifecycle_pins = 1
             if self.can_reopen(path):
                 await self.signal({"kind": "path_select", "attempt": path.attempt})
                 await self.park_idle_paths()
@@ -1695,9 +1811,24 @@ class Client:
         if os.name == "nt":
             os.startfile(str(FilePath(target).resolve()))
             self.log.event("file.opened", path=str(target))
-            return
+            return True
+        launcher = "open" if sys.platform == "darwin" else "xdg-open"
+        executable = shutil.which(launcher)
+        if sys.platform.startswith("linux") and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        ):
+            executable = None
+        if not executable:
+            self.log.event(
+                "file.open_unavailable",
+                "No desktop opener is available in this environment",
+                "WARNING",
+                path=str(target),
+                launcher=launcher,
+            )
+            return False
         process = await asyncio.create_subprocess_exec(
-            "open" if sys.platform == "darwin" else "xdg-open", str(target),
+            executable, str(target),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
@@ -1706,6 +1837,7 @@ class Client:
             if code:
                 raise OSError("DESKTOP_OPEN_FAILED")
             self.log.event("file.opened", path=str(target))
+            return True
         finally:
             if process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
@@ -1717,10 +1849,7 @@ class Client:
         loop = asyncio.get_running_loop()
         previous_handler = loop.get_exception_handler()
         loop.set_exception_handler(
-            lambda loop, ctx: self.log.exception(
-                "runtime.asyncio_error",
-                ctx.get("exception", RuntimeError(ctx.get("message", "asyncio error"))),
-            )
+            lambda loop, ctx: self.handle_asyncio_exception(loop, ctx, previous_handler)
         )
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):

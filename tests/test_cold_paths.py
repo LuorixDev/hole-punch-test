@@ -214,6 +214,20 @@ async def test_current_link_loss_rebuilds_known_cold_path_for_chat(peers, monkey
         await cleanup(peers)
 
 
+async def test_concurrent_chat_after_primary_loss_rebuilds_cold_path_once(peers, monkeypatch):
+    a, b = await cold_pair(peers, monkeypatch)
+    try:
+        await asyncio.gather(*(p.active_path.close("TEST_PRIMARY_LOST") for p in peers))
+        await asyncio.gather(a.chat("first after loss"), a.chat("second after loss"))
+        reopened = [r for r in a.log.query() if r["event"] == "path.reopen_verified"]
+        assert len(reopened) == 1
+        assert sum(r["event"] == "chat.delivered" for r in a.log.query()) == 2
+        assert not a.active_path.closed and a.active_path.lifecycle_pins == 1
+        assert any(r["event"] == "chat.received" for r in b.log.query())
+    finally:
+        await cleanup(peers)
+
+
 async def test_cold_path_protocol_over_real_signaling_server_and_central_logs(tmp_path, monkeypatch):
     plan = [
         {"attempt": f"wire-cold-{i:03d}-tcp", "method": "tcp", "a_host": "127.0.0.1",

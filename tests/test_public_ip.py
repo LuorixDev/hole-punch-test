@@ -245,6 +245,30 @@ async def test_non_global_signaling_is_not_a_public_egress_conflict(peers, sourc
         assert "信令非公网/可能经转发" in banner and source in banner
 
 
+async def test_public_forwarder_ip_is_not_mistaken_for_client_egress(peers):
+    client, _ = peers
+    client.server_observed_ipv4 = "8.8.8.8"
+    client.signaling_source_mode = "forwarded"
+    client.network["http_observations"] = [
+        {"provider": "3322", "family": 4, "state": "observed", "address": "1.1.1.1"},
+    ]
+    status = validate_status(client.network_status())
+    evidence = public_ip_evidence(status)["4"]
+    assert evidence["state"] == "observed"
+    assert evidence["sources"]["signaling"] == ["8.8.8.8"]
+    app = P2PApp(client=client, start_backend=False)
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause()
+        banner = str(app.query_one("#network-banner", Static).content)
+        assert "信令转发器 8.8.8.8" in banner
+        assert "出口不一致" not in banner
+        assert "转发器地址不参与出口比较" in banner
+        app.action_tab("network")
+        await pilot.pause()
+        table = app.query_one("#public-ips", DataTable)
+        assert "信令转发器" in str(table.get_row("0"))
+
+
 def test_private_signaling_does_not_hide_real_http_egress_disagreement():
     evidence = public_ip_evidence({"public_ips": [
         {"family": 4, "source": "signaling", "address": "192.168.1.88"},

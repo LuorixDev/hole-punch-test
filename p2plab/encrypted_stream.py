@@ -10,6 +10,9 @@ from cryptography.hazmat.primitives import hashes
 from .common import encode_frame, extract_frames
 from .session import Path
 
+NATIVE_RECEIVE_QUEUE_SIZE = 4096
+NATIVE_RECEIVE_QUEUE_BYTES = 4 * 1024 * 1024
+
 
 class EncryptedStream:
     """TLS over a reliable native transport; retain the common authenticated Path."""
@@ -25,17 +28,30 @@ class EncryptedStream:
         self.lock = asyncio.Lock()
         self.secure = asyncio.Event()
         self.buffer = bytearray()
-        self.queue = asyncio.Queue(maxsize=128)
+        self.queue = asyncio.Queue(maxsize=NATIVE_RECEIVE_QUEUE_SIZE)
+        self.queued_bytes = 0
         self.started = self.closed = False
         self.worker = asyncio.create_task(self.consume(), name="native-tls:" + spec["attempt"])
 
     def feed(self, data):
         if self.closed:
             return
-        try:
-            self.queue.put_nowait(data)
-        except asyncio.QueueFull:
+        if (self.queue.full() or self.queued_bytes + len(data) > NATIVE_RECEIVE_QUEUE_BYTES):
+            self.owner.log.event(
+                "native.receive_queue_overflow",
+                "TLS receive queue reached its bounded capacity",
+                "WARNING",
+                attempt=self.spec["attempt"],
+                queued_chunks=self.queue.qsize(),
+                queued_bytes=self.queued_bytes,
+                queue_capacity=NATIVE_RECEIVE_QUEUE_SIZE,
+                byte_capacity=NATIVE_RECEIVE_QUEUE_BYTES,
+                dropped_chunk_bytes=len(data),
+            )
             self.owner.spawn(self.path.close("NATIVE_RECEIVE_QUEUE_LIMIT"), "native-overflow")
+            return
+        self.queue.put_nowait(data)
+        self.queued_bytes += len(data)
 
     async def drain(self):
         while self.outgoing.pending:
@@ -75,7 +91,9 @@ class EncryptedStream:
     async def consume(self):
         try:
             while not self.closed:
-                await self.process(await self.queue.get())
+                data = await self.queue.get()
+                self.queued_bytes -= len(data)
+                await self.process(data)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

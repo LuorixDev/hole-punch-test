@@ -46,6 +46,7 @@ class BenchProbe:
         self.recovery = self.transport_start.get("congestion_recovery_time")
         self.reductions = 0
         self.lag, self.windows, self.inflight = [], [], []
+        self.flow_control_credit, self.flow_control_blocked = [], []
         self.deadline = self.start + self.interval
         self.handle = asyncio.get_running_loop().call_later(self.interval, self.sample)
 
@@ -79,6 +80,11 @@ class BenchProbe:
             self.windows.append(data["cwnd_rtt_mbps"])
             self.inflight.append(data["inflight_fraction"])
             self.windows, self.inflight = self.windows[-2400:], self.inflight[-2400:]
+        if finite(data.get("send_flow_control_remaining_bytes")):
+            self.flow_control_credit.append(data["send_flow_control_remaining_bytes"])
+            self.flow_control_blocked.append(data.get("send_flow_control_blocked_streams", 0))
+            self.flow_control_credit = self.flow_control_credit[-2400:]
+            self.flow_control_blocked = self.flow_control_blocked[-2400:]
         self.deadline = now + self.interval
         self.handle = asyncio.get_running_loop().call_later(self.interval, self.sample)
 
@@ -99,6 +105,11 @@ class BenchProbe:
             transport.update(cwnd_rtt_mbps_median=statistics.median(self.windows),
                              inflight_fraction_median=statistics.median(self.inflight),
                              congestion_reductions_observed=self.reductions)
+        if self.flow_control_credit:
+            transport.update(send_flow_control_remaining_bytes_min=min(self.flow_control_credit),
+                             send_flow_control_remaining_bytes_median=statistics.median(self.flow_control_credit),
+                             send_flow_control_blocked_samples=sum(bool(value)
+                                                                   for value in self.flow_control_blocked))
         return {
             "seconds": seconds,
             "process_cpu_seconds": time.process_time() - self.cpu,

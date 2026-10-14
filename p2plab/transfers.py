@@ -141,6 +141,16 @@ class TransferManager:
     def record(self, tid, **fields):
         item = self.records.setdefault(tid, {"id": tid})
         item.update(fields)
+        state = fields.get("state")
+        if state == "offered":
+            item.setdefault("offered_at", dt.datetime.now(dt.timezone.utc).isoformat())
+        if state in ("sending", "receiving") and "started_monotonic" not in item:
+            item["started_monotonic"] = time.perf_counter()
+            item["started_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            item["rate_samples"] = [(item["started_monotonic"], item.get("completed", 0))]
+        if state in ("completed", "failed", "cancelled"):
+            item.setdefault("finished_monotonic", time.perf_counter())
+            item.update(self.metrics(tid))
         while len(self.records) > 200:
             removable = next(
                 (k for k in self.records if k not in self.incoming and k not in self.outgoing), None
@@ -150,9 +160,32 @@ class TransferManager:
             del self.records[removable]
         return item
 
+    def metrics(self, tid):
+        item = self.records[tid]
+        started = item.get("started_monotonic")
+        if started is None:
+            return {"elapsed_seconds": None, "average_mbps": None, "current_mbps": None}
+        now = item.get("finished_monotonic", time.perf_counter())
+        elapsed = max(0, now - started)
+        done = item.get("completed", 0)
+        samples = item.get("rate_samples", [])
+        recent = [s for s in samples if now - s[0] <= 2]
+        anchor = recent[0] if recent else (max(started, now - 2), done)
+        return {
+            "elapsed_seconds": elapsed,
+            "average_mbps": done * 8 / max(elapsed, 1e-6) / 1e6,
+            "current_mbps": max(0, done - anchor[1]) * 8 / max(now - anchor[0], 1e-6) / 1e6,
+        }
+
     def progress(self, tid, size):
         item = self.records[tid]
         item["completed"] = size
+        tick = time.perf_counter()
+        samples = item.get("rate_samples", [])
+        if not samples or tick - samples[-1][0] >= 0.1:
+            samples.append((tick, size))
+            item["rate_samples"] = [s for s in samples if tick - s[0] <= 3][-40:]
+        item.update(self.metrics(tid))
         now = time.monotonic()
         if now - item.get("last_log", 0) >= 1 or size == item["bytes"]:
             item["last_log"] = now
@@ -163,6 +196,7 @@ class TransferManager:
                 bytes=size,
                 total_bytes=item["bytes"],
                 attempt=item["attempt"],
+                **self.metrics(tid),
             )
 
     async def send(self, path, source, *, image=False):
@@ -424,6 +458,7 @@ class TransferManager:
                 item["partial_owned"] = True
                 item["progress"] = time.monotonic()
                 self.record(tid, state="receiving")
+                item["started"] = self.records[tid]["started_monotonic"]
                 await item["path"].send({"kind": "file_ready", "id": tid})
             except (OSError, ConnectionError) as exc:
                 await self._abort(tid, str(exc))
@@ -441,8 +476,6 @@ class TransferManager:
             or item["bytes"] + len(raw) > item["expected"]
         ):
             raise ValueError("FILE_CHUNK_INVALID")
-        if item["started"] is None:
-            item["started"] = time.perf_counter()
         item["prefix"].extend(raw[: max(0, 32 - len(item["prefix"]))])
         item["digest"].update(raw)
         item["buffer"].extend(raw)
@@ -472,6 +505,7 @@ class TransferManager:
                 item["destination"] = item["destination"].with_name(
                     item["destination"].name + "." + extension
                 )
+        self.record(tid, state="verifying")
         await disk_call(commit_file, item)
         duration = time.perf_counter() - item["started"] if item["started"] is not None else 0.0
         metrics = receipt(item["bytes"], duration)
@@ -546,8 +580,10 @@ class TransferManager:
             if item["path"] is path:
                 await self.abort(tid, reason, notify=False)
         for item in self.outgoing.values():
-            if item["path"] is path and not item["queue"].full():
+            if item["path"] is path:
                 item["cancelled"] = True
+                while not item["queue"].empty():
+                    item["queue"].get_nowait()
                 item["queue"].put_nowait({"kind": "file_error", "reason": reason})
 
     async def close(self):

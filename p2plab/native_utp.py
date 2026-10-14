@@ -75,6 +75,23 @@ class UtpAttempt(UdpAttempt):
         self.failure = None
         self.tls = self.path = self.pump_task = None
         self.early = deque()
+        self.socket_buffers = {}
+
+    async def open(self):
+        await super().open()
+        sock = self.transport.get_extra_info("socket")
+        if sock is None:
+            return
+        for name, option in (("receive", socket.SO_RCVBUF), ("send", socket.SO_SNDBUF)):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, option, 4 * 1024 * 1024)
+                self.socket_buffers[name + "_bytes"] = sock.getsockopt(socket.SOL_SOCKET, option)
+            except OSError as exc:
+                self.owner.log.event("native.utp_buffer_tuning_failed", str(exc), "WARNING",
+                                     attempt=self.attempt, direction=name)
+        self.owner.log.event("native.utp_socket_buffers", attempt=self.attempt,
+                             requested_bytes=4 * 1024 * 1024, actual=self.socket_buffers,
+                             scope="per-socket;no-system-sysctl-change")
 
     def on_callback(self, pointer):
         try:

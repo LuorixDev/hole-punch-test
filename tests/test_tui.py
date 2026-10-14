@@ -115,6 +115,8 @@ async def test_activity_history_survives_hidden_writes_resize_and_repeated_tab_c
 
 
 async def test_banner_displays_both_peers_addresses_and_honest_http_inbound_state(peers):
+    from datetime import datetime, timedelta, timezone
+
     from p2plab.status import utcnow
     from tests.test_status_wan import status
 
@@ -138,9 +140,30 @@ async def test_banner_displays_both_peers_addresses_and_honest_http_inbound_stat
             "code": "REACHABLE",
             "listener_received": True,
             "tested_at": utcnow(),
-        }
+        },
+        "2001:4860::2": {
+            "address": "2001:4860::2",
+            "code": "TIMEOUT_INCONCLUSIVE",
+            "listener_received": False,
+            "tested_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        },
     }
     client.peer_network = status(family=6)
+    client.peer_network["nat"] = {
+        "state": "classified",
+        "level": 4,
+        "label": "NAT4 目的相关映射",
+        "evidence": ["同 socket 不同目标映射不同"],
+        "tested_at": utcnow(),
+    }
+    client.nat_probe = {
+        "attempt": "nat-local",
+        "local": ["192.168.1.2", 49000],
+        "mapping": "endpoint-independent-observed",
+        "filtering": "endpoint-independent-observed",
+        "samples": [],
+        "tested_at": utcnow(),
+    }
     client.peer_network["inbound"] = [
         {
             "address": "2001:4860::1",
@@ -156,7 +179,9 @@ async def test_banner_displays_both_peers_addresses_and_honest_http_inbound_stat
         assert all(value in banner for value in ("本机", "对端", "192.168.1.2", "8.8.8.8", "2001:4860::1"))
         assert "临时·HTTP可达" in banner
         assert "稳定·未确认" in banner
-        assert "入站：未测" in banner
+        assert "入站：IPv4 未测 / IPv6 HTTP可达" in banner
+        assert "入站：IPv4 未测 / IPv6 已探测·未确认" in banner
+        assert "NAT2 完全锥形" in banner and "NAT4 目的相关映射" in banner
         assert "阻止" not in banner and "防火墙关闭" not in banner
         assert app.query_one("#network-banner", Static).content.no_wrap is True
         assert "2001:4860::1" in str(app.query_one("#network-banner", Static).tooltip)
@@ -474,9 +499,20 @@ async def test_tui_real_p2p_chat_ping_and_bidirectional_speed(tmp_path):
                     await pilot.pause(0.1)
             app.submit_command("真实 TUI P2P 消息")
             app.submit_command("/ping")
-            app.submit_command("/speed 1")
             async with asyncio.timeout(30):
                 while app.busy:
+                    await pilot.pause(0.1)
+            async with asyncio.timeout(30):
+                while (
+                    not app.client.manager
+                    or not app.client.manager.task.done()
+                    or not peer.manager
+                    or not peer.manager.task.done()
+                ):
+                    await pilot.pause(0.1)
+            app.submit_command("/speed 1")
+            async with asyncio.timeout(30):
+                while "/speed" in app.busy:
                     await pilot.pause(0.1)
             app.refresh_state()
             assert "ping.result" in app.latest

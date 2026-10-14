@@ -175,6 +175,11 @@ async def test_libutp_real_encrypted_chat_file_and_bidirectional_speed(peers, ho
     left, right = UtpAttempt(a, sa, host), UtpAttempt(b, sb, host)
     try:
         await asyncio.gather(left.open(), right.open())
+        for peer in (a, b):
+            buffer_events = [row for row in peer.log.query() if row["event"] == "native.utp_socket_buffers"]
+            assert buffer_events
+            assert buffer_events[-1]["fields"]["actual"]["receive_bytes"] > 0
+            assert buffer_events[-1]["fields"]["actual"]["send_bytes"] > 0
         left.set_candidates(right.candidates)
         right.set_candidates(left.candidates)
         await asyncio.gather(left.punch(2), right.punch(2))

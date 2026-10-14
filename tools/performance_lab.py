@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 
 from p2plab.client import Client
+from p2plab.native_utp import UtpAttempt
 from p2plab.performance import bottleneck_assessment
 from p2plab.rtc import RtcAttempt
 from p2plab.tcp import TcpAttempt
@@ -31,6 +32,21 @@ async def read_when_ready(path, timeout=30):
         while not path.exists():
             await asyncio.sleep(0.01)
     return json.loads(path.read_text())
+
+
+async def communicate_workers(processes):
+    tasks = [asyncio.create_task(process.communicate()) for process in processes]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if any(processes[tasks.index(task)].returncode not in (None, 0) for task in done):
+            for process in processes:
+                if process.returncode is None:
+                    process.terminate()
+        return await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
 
 
 async def worker(args):
@@ -84,6 +100,9 @@ async def worker(args):
         elif args.transport == "quic":
             obj = UdpAttempt(client, spec, spec["host"])
             await obj.open()
+        elif args.transport == "utp":
+            obj = UtpAttempt(client, spec, spec["host"])
+            await obj.open()
         else:
             obj = RtcAttempt(client, spec)
 
@@ -102,6 +121,9 @@ async def worker(args):
         if args.transport == "quic":
             await obj.punch(5)
             path = await obj.start_quic(size=args.quic_datagram_size)
+        elif args.transport == "utp":
+            await obj.punch(5)
+            path = await obj.connect_stream()
         else:
             path = await obj.connect()
         if args.legacy and hasattr(path, "remote_capabilities"):
@@ -112,8 +134,11 @@ async def worker(args):
         cpu_started, wall_started = time.process_time(), time.monotonic()
         measurements = []
         if role == "a":
+            directions = ("local-to-peer", "peer-to-local")
+            if args.direction_order == "reverse-first":
+                directions = tuple(reversed(directions))
             for _ in range(args.runs):
-                for direction in ("local-to-peer", "peer-to-local"):
+                for direction in directions:
                     result = await (
                         path.speed(args.size * 1024 * 1024)
                         if direction == "local-to-peer"
@@ -137,6 +162,7 @@ async def worker(args):
             "quic_timer": args.quic_timer,
             "quic_datagram_size": args.quic_datagram_size,
             "quic_cc": args.quic_cc,
+            "direction_order": args.direction_order,
             "reference_mbps": args.reference_mbps,
             "measurements": measurements,
             "wall_seconds": elapsed,
@@ -190,6 +216,7 @@ async def run(args):
                     "--quic-timer", args.quic_timer,
                     "--quic-datagram-size", str(args.quic_datagram_size),
                     "--quic-cc", args.quic_cc,
+                    "--direction-order", args.direction_order,
                     "--reference-mbps", str(args.reference_mbps),
                 ] + (["--legacy"] if args.legacy else [])
                 if args.namespace_pids:
@@ -203,7 +230,7 @@ async def run(args):
                     )
                 )
             async with asyncio.timeout(900):
-                outputs = await asyncio.gather(*(p.communicate() for p in processes))
+                outputs = await communicate_workers(processes)
             for process, (out, err) in zip(processes, outputs):
                 if process.returncode:
                     raise RuntimeError(out.decode() + err.decode())
@@ -220,7 +247,7 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--transport", choices=("all", "tcp", "quic", "webrtc"), default="all")
+    parser.add_argument("--transport", choices=("all", "tcp", "quic", "webrtc", "utp"), default="all")
     parser.add_argument("--data", type=Path, default=Path("data/verification/performance"))
     parser.add_argument("--size", type=int, choices=range(1, 1025), default=64)
     parser.add_argument("--runs", type=int, choices=range(1, 11), default=3)
@@ -228,6 +255,8 @@ def main():
     parser.add_argument("--quic-timer", choices=("precise", "asyncio"), default="precise")
     parser.add_argument("--quic-datagram-size", type=int, choices=(1200, 1400), default=1200)
     parser.add_argument("--quic-cc", choices=("reno", "cubic"), default="reno")
+    parser.add_argument("--direction-order", choices=("forward-first", "reverse-first"),
+                        default="forward-first")
     parser.add_argument("--reference-mbps", type=int, choices=range(0, 10001), default=0)
     parser.add_argument("--hosts", nargs=2, default=["127.0.0.1", "127.0.0.1"])
     parser.add_argument("--namespace-pids", type=int, nargs=2, help=argparse.SUPPRESS)

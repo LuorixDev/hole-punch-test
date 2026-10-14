@@ -118,6 +118,13 @@ REASONS = {
     "WAN_TEST_RUNNING_SPEED_DEFERRED": "一端正在公网测速，请稍后进行链路测速",
     "WAIT_FOR_CURRENT_MATRIX_TO_FINISH_BEFORE_WAN": "请等待打洞矩阵完成再重测公网带宽",
     "P2P_BENCH_RECEIVER_BUSY": "正在接收对端测速数据，请稍后进行公网测速",
+    "P2P_BENCH_SENDER_BUSY": "已有链路测速正在运行，请等待完成",
+    "FILE_TRANSFER_BUSY": "文件传输正在进行，请等待完成后再测公网带宽",
+    "BENCH_RECEIVE_TIMEOUT": "测速接收超时，本次测量已清理",
+    "PEER_BENCH_BUSY": "对端已有测速正在运行",
+    "LIBRESPEED_CLI_MISSING": "缺少 LibreSpeed 可执行文件",
+    "NO_REACHABLE_WAN_TARGET": "未找到可用测速节点，请检查网络或配置区域节点列表",
+    "BEST_OBSERVED_NOT_ISP_THEORETICAL_LIMIT": "多节点最佳实测参考，不是运营商理论上限",
     "PEER_WAN_TEST_RUNNING": "对端正在公网测速",
     "SPEED_SIZE_MUST_BE_1_TO_1024_MIB": "测速大小须为 1–1024 MiB",
     "INTERFACE_DOWN": "网卡未启用",
@@ -200,6 +207,7 @@ EVENTS = {
     "wan.sample": "公网测速样本",
     "wan.completed": "公网测速结束",
     "wan.not_tested": "公网测速未执行",
+    "wan.deferred": "公网测速等待空闲",
     "file.offered": "发送附件",
     "file.incoming": "收到附件请求",
     "file.progress": "附件传输进度",
@@ -768,7 +776,7 @@ class P2PApp(App):
                     yield Button("测延迟", id="ping")
                     yield Select(
                         [(f"{n} MiB", n) for n in (1, 4, 16, 64, 128, 256, 1024)],
-                        value=64,
+                        value=128,
                         allow_blank=False,
                         id="speed-size",
                     )
@@ -815,7 +823,7 @@ class P2PApp(App):
                     yield Button("切换链路", id="use-path")
                     yield Select(
                         [(f"{n} MiB", n) for n in (1, 16, 64, 128, 256, 1024)],
-                        value=64,
+                        value=128,
                         allow_blank=False,
                         id="path-speed-size",
                     )
@@ -890,7 +898,8 @@ class P2PApp(App):
             ],
             "log-table": ["序号", "时间 UTC", "级别", "事件", "消息"],
             "settings-table": ["参数", "当前值"],
-            "transfer-table": ["方向", "类型", "文件名", "状态", "进度", "均速 Mbps", "接收时间", "ID"],
+            "transfer-table": ["方向", "类型", "文件名", "状态", "进度", "实时 Mbps", "均速 Mbps",
+                               "耗时 s", "开始时间", "接收时间", "ID"],
         }
         for name, columns in schemas.items():
             table = self.query_ui("#" + name, DataTable)
@@ -1049,6 +1058,8 @@ class P2PApp(App):
             result = await self.client.command(text)
             if command == "chat":
                 self.receive_chat("我 · 已送达", text, result)
+            elif isinstance(result, str):
+                self.notify(result, severity="warning", timeout=8)
         except Exception as exc:
             self.client.log.exception("terminal.command_failed", exc)
             self.notify(
@@ -1205,7 +1216,7 @@ class P2PApp(App):
                     detail = (
                         translated(fields.get("evidence", {}).get("state"))
                         + " · "
-                        + fields.get("evidence", {}).get("reason", "")
+                        + translated(fields.get("evidence", {}).get("reason", ""))
                     )
                 entry = Text(
                     f"{record['time'][11:19]}  {heading}\n{safe_text(label)}\n{safe_text(detail)}\n"
@@ -1285,16 +1296,21 @@ class P2PApp(App):
 
     def refresh_transfers(self):
         manager = self.client.transfers
-        states = {"offered": "等待接收", "sending": "发送中", "receiving": "接收中",
+        states = {"offered": "等待接收", "sending": "发送中", "receiving": "接收中", "verifying": "校验落盘中",
                   "completed": "已完成", "cancelled": "已取消", "failed": "失败"}
         rows = []
         for tid, item in manager.records.items():
             total, done = item["bytes"], item.get("completed", 0)
             progress = f"{done / total * 100:.1f}%" if total else ("100%" if item["state"] == "completed" else "0%")
+            metrics = manager.metrics(tid)
             rows.append((tid, ["发送" if item["direction"] == "send" else "接收",
                               "图片" if item["media"] == "image" else "文件", item["name"],
                               states.get(item["state"], item["state"]), f"{progress} · {done:,}/{total:,}",
-                              number(item.get("mbps")), item.get("received_at", "—"), tid]))
+                              number(metrics["current_mbps"]) if item["state"] in ("sending", "receiving") else "—",
+                              number(item.get("mbps") if item["state"] == "completed" else metrics["average_mbps"]),
+                              number(item.get("receiver_seconds") if item["state"] == "completed"
+                                     else metrics["elapsed_seconds"]),
+                              item.get("started_at", "—"), item.get("received_at", "—"), tid]))
         self.update_table("transfer-table", rows, dict(manager.records))
         table = self.query_ui("#transfer-table", DataTable)
         selected = manager.records.get(str(table.ordered_rows[table.cursor_row].key.value), {}) if table.row_count else {}
@@ -1306,7 +1322,7 @@ class P2PApp(App):
                 selected.get("direction") == "receive" and selected.get("state") == "offered"
             )
         self.query_ui("#transfer-cancel", Button).disabled = selected.get("state") not in (
-            "offered", "sending", "receiving"
+            "offered", "sending", "receiving", "verifying"
         )
         self.query_ui("#transfer-view", Button).disabled = not (
             selected.get("media") == "image" and selected.get("saved_path") and selected.get("state") == "completed"
@@ -1314,10 +1330,17 @@ class P2PApp(App):
         available = not self.client.closed and any(p.ready.is_set() and not p.closed for p in self.client.paths)
         for name in ("attach-file", "attach-image"):
             self.query_ui("#" + name, Button).disabled = not available or len(manager.outgoing) >= 2
-        active = [item for item in manager.records.values() if item["state"] in ("offered", "sending", "receiving")]
+        active = [item for item in manager.records.values()
+                  if item["state"] in ("offered", "sending", "receiving", "verifying")]
         status = self.query_ui("#transfer-progress", Static)
         status.display = bool(active)
-        status.update(Text(" · ".join(f"{states[i['state']]} {safe_text(i['name'])} {i.get('completed', 0):,}/{i['bytes']:,}" for i in active)))
+        status.update(Text(" · ".join(
+            f"{states[i['state']]} {safe_text(i['name'])} {i.get('completed', 0):,}/{i['bytes']:,} "
+            f"耗时 {number(manager.metrics(i['id'])['elapsed_seconds'])} s "
+            f"实时 {number(manager.metrics(i['id'])['current_mbps'])} Mbps "
+            f"均速 {number(manager.metrics(i['id'])['average_mbps'])} Mbps"
+            for i in active
+        )))
 
     def attempt_label(self, attempt, fields=None):
         if not attempt:
@@ -1345,27 +1368,47 @@ class P2PApp(App):
                 "、".join(dict.fromkeys(r["address"] for r in addresses if r["family"] == 4)) or "待获取"
             )
             ip_evidence = public_ip_evidence(status)
+            signaling_label = (
+                "信令转发器" if status.get("signaling_source_mode") == "forwarded" else "信令"
+            )
             public = "  ".join(
                 label + " " + ("、".join(ip_evidence["4"]["sources"][source]) or "未观察")
-                for source, label in (("signaling", "信令"), ("http", "HTTP出口"))
+                for source, label in (("signaling", signaling_label), ("http", "HTTP出口"))
             )
             conflict = " [出口不一致]" if ip_evidence["4"]["state"] == "multiple-observed-addresses" else ""
             if ip_evidence["4"]["non_global_sources"]["signaling"]:
                 conflict += " [信令非公网/可能经转发]"
+            elif status.get("signaling_source_mode") == "forwarded":
+                conflict += " [转发器地址不参与出口比较]"
             v4_probes = [r for r in inbound.values() if ":" not in r["address"]]
-            verdict4 = "未测"
-            if v4_probes:
-                verdict4 = (
-                    "HTTP可达"
-                    if any(r["code"] == "REACHABLE" and r["listener_received"] for r in v4_probes)
-                    else "未确认"
-                )
-                if any(
-                    timestamp_age(r.get("tested_at")) is None or timestamp_age(r.get("tested_at")) > 1800
-                    for r in v4_probes
-                ):
-                    verdict4 = "探测过期"
-            lines.append(f"{name} IPv4{conflict} {private}  {public}  入站：{verdict4}")
+            v6_probes = [r for r in inbound.values() if ":" in r["address"]]
+
+            def family_verdict(probes):
+                if not probes:
+                    return "未测"
+                fresh = [
+                    r for r in probes
+                    if (age := timestamp_age(r.get("tested_at"))) is not None and age <= 1800
+                ]
+                if not fresh:
+                    return "探测过期"
+                if any(r["code"] == "REACHABLE" and r["listener_received"] for r in fresh):
+                    return "HTTP可达"
+                if any(r["code"] != "NOT_TESTED" for r in fresh):
+                    return "已探测·未确认"
+                return "未测"
+
+            verdict4 = family_verdict(v4_probes)
+            verdict6 = family_verdict(v6_probes)
+            nat = status.get("nat", {})
+            nat_label = nat.get("label", "未测")
+            nat_age = timestamp_age(nat.get("tested_at"))
+            if nat.get("tested_at") and (nat_age is None or nat_age > 1800):
+                nat_label = "探测过期"
+            lines.append(
+                f"{name} {nat_label}  IPv4{conflict} {private}  {public}  "
+                f"入站：IPv4 {verdict4} / IPv6 {verdict6}"
+            )
             v6 = []
             stale = timestamp_age(status.get("updated_at"))
             for row in addresses:
@@ -1409,7 +1452,9 @@ class P2PApp(App):
             safe_text("\n".join(lines))
             + "\nIPv4 出口是 HTTP/信令观察地址，不代表所有 UDP 映射。入站仅指本次服务端 HTTP/TCP 回连，不能推断所有端口或对端均可入站。"
             + "\n非公网信令来源可能是内网连接或服务端转发器，不参与公网出口比较。"
+            + "\n明确的 socat/反向代理模式会将信令来源标记为转发器并排除出口冲突比较；该地址仍保留作来源证据。"
             + "\n公网出口不一致可能来自服务端转发、VPN/代理/TUN、多出口或分流，不按多数票选地址。" + NETWORK_TEST_NOTICE
+            + "\nNAT1=公网直连；NAT2=映射/过滤均端点无关；NAT3?=映射端点无关但过滤探测超时后的推测；NAT4=目的相关映射。NAT3? 可能受丢包影响；IPv6 不使用此 IPv4 NAT 等级。"
         )
 
     def refresh_matrix(self):
@@ -1518,7 +1563,10 @@ class P2PApp(App):
         observations = list(network.get("http_observations", []))
         if self.client.server_observed_ipv4:
             observations.insert(0, {
-                "provider": "交换服务器（信令）", "family": 4, "state": "observed",
+                "provider": "交换服务器（信令转发器）"
+                if self.client.signaling_source_mode == "forwarded"
+                else "交换服务器（信令）",
+                "family": 4, "state": "observed",
                 "address": self.client.server_observed_ipv4, "reason": "仅此信令连接；非 UDP 映射",
             })
         self.update_table(

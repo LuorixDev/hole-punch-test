@@ -12,10 +12,12 @@ from .performance import BenchProbe
 from .transfers import FILE_CAPABILITY, RECEIPT_CAPABILITY, receipt
 
 BENCH_CAPABILITY = "bench-binary-v1"
+REVERSE_CANCEL_CAPABILITY = "bench-reverse-cancel-v1"
 PATH_LIFECYCLE_CAPABILITY = "cold-path-v1"
 BENCH_WINDOW = 16 * 1024 * 1024
 BENCH_ACK_BYTES = 256 * 1024
 MAX_BENCH_BYTES = 1024 * 1024 * 1024
+BENCH_TIMEOUT = 120
 
 
 async def closed_send(body):
@@ -57,6 +59,8 @@ class Path:
         self.keepalive_task = None
         self.remote_nonce = None
         self.reverse_tests = {}
+        self.reverse_workers = {}
+        self.cancelled_benches = collections.OrderedDict()
         self.chat_starts = {}
         self.chat_ready = {}
         self.pool_managed = False
@@ -78,7 +82,7 @@ class Path:
                 "from": self.local_id,
                 "to": self.peer["id"],
                 "nonce": self.nonce,
-                "capabilities": [BENCH_CAPABILITY, FILE_CAPABILITY, RECEIPT_CAPABILITY,
+                "capabilities": [BENCH_CAPABILITY, REVERSE_CANCEL_CAPABILITY, FILE_CAPABILITY, RECEIPT_CAPABILITY,
                                  PATH_LIFECYCLE_CAPABILITY],
                 **extra,
             }
@@ -241,6 +245,7 @@ class Path:
             cancelled = self.receive_benches.pop(body.get("id"), None)
             if cancelled:
                 cancelled["probe"].cancel()
+                self.remember_cancelled_bench(body["id"])
         elif kind == "bench_start":
             if len(self.receive_benches) >= 2:
                 raise ValueError("BENCH_CONCURRENCY_LIMIT")
@@ -281,9 +286,15 @@ class Path:
         elif kind in ("bench_ready", "bench_ack", "bench_result", "bench_error"):
             bench = self.benches.get(body.get("id"))
             if bench:
+                if bench.full():
+                    while not bench.empty():
+                        bench.get_nowait()
+                    body = {"kind": "bench_error", "reason": "BENCH_REPLY_QUEUE_LIMIT"}
                 bench.put_nowait(body)
         elif kind == "bench_chunk":
             bench = self.receive_benches.get(body.get("id"))
+            if not bench and body.get("id") in self.cancelled_benches:
+                return
             if (
                 not bench
                 or isinstance(body.get("seq"), bool)
@@ -313,6 +324,8 @@ class Path:
                     bench["next_ack"] += BENCH_ACK_BYTES
         elif kind == "bench_end":
             bench = self.receive_benches.pop(body.get("id"), None)
+            if not bench and body.get("id") in self.cancelled_benches:
+                return
             if bench:
                 runtime = bench["probe"].finish()
             if not bench or bench["bytes"] != bench["expected"]:
@@ -338,7 +351,19 @@ class Path:
             size = body.get("bytes")
             if isinstance(size, bool) or not isinstance(size, int) or not 1024 <= size <= MAX_BENCH_BYTES:
                 raise ValueError("REVERSE_BENCH_SIZE_LIMIT")
-            self.owner.spawn(self.answer_reverse_speed(body["id"], size), "reverse-speed")
+            rid = body.get("id")
+            if not isinstance(rid, str) or len(rid) != 16 or any(c not in "0123456789abcdef" for c in rid):
+                raise ValueError("REVERSE_BENCH_ID_FORMAT")
+            if rid in self.reverse_workers or self.reverse_workers or self.owner.speed_lock.locked():
+                await self.send({"kind": "reverse_speed_result", "id": rid, "error": "PEER_BENCH_BUSY"})
+                return
+            task = self.owner.spawn(self.answer_reverse_speed(rid, size), "reverse-speed")
+            self.reverse_workers[rid] = task
+            task.add_done_callback(lambda completed: self.reverse_workers.pop(rid, None))
+        elif kind == "reverse_speed_cancel":
+            task = self.reverse_workers.get(body.get("id"))
+            if task:
+                task.cancel()
         elif kind == "reverse_speed_result":
             future = self.reverse_tests.get(body.get("id"))
             if future and not future.done():
@@ -371,6 +396,10 @@ class Path:
             self.pings.pop(pid, None)
 
     async def speed(self, size):
+        async with asyncio.timeout(BENCH_TIMEOUT):
+            return await self._speed(size)
+
+    async def _speed(self, size):
         binary = BENCH_CAPABILITY in self.remote_capabilities
         maximum = MAX_BENCH_BYTES if binary else 64 * 1024 * 1024
         if isinstance(size, bool) or not isinstance(size, int) or not 1024 <= size <= maximum:
@@ -445,8 +474,13 @@ class Path:
                 acknowledge(await asyncio.wait_for(queue.get(), 20))
             await self.send({"kind": "bench_end", "id": bid})
             result = await asyncio.wait_for(queue.get(), 20)
+            if result.get("kind") == "bench_error":
+                raise ConnectionError(result.get("reason", "BENCH_PATH_CLOSED"))
             if result["kind"] != "bench_result" or result.get("bytes") != acknowledged:
                 raise ValueError("BENCH_RESULT_MISMATCH")
+            seconds = result.get("receiver_seconds")
+            if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 0 < seconds < float("inf"):
+                raise ValueError("BENCH_RECEIVER_DURATION_INVALID")
             duration = max(time.perf_counter() - started, 1e-9)
             return {
                 "bytes": acknowledged,
@@ -482,14 +516,28 @@ class Path:
         self.reverse_tests[rid] = future
         try:
             await self.send({"kind": "reverse_speed", "id": rid, "bytes": size})
-            result = await asyncio.wait_for(future, 125)
+            result = await asyncio.wait_for(future, BENCH_TIMEOUT + 10)
             if "error" in result:
                 raise ValueError(result["error"])
             return result["result"]
+        except BaseException:
+            if REVERSE_CANCEL_CAPABILITY in self.remote_capabilities and not self.closed:
+                try:
+                    async with asyncio.timeout(1):
+                        await self.send({"kind": "reverse_speed_cancel", "id": rid})
+                except (Exception, asyncio.CancelledError) as exc:
+                    self.owner.log.event("speed.cancel_cleanup_failed", str(exc), "WARNING", attempt=self.attempt)
+            raise
         finally:
             self.reverse_tests.pop(rid, None)
 
     async def answer_reverse_speed(self, rid, size):
+        if self.owner.experiment_matrix_running():
+            await self.send({"kind": "reverse_speed_result", "id": rid,
+                             "error": "PEER_EXPERIMENT_MATRIX_BUSY"})
+            self.owner.log.event("speed.reverse_rejected", "Peer matrix is still running",
+                                 "WARNING", attempt=self.attempt, reason="EXPERIMENT_MATRIX_RUNNING")
+            return
         if self.owner.speed_lock.locked():
             await self.send({"kind": "reverse_speed_result", "id": rid, "error": "PEER_BENCH_BUSY"})
             return
@@ -503,12 +551,25 @@ class Path:
             if not self.closed:
                 await self.send({"kind": "reverse_speed_result", "id": rid, "error": type(exc).__name__})
 
+    def remember_cancelled_bench(self, bid):
+        self.cancelled_benches[bid] = time.monotonic()
+        while len(self.cancelled_benches) > 32:
+            self.cancelled_benches.popitem(last=False)
+
     async def expire(self, now):
         for bid, bench in tuple(self.receive_benches.items()):
             if now - bench["progress"] > 20 or now - bench["start"] > 120:
                 self.receive_benches.pop(bid)
                 bench["probe"].cancel()
+                self.remember_cancelled_bench(bid)
                 self.owner.log.event("speed.expired", attempt=self.attempt, benchmark=bid)
+                try:
+                    await self.send({"kind": "bench_error", "id": bid, "reason": "BENCH_RECEIVE_TIMEOUT"})
+                except (ConnectionError, TimeoutError, OSError) as exc:
+                    self.owner.log.event("speed.expiry_notify_failed", str(exc), "WARNING", attempt=self.attempt)
+        for bid, stamp in tuple(self.cancelled_benches.items()):
+            if now - stamp > BENCH_TIMEOUT + 10:
+                self.cancelled_benches.pop(bid, None)
         for mid, (started, _) in tuple(self.chat_starts.items()):
             if now - started > 30:
                 self.chat_starts.pop(mid, None)
@@ -519,6 +580,9 @@ class Path:
             return
         self.closed = True
         self.closed_event.set()
+        for task in tuple(self.reverse_workers.values()):
+            if task is not asyncio.current_task():
+                task.cancel()
         for task in (self.handshake_task, self.keepalive_task):
             if task and task is not asyncio.current_task():
                 task.cancel()
@@ -541,6 +605,7 @@ class Path:
         for bench in self.receive_benches.values():
             bench["probe"].cancel()
         self.receive_benches.clear()
+        self.cancelled_benches.clear()
         await self._close()
         await self.owner.release_path_resources(self)
         # History must not keep closed transports and their stream buffers alive.

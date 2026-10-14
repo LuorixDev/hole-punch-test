@@ -151,6 +151,33 @@ async def test_soap_entities_are_rejected(peers):
         await runner.cleanup()
 
 
+async def test_malformed_soap_response_has_stable_diagnostic(peers):
+    a, _ = peers
+
+    async def malformed(request):
+        return web.Response(text="<Envelope><x:Fault></Envelope>", content_type="text/xml")
+
+    app = web.Application()
+    app.router.add_post("/", malformed)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        upnp = Upnp(a.log, "127.0.0.1", "127.0.0.1")
+        with pytest.raises(ValueError, match="UPNP_SOAP_INVALID_XML"):
+            await upnp.soap(
+                ("urn:schemas-upnp-org:service:WANIPConnection:1", f"http://127.0.0.1:{port}/"),
+                "DeletePortMapping",
+                {},
+            )
+        event = next(row for row in a.log.query() if row["event"] == "upnp.soap_invalid_response")
+        assert event["fields"]["action"] == "DeletePortMapping"
+    finally:
+        await runner.cleanup()
+
+
 async def test_igdv2_tcp_any_port_and_ipv6_soap_source_binding(peers):
     a, _ = peers
     calls = []

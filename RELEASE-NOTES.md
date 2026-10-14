@@ -4,6 +4,35 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
+## v0.1.6: Network Evidence and Transfer Reliability
+
+Upgrade both the client and server. This release improves IPv4 NAT evidence,
+P2P path recovery, throughput diagnostics and file-transfer measurements.
+
+- Add conservative IPv4 NAT1-NAT4 classification from same-socket mapping
+  observations and an independent RFC 5780 filtering socket. Unsupported test
+  servers and ambiguous/loss-affected evidence are reported as inconclusive or
+  explicitly marked as an estimate; IPv6 is not assigned an IPv4 NAT grade.
+- Serialize cold-path recovery so concurrent chat actions reuse a verified path
+  instead of starting overlapping punch/reconnect attempts.
+- Bound and cancel benchmark work on timeout or disconnect, validate reverse
+  speed-test replies, and report receiver-measured elapsed time with throughput.
+- Show live and average file-transfer rates, elapsed time and receive time; improve
+  queue cleanup and completion accounting on cancellation and errors.
+- Harden public WAN speed-test discovery, response validation, retries, source
+  revalidation, and coordination with active P2P transfers/benchmarks.
+- Extend isolated performance tooling with direction-order controls, uTP tests,
+  bounded native receive queues and read-only QUIC flow-control evidence.
+- Correct `--forwarded` egress diagnostics for public-IP socat/reverse-proxy
+  deployments while retaining the forwarding address as source evidence.
+
+Performance limitation: the 2026-10-14 isolated 50 ms RTT tests still show a
+large QUIC cold-sender throughput gap. The data does not establish that Python is
+the cause, and this release does not change production congestion control or
+claim gigabit performance. See `PERFORMANCE-REVALIDATION-2026-10-14.md` for
+measurements and reproduction boundaries. Real cross-ISP success and Windows
+real-network behavior remain outside CI guarantees.
+
 ## v0.1.5: Forwarded Deployment Fixes
 
 Upgrade both the client and server. This release fixes misleading egress warnings

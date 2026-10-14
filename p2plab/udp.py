@@ -231,6 +231,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
 
     async def observe(self, observers):
         samples, endpoint_samples = [], []
+        filtering = None
         for observer in observers[:4]:
             try:
                 version = socket.AF_INET6 if ":" in self.host else socket.AF_INET
@@ -240,6 +241,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
                         filtering = await FilteringObserver().test(self.host, target)
                         self.owner.log.event("nat.filtering", attempt=self.attempt, **filtering)
                     except (OSError, TimeoutError, ValueError) as exc:
+                        filtering = {"behavior": "undetermined", "reason": type(exc).__name__}
                         self.owner.log.event("nat.filtering", attempt=self.attempt, behavior="undetermined",
                                              fresh_socket=True, reason=type(exc).__name__ + ":" + str(exc))
                 for repeat in range(2):
@@ -280,6 +282,14 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
                 "endpoint-independent-observed" if len(mappings) == 1 else "destination-dependent-observed"
             )
         self.owner.log.event("nat.mapping", attempt=self.attempt, behavior=behavior, observations=samples)
+        if ":" not in self.host:
+            self.owner.record_nat_probe(
+                attempt=self.attempt,
+                local=self.candidates[0],
+                mapping=behavior,
+                filtering=(filtering or {}).get("behavior", "undetermined"),
+                samples=samples,
+            )
         return samples
 
     def set_candidates(self, candidates):
@@ -575,6 +585,24 @@ class QuicDriver:
         recovery = getattr(cc, "_congestion_recovery_start_time", None)
         if recovery is not None:
             result["congestion_recovery_time"] = recovery
+        try:
+            connection_credit = self.connection._remote_max_data - self.connection._remote_max_data_used
+            stream_credits = [
+                stream.max_stream_data_remote - stream.sender.highest_offset
+                for stream_id, stream in self.connection._streams.items()
+                if stream_id in (4, 5)
+            ]
+            if stream_credits:
+                result["send_flow_control_remaining_bytes"] = max(
+                    0, min(connection_credit, *stream_credits)
+                )
+                result["send_flow_control_blocked_streams"] = sum(
+                    bool(stream.is_blocked)
+                    for stream_id, stream in self.connection._streams.items()
+                    if stream_id in (4, 5)
+                )
+        except (AttributeError, TypeError):
+            pass
         return result
 
     def transmit(self):

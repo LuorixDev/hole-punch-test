@@ -92,6 +92,7 @@ def controller(args):
             "--quic-timer", args.quic_timer,
             "--quic-datagram-size", str(args.quic_datagram_size),
             "--quic-cc", args.quic_cc,
+            "--direction-order", args.direction_order,
             "--reference-mbps", str(args.rate_mbps),
             "--hosts",
             "10.202.0.1",
@@ -111,7 +112,7 @@ def controller(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=Path("data/verification/performance-gigabit"))
-    parser.add_argument("--transport", choices=("all", "tcp", "quic", "webrtc"), default="tcp")
+    parser.add_argument("--transport", choices=("all", "tcp", "quic", "webrtc", "utp"), default="tcp")
     parser.add_argument("--size", type=int, choices=range(1, 1025), default=256)
     parser.add_argument("--runs", type=int, choices=range(1, 11), default=3)
     parser.add_argument("--delay-ms", type=int, choices=range(0, 101), default=25)
@@ -120,6 +121,8 @@ def main():
     parser.add_argument("--quic-timer", choices=("precise", "asyncio"), default="precise")
     parser.add_argument("--quic-datagram-size", type=int, choices=(1200, 1400), default=1200)
     parser.add_argument("--quic-cc", choices=("reno", "cubic"), default="reno")
+    parser.add_argument("--direction-order", choices=("forward-first", "reverse-first"),
+                        default="forward-first")
     parser.add_argument("--loss-percent", type=float, default=0)
     parser.add_argument("--host-netns", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -152,6 +155,7 @@ def main():
             "--quic-timer", args.quic_timer,
             "--quic-datagram-size", str(args.quic_datagram_size),
             "--quic-cc", args.quic_cc,
+            "--direction-order", args.direction_order,
             "--loss-percent", str(args.loss_percent),
         ]
         result = subprocess.run(command)

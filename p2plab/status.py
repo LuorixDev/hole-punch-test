@@ -46,9 +46,14 @@ def public_ip_evidence(status):
                             if r["family"] == family and r["source"] == source})
             for source in ("http", "signaling", "stun")
         }
-        observed = {a for addresses in sources.values() for a in addresses
+        compared_sources = dict(sources)
+        if status.get("signaling_source_mode") == "forwarded":
+            compared_sources["signaling"] = []
+        observed = {a for addresses in compared_sources.values() for a in addresses
                     if ipaddress.ip_address(a).is_global and not ipaddress.ip_address(a).is_multicast}
-        non_global = {source: [a for a in addresses if a not in observed]
+        non_global = {source: [a for a in addresses
+                               if not ipaddress.ip_address(a).is_global
+                               or ipaddress.ip_address(a).is_multicast]
                       for source, addresses in sources.items()}
         result[str(family)] = {
             "sources": sources,
@@ -60,13 +65,15 @@ def public_ip_evidence(status):
 
 
 def validate_status(status):
-    if not isinstance(status, dict) or set(status) != {
+    required = {
         "addresses",
         "public_ips",
         "inbound",
         "wan",
         "updated_at",
-    }:
+    }
+    optional = {"nat", "signaling_source_mode"}
+    if not isinstance(status, dict) or not required <= set(status) or set(status) - required - optional:
         raise ValueError("INVALID_NETWORK_STATUS_FIELDS")
     age = timestamp_age(status["updated_at"])
     if age is None or age < -60 or age > MAX_AGE_SECONDS:
@@ -109,6 +116,32 @@ def validate_status(status):
             or timestamp_age(row["tested_at"]) is None
         ):
             raise ValueError("INVALID_INBOUND_STATUS")
+    if "nat" in status:
+        nat = status["nat"]
+        if (
+            not isinstance(nat, dict)
+            or set(nat)
+            not in (
+                {"state", "level", "label", "evidence"},
+                {"state", "level", "label", "evidence", "tested_at"},
+            )
+            or not isinstance(nat.get("state"), str)
+            or nat["state"] not in ("not-tested", "inconclusive", "classified")
+            or (nat["level"] is not None and type(nat["level"]) is not int)
+            or nat["level"] not in (None, 1, 2, 3, 4)
+            or not isinstance(nat["label"], str)
+            or len(nat["label"]) > 32
+            or not isinstance(nat["evidence"], list)
+            or len(nat["evidence"]) > 4
+            or any(not isinstance(item, str) or len(item) > 200 for item in nat["evidence"])
+            or ((nat["state"] == "classified") != (nat["level"] is not None))
+            or ("tested_at" in nat and timestamp_age(nat["tested_at"]) is None)
+        ):
+            raise ValueError("INVALID_NAT_STATUS")
+    if "signaling_source_mode" in status and status["signaling_source_mode"] not in (
+        "direct", "forwarded", "unknown"
+    ):
+        raise ValueError("INVALID_SIGNALING_SOURCE_MODE")
     wan = status["wan"]
     if (
         not isinstance(wan, dict)

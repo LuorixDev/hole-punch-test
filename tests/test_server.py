@@ -336,6 +336,14 @@ async def test_research_signal_shapes_and_retry_attempt_bookkeeping(tmp_path):
             await a.send_json({"v": 1, "type": "signal", "pair": pa["pair"], "data": retry})
             assert (await b.receive_json())["data"] == retry
             assert all("previous-matrix" not in peer["signals"] for peer in hub.rooms["test"])
+            lifecycle = {"kind": "raw_meta", "attempt": "long-lived-path", "meta": {"sequence": 7}}
+            for sender, receiver in ((a, b), (b, a)):
+                for _ in range(300):
+                    await sender.send_json({"v": 1, "type": "signal", "pair": pa["pair"], "data": lifecycle})
+                    await receiver.receive_json()
+                    await asyncio.sleep(0.01)
+            assert not a.closed and not b.closed
+            assert all(peer["signals"]["long-lived-path"] == 300 for peer in hub.rooms["test"])
             await a.close()
             await b.close()
     finally:

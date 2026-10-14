@@ -247,7 +247,19 @@ class Upnp:
                 headers={"SOAPAction": f'"{kind}#{action}"', "Content-Type": "text/xml; charset=utf-8"},
             ) as response:
                 raw = await bounded_response(response)
-                root = SafeET.fromstring(raw)
+                try:
+                    root = SafeET.fromstring(raw)
+                except ET.ParseError as exc:
+                    self.log.event(
+                        "upnp.soap_invalid_response",
+                        "Router returned malformed SOAP XML",
+                        "WARNING",
+                        action=action,
+                        status=response.status,
+                        content_type=response.headers.get("Content-Type", "")[:128],
+                        parse_error=str(exc)[:256],
+                    )
+                    raise ValueError("UPNP_SOAP_INVALID_XML") from exc
                 result = {node.tag.split("}")[-1]: node.text for node in root.iter() if len(node) == 0}
                 if "errorCode" in result:
                     raise ValueError("UPNP_SOAP_" + str(result["errorCode"]))

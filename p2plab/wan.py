@@ -67,7 +67,7 @@ def sources(network):
         ]
         gateways = network.get("gateways" if family == 4 else "gateways6", [])
         interfaces = {r.get("interface") for r in gateways}
-        available.sort(key=lambda r: (r.get("interface") not in interfaces, r.get("temporary", False)))
+        available.sort(key=lambda r: (r.get("interface") not in interfaces, r.get("temporary") is True))
         if available:
             result.append(available[0])
     return result
@@ -84,7 +84,30 @@ def parse_result(output):
     return row
 
 
-async def discover_servers(source, journal, *, selected_ids=(), maximum=2):
+async def discover_servers(source, journal, *, selected_ids=(), maximum=2, server_list=None):
+    # The directory is metadata: an IPv6 test must not depend on its AAAA record.
+    async with aiohttp.ClientSession(
+        trust_env=False, timeout=aiohttp.ClientTimeout(total=8)
+    ) as directory:
+        for attempt in range(2):
+            try:
+                async with directory.get(server_list or SERVER_LIST, allow_redirects=False) as response:
+                    response.raise_for_status()
+                    raw = bytearray()
+                    while chunk := await response.content.read(min(16384, 131073 - len(raw))):
+                        raw.extend(chunk)
+                        if len(raw) > 131072:
+                            raise ValueError("WAN_SERVER_LIST_LIMIT")
+                    rows = json.loads(raw)
+                break
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                journal.event("wan.directory_failed", str(exc), "WARNING", attempt=attempt + 1,
+                              exception=type(exc).__name__)
+                if attempt:
+                    raise
+                await asyncio.sleep(0.25)
+    if not isinstance(rows, list):
+        raise ValueError("WAN_SERVER_LIST_INVALID")
     connector = aiohttp.TCPConnector(
         family=socket.AF_INET if source["family"] == 4 else socket.AF_INET6,
         local_addr=(source["address"], 0),
@@ -93,16 +116,6 @@ async def discover_servers(source, journal, *, selected_ids=(), maximum=2):
     async with aiohttp.ClientSession(
         connector=connector, trust_env=False, timeout=aiohttp.ClientTimeout(total=5)
     ) as session:
-        async with session.get(SERVER_LIST, allow_redirects=False) as response:
-            response.raise_for_status()
-            raw = bytearray()
-            while chunk := await response.content.read(min(16384, 131073 - len(raw))):
-                raw.extend(chunk)
-                if len(raw) > 131072:
-                    raise ValueError("WAN_SERVER_LIST_LIMIT")
-            rows = json.loads(raw)
-        if not isinstance(rows, list):
-            raise ValueError("WAN_SERVER_LIST_INVALID")
         servers = []
         for row in rows[:64]:
             if not isinstance(row, dict) or type(row.get("id")) is not int:
@@ -134,10 +147,11 @@ async def discover_servers(source, journal, *, selected_ids=(), maximum=2):
                     async with session.get(
                         urljoin(row["server"].rstrip("/") + "/", row["pingURL"]),
                         allow_redirects=False,
-                        timeout=aiohttp.ClientTimeout(total=2),
+                        timeout=aiohttp.ClientTimeout(total=4),
                     ) as response:
                         response.raise_for_status()
-                        await response.content.read(1)
+                        if response.status != 200 or await response.content.read(1):
+                            raise ValueError("LIBRESPEED_PING_NOT_EMPTY_200")
                     elapsed = (time.monotonic() - start) * 1000
                     journal.event(
                         "wan.server_probe",
@@ -175,6 +189,13 @@ async def measure(network, options, journal, *, validate_source=None):
     ids = options.get("server_ids", [])
     if not isinstance(ids, list) or len(ids) > 4 or any(type(i) is not int or i < 0 for i in ids):
         raise ValueError("INVALID_WAN_SERVER_IDS")
+    server_list = options.get("server_list_url")
+    if server_list is not None:
+        if not isinstance(server_list, str):
+            raise ValueError("INVALID_WAN_SERVER_LIST_URL")
+        url = urlsplit(server_list)
+        if url.scheme != "https" or not url.hostname or url.username or url.password or url.fragment:
+            raise ValueError("INVALID_WAN_SERVER_LIST_URL")
     result = {"state": "failed", "families": {}, "samples": [], "reason": "NO_REACHABLE_WAN_TARGET"}
     env = {
         k: v
@@ -185,7 +206,8 @@ async def measure(network, options, journal, *, validate_source=None):
         try:
             if validate_source:
                 await validate_source(source["address"], expected=source)
-            targets = await discover_servers(source, journal, selected_ids=ids, maximum=count)
+            targets = await discover_servers(source, journal, selected_ids=ids, maximum=count,
+                                             **({"server_list": server_list} if server_list else {}))
             with tempfile.TemporaryDirectory(prefix="p2plab-wan-") as directory:
                 path = Path(directory) / "servers.json"
                 path.write_text(json.dumps(targets), encoding="utf-8")
@@ -216,7 +238,7 @@ async def measure(network, options, journal, *, validate_source=None):
                         "--duration",
                         str(duration),
                         "--timeout",
-                        "4",
+                        str(max(10, duration + 2)),
                         "--concurrent",
                         "6",
                         "--upload-size",
@@ -248,16 +270,6 @@ async def measure(network, options, journal, *, validate_source=None):
                     }
                     result["samples"].append(sample)
                     journal.event("wan.sample", evidence=sample)
-            samples = [s for s in result["samples"] if s["family"] == source["family"]]
-            if samples:
-                result["families"][str(source["family"])] = {
-                    "upload_mbps": max(s["upload"] for s in samples),
-                    "download_mbps": max(s["download"] for s in samples),
-                    "measured_at": utcnow(),
-                    "basis": "measured",
-                    "source": source["address"],
-                    "interface": source.get("interface", ""),
-                }
         except Exception as exc:
             journal.event(
                 "wan.family_failed",
@@ -266,6 +278,16 @@ async def measure(network, options, journal, *, validate_source=None):
                 family=source["family"],
                 exception=type(exc).__name__,
             )
+        samples = [s for s in result["samples"] if s["family"] == source["family"]]
+        if samples:
+            result["families"][str(source["family"])] = {
+                "upload_mbps": max(s["upload"] for s in samples),
+                "download_mbps": max(s["download"] for s in samples),
+                "measured_at": utcnow(),
+                "basis": "measured",
+                "source": source["address"],
+                "interface": source.get("interface", ""),
+            }
     if result["families"]:
         result["state"], result["reason"] = "measured", "BEST_OBSERVED_NOT_ISP_THEORETICAL_LIMIT"
     return result

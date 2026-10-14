@@ -26,6 +26,8 @@ from .logcodec import CODEC, decode_batch
 from .runtime import configure_console_encoding
 from .stun import StunServer
 
+SIGNAL_ATTEMPT_LIMIT = 4096
+
 
 class Hub:
     def __init__(
@@ -392,7 +394,7 @@ class Hub:
                     or len(data["plan"]) > 16):
                 raise ValueError("PLAN_PART_SCHEMA")
             peer["signals"][attempt] = peer["signals"].get(attempt, 0) + 1
-            if len(peer["signals"]) > 2048 or peer["signals"][attempt] > 256:
+            if len(peer["signals"]) > 2048 or peer["signals"][attempt] > SIGNAL_ATTEMPT_LIMIT:
                 raise ValueError("SIGNAL_LIMIT")
             others = [p for p in self.rooms[peer["room"]] if p is not peer]
             if others:

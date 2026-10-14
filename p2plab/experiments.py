@@ -549,6 +549,7 @@ class Experiments:
                 results=self.results,
                 real_home_network="NOT_RUN_UNLESS_THIS_IS_A_REAL_CROSS_NETWORK_SESSION",
             )
+            await self.owner.publish_status()
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -42,6 +42,8 @@ duration = 8
 servers_per_family = 2
 # executable = "/absolute/path/librespeed-cli"
 # server_ids = [1, 2]
+# Optional HTTPS LibreSpeed JSON directory, e.g. a reachable regional/self-hosted list.
+# server_list_url = "https://YOUR_SPEED_SERVER/servers.json"
 # Optional ISP contract limits, in Mbps; measured values are references, not theoretical limits.
 # upload_mbps = 100
 # download_mbps = 1000

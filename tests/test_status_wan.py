@@ -7,7 +7,7 @@ import aiohttp
 import pytest
 
 from p2plab.network import command
-from p2plab.status import direction_reference, speed_assessment, utcnow, validate_status
+from p2plab.status import direction_reference, public_ip_evidence, speed_assessment, utcnow, validate_status
 from p2plab.wan import discover_servers, measure, parse_result, sources
 from tests.test_server import cleanup_hub, join, start_hub
 
@@ -99,6 +99,72 @@ def test_diagnostic_signal_schema_rejects_unbounded_or_non_diagnostic_data(mutat
         validate_status(s)
 
 
+def test_forwarded_signaling_source_is_retained_but_excluded_from_egress_comparison():
+    s = status()
+    s["signaling_source_mode"] = "forwarded"
+    s["public_ips"] = [
+        {"address": "8.8.8.8", "family": 4, "source": "signaling"},
+        {"address": "1.1.1.1", "family": 4, "source": "http"},
+    ]
+    validate_status(s)
+    evidence = public_ip_evidence(s)["4"]
+    assert evidence["sources"]["signaling"] == ["8.8.8.8"]
+    assert evidence["state"] == "observed"
+
+
+def test_direct_signaling_conflicts_remain_visible_with_forwarded_support():
+    s = status()
+    s["signaling_source_mode"] = "direct"
+    s["public_ips"] = [
+        {"address": "8.8.8.8", "family": 4, "source": "signaling"},
+        {"address": "1.1.1.1", "family": 4, "source": "http"},
+    ]
+    assert public_ip_evidence(s)["4"]["state"] == "multiple-observed-addresses"
+
+
+def test_nat_diagnostic_is_optional_for_old_peers_and_validated_for_new_peers():
+    current = status()
+    assert validate_status(current) is current
+    current["nat"] = {
+        "state": "classified",
+        "level": 3,
+        "label": "受限锥形",
+        "evidence": ["变更源回包未到达；结论可能受丢包影响"],
+        "tested_at": utcnow(),
+    }
+    assert validate_status(current) is current
+    current["nat"]["level"] = 5
+    with pytest.raises(ValueError, match="INVALID_NAT_STATUS"):
+        validate_status(current)
+
+
+@pytest.mark.parametrize(
+    ("probe", "expected"),
+    [
+        ({"local": ["8.8.8.8", 5000], "mapping": "endpoint-independent-observed",
+          "filtering": "endpoint-independent-observed", "samples": [{"mapped": ["8.8.8.8", 5000]}]}, 1),
+        ({"local": ["192.168.1.4", 5000], "mapping": "endpoint-independent-observed",
+          "filtering": "endpoint-independent-observed", "samples": []}, 2),
+        ({"local": ["192.168.1.4", 5000], "mapping": "endpoint-independent-observed",
+          "filtering": "address-and-port-dependent-or-network-loss", "samples": []}, 3),
+        ({"local": ["192.168.1.4", 5000], "mapping": "destination-dependent-observed",
+          "filtering": "undetermined", "samples": []}, 4),
+    ],
+)
+def test_nat_classification_requires_behavioral_evidence(probe, expected):
+    from p2plab.nat import assess_nat
+
+    assert assess_nat([probe])["level"] == expected
+
+
+def test_nat_classification_stays_inconclusive_without_rfc5780_evidence():
+    from p2plab.nat import assess_nat
+
+    result = assess_nat([{"mapping": "undetermined", "filtering": "undetermined", "samples": []}])
+    assert result["state"] == "inconclusive"
+    assert result["level"] is None
+
+
 def test_librespeed_mbps_are_not_bytes_per_second_and_missing_direction_is_rejected():
     raw = [{"upload": 100, "download": 900, "bytes_sent": 10000000, "bytes_received": 90000000}]
     assert parse_result(raw)["download"] == 900
@@ -123,6 +189,24 @@ def test_wan_source_uses_default_interface_and_preferred_ipv6():
         "gateways6": [{"interface": "eth0"}],
     }
     assert [r["address"] for r in sources(network)] == ["192.168.1.2", "2001:4860::1"]
+
+
+def test_wan_source_sort_tolerates_missing_or_null_temporary_flag():
+    def address(host, family, temporary_marker):
+        row = {"address": host, "family": family, "interface": "eth0", "state": "preferred"}
+        if temporary_marker != "missing":
+            row["temporary"] = temporary_marker
+        return row
+
+    network = {
+        "address_inventory": [
+            address("2001:4860::1", 6, None),
+            address("2001:4860::2", 6, "missing"),
+            address("2001:4860::3", 6, True),
+        ],
+        "gateways6": [{"interface": "eth0"}],
+    }
+    assert sources(network) == [network["address_inventory"][0]]
 
 
 async def test_wan_cli_arguments_raw_logs_best_directions_and_proxy_bypass(monkeypatch, tmp_path):
@@ -168,6 +252,7 @@ async def test_wan_cli_arguments_raw_logs_best_directions_and_proxy_bypass(monke
             assert args[args.index("--telemetry-level") + 1] == "disabled"
             assert not any("proxy" in k.lower() for k in opts["env"])
             assert opts["timeout"] <= 55
+            assert int(args[args.index("--timeout") + 1]) >= int(args[args.index("--duration") + 1])
         assert sum(e["event"] == "wan.cli_output" for e in journal.query()) == 2
         assert sum(e["event"] == "wan.sample" for e in journal.query()) == 2
     finally:
@@ -291,6 +376,115 @@ async def test_wan_server_list_reads_fragmented_response_to_eof(tmp_path, monkey
     finally:
         await runner.cleanup()
         journal.close()
+
+
+async def test_startup_wan_waits_for_matrix_without_abandoning_measurement(peers, monkeypatch):
+    client, _ = peers
+    client.loopback = False
+    client.diagnostics_enabled = True
+    client.network_ready.set()
+    client.connected.set()
+    release = asyncio.Event()
+    matrix = asyncio.create_task(release.wait())
+    client.manager = SimpleNamespace(task=matrix)
+    measured = asyncio.Event()
+
+    async def run():
+        assert matrix.done()
+        measured.set()
+
+    monkeypatch.setattr(client, "test_wan", run)
+    task = asyncio.create_task(client.startup_wan())
+    try:
+        await asyncio.sleep(0.05)
+        assert not task.done() and not measured.is_set()
+        assert any(r["event"] == "wan.deferred" for r in client.log.query())
+        release.set()
+        await asyncio.wait_for(task, 2)
+        assert measured.is_set()
+    finally:
+        task.cancel()
+        matrix.cancel()
+        await asyncio.gather(task, matrix, return_exceptions=True)
+
+
+async def test_wan_rejects_active_p2p_work_without_claiming_wan_lock(peers):
+    client, _ = peers
+    async with client.speed_lock:
+        with pytest.raises(ValueError, match="P2P_BENCH_SENDER_BUSY"):
+            await client.test_wan()
+        assert not client.wan_lock.locked()
+    client.transfers.incoming["reserved"] = {}
+    try:
+        with pytest.raises(ValueError, match="FILE_TRANSFER_BUSY"):
+            await client.test_wan()
+        assert not client.wan_lock.locked()
+    finally:
+        client.transfers.incoming.clear()
+
+
+async def test_wan_directory_retry_and_strict_backend_probe(peers, monkeypatch):
+    import ssl
+
+    from aiohttp import web
+
+    import p2plab.wan as wan
+
+    client, _ = peers
+    calls = 0
+    row = {"id": 1, "name": "controlled", "dlURL": "garbage.php", "ulURL": "empty.php",
+           "pingURL": "empty.php", "getIpURL": "getIP.php"}
+
+    async def directory(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise web.HTTPServiceUnavailable()
+        return web.json_response([{**row, "server": base}, {**row, "id": 2, "server": base,
+                                                          "pingURL": "html.php"}])
+
+    async def empty(request):
+        return web.Response()
+
+    async def html(request):
+        return web.Response(text="not a speed backend")
+
+    app = web.Application()
+    app.router.add_get("/list", directory)
+    app.router.add_get("/empty.php", empty)
+    app.router.add_get("/html.php", html)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(client.identity.cert_file, client.identity.key_file)
+    site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=context)
+    await site.start()
+    base = f"https://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/"
+    original = aiohttp.TCPConnector
+    connectors = []
+
+    def connector(**kwargs):
+        connectors.append(kwargs)
+        return original(**kwargs, ssl=False)
+
+    monkeypatch.setattr(wan.aiohttp, "TCPConnector", connector)
+    # The directory's default connector is created by aiohttp's client module.
+    session = aiohttp.ClientSession
+
+    def client_session(**kwargs):
+        if "connector" not in kwargs:
+            kwargs["connector"] = original(ssl=False)
+        return session(**kwargs)
+
+    monkeypatch.setattr(wan.aiohttp, "ClientSession", client_session)
+    try:
+        selected = await discover_servers({"address": "127.0.0.1", "family": 4}, client.log,
+                                          server_list=base + "list")
+        assert calls == 2 and [r["id"] for r in selected] == [1]
+        assert connectors == [{"family": 2, "local_addr": ("127.0.0.1", 0), "limit": 8}]
+        assert any("PING_NOT_EMPTY" in str(r) for r in client.log.query())
+    finally:
+        await runner.cleanup()
 
 
 async def test_wan_revalidates_rotated_source_before_cli_start(tmp_path, monkeypatch):

@@ -150,16 +150,19 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, sh
             pumps.append(asyncio.create_task(pump(name, client)))
         await asyncio.gather(contains("a", "path.opened"), contains("b", "path.opened"))
         await asyncio.gather(contains("a", "ipv6.inbound_result"), contains("b", "ipv6.inbound_result"))
-        clients[0].stdin.write(b"private-cli-message\n/ping\n/speed 1\n")
+        clients[0].stdin.write(b"private-cli-message\n/ping\n")
         await clients[0].stdin.drain()
         await contains("b", "private-cli-message")
         await contains("a", "ping.result")
-        async with asyncio.timeout(15):
-            while sum("speed.result:" in line for line in output["a"]) < 2:
-                await asyncio.sleep(0.05)
         await asyncio.gather(
             contains("a", "experiment.completed", 120), contains("b", "experiment.completed", 120)
         )
+        await asyncio.sleep(0.1)
+        clients[0].stdin.write(b"/speed 1\n")
+        await clients[0].stdin.drain()
+        async with asyncio.timeout(15):
+            while sum("speed.result:" in line for line in output["a"]) < 2:
+                await asyncio.sleep(0.05)
         for client in clients:
             client.stdin.write(b"/quit\n")
             await client.stdin.drain()

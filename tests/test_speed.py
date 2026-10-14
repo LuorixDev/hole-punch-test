@@ -10,6 +10,86 @@ from p2plab.tcp import TcpAttempt
 from tests.test_transports import specs
 
 
+async def test_reverse_speed_cancel_releases_remote_lock_and_preserves_chat(peers, monkeypatch):
+    from tests.test_transfers import connected, wait_until
+
+    a, b = peers
+    entered = asyncio.Event()
+
+    async def slow(size):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async with connected(peers) as (pa, pb):
+        monkeypatch.setattr(pb, "speed", slow)
+        task = asyncio.create_task(pa.reverse_speed(1024))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            assert b.speed_lock.locked() and pb.reverse_workers
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await wait_until(lambda: not pb.reverse_workers and not b.speed_lock.locked())
+            assert not pa.closed and not pb.closed and not pa.reverse_tests
+            assert (await a.chat("chat after cancelling reverse speed"))["bytes"] > 0
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_total_speed_deadline_includes_final_ack_wait(peers, monkeypatch):
+    a, _ = peers
+    frames = []
+
+    async def send(body):
+        frames.append(body)
+        if body["kind"] == "bench_start":
+            path.benches[body["id"]].put_nowait({"kind": "bench_ready"})
+
+    async def close():
+        pass
+
+    path = Path(a, "deadline", "tcp", 4, send, close)
+    path.ready.set()
+    path.remote_capabilities.add(BENCH_CAPABILITY)
+    monkeypatch.setattr("p2plab.session.BENCH_TIMEOUT", 0.05)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(path.speed(1024), 1)
+    assert not path.benches and not path.closed
+    assert frames[-1]["kind"] == "bench_cancel"
+    await path.close()
+
+
+async def test_expired_benchmark_reports_error_and_ignores_only_its_late_frames(peers):
+    a, _ = peers
+    replies = []
+
+    async def send(body):
+        replies.append(body)
+
+    async def close():
+        pass
+
+    path = Path(a, "expiry", "quic", 4, send, close)
+    path.ready.set()
+    path.remote_capabilities.add(BENCH_CAPABILITY)
+    bid = "0123456789abcdef"
+    try:
+        await path.receive({"kind": "bench_start", "id": bid, "bytes": 1024, "format": "binary-v1"})
+        path.receive_benches[bid]["progress"] -= 21
+        await path.expire(time.monotonic())
+        assert replies[-1] == {"kind": "bench_error", "id": bid, "reason": "BENCH_RECEIVE_TIMEOUT"}
+        assert not path.receive_benches
+        await path.receive({"kind": "bench_chunk", "id": bid, "seq": 0, "data": b"x"})
+        await path.receive({"kind": "bench_end", "id": bid})
+        await path.receive({"kind": "ping", "id": "still usable"})
+        assert replies[-1]["kind"] == "pong"
+        with pytest.raises(ValueError, match="BENCH_SEQUENCE_MISMATCH"):
+            await path.receive({"kind": "bench_chunk", "id": "fedcba9876543210", "seq": 0, "data": b"x"})
+    finally:
+        await path.close()
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("coarse_clock", [False, True])
 async def test_actual_tcp_speed_format_and_receiver_confirmations(peers, legacy, coarse_clock, monkeypatch):
@@ -145,6 +225,33 @@ async def test_batch_speed_keeps_active_path_and_continues_after_failure(peers):
     logged = [r["fields"] for r in client.log.query() if r["event"] == "speed.result"]
     assert logged and all(r["bottleneck"]["state"] == "unknown" for r in logged)
     assert all(r["bottleneck"]["reason"] for r in logged)
+
+
+async def test_speed_is_rejected_while_experiment_matrix_runs(peers):
+    client, _ = peers
+    client.manager = SimpleNamespace(task=asyncio.create_task(asyncio.Event().wait()))
+    try:
+        with pytest.raises(ValueError, match="WAIT_FOR_EXPERIMENT_MATRIX_TO_FINISH_BEFORE_SPEED"):
+            await client.command("/speed 1")
+        assert any(row["event"] == "speed.deferred" for row in client.log.query())
+    finally:
+        client.manager.task.cancel()
+        await asyncio.gather(client.manager.task, return_exceptions=True)
+
+
+async def test_reverse_speed_is_rejected_when_peer_matrix_is_running(peers):
+    from tests.test_transfers import connected
+
+    a, b = peers
+    async with connected(peers) as (pa, _):
+        blocker = asyncio.create_task(asyncio.Event().wait())
+        b.manager = SimpleNamespace(task=blocker)
+        try:
+            with pytest.raises(ValueError, match="PEER_EXPERIMENT_MATRIX_BUSY"):
+                await pa.reverse_speed(1024)
+        finally:
+            blocker.cancel()
+            await asyncio.gather(blocker, return_exceptions=True)
 
 
 async def test_visible_links_get_periodic_real_rtt_samples(peers):

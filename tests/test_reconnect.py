@@ -115,6 +115,7 @@ async def test_forwarded_welcome_keeps_external_observers_not_proxy_mapping(peer
     await asyncio.gather(client.inbound_task)
     assert client.observers == client.extra_observers and client.tcp_observer is None
     assert client.server_observed_ipv4 == source and not client.inbound_ipv4_supported
+    assert client.signaling_source_mode == ("forwarded" if forwarded else "direct")
     assert client.pair is None
 
 

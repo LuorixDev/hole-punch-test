@@ -255,6 +255,24 @@ async def test_webrtc_immediate_close_after_answer_leaves_no_unhandled_connect_t
         loop.set_exception_handler(previous)
 
 
+async def test_asyncio_error_journal_keeps_context_and_chains_handler(peers):
+    a, _ = peers
+    loop = asyncio.get_running_loop()
+    seen = []
+    context = {
+        "message": "Future exception was never retrieved",
+        "exception": RuntimeError("background failure"),
+        "future": "future-object",
+    }
+    a.handle_asyncio_exception(loop, context, lambda active_loop, received: seen.append(received))
+    record = next(row for row in a.log.query() if row["event"] == "runtime.asyncio_error")
+    assert record["fields"]["exception"] == "RuntimeError"
+    assert "future-object" in record["fields"]["asyncio_context"]["future"]
+    assert seen == [context]
+
+
+
+
 async def test_tcp_accept_timeout_has_explicit_reason(peers):
     a, _ = peers
     _, spec = specs("tcp", "127.0.0.1")

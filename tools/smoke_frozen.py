@@ -134,6 +134,8 @@ async def smoke(client, server, output):
             )
             await launch(name, client, "--config", config, "--loopback", "--room", "release", "--plain")
         await asyncio.gather(contains("a", "path.opened"), contains("b", "path.opened"))
+        await asyncio.gather(contains("a", "experiment.completed", 120),
+                             contains("b", "experiment.completed", 120))
         send("a", message + "\n/ping\n/speed 1\n")
         await processes["a"].stdin.drain()
         await asyncio.gather(contains("b", message), contains("a", "ping.result"))
@@ -151,7 +153,6 @@ async def smoke(client, server, output):
         received = list((output / "b/downloads").glob("*.bin"))
         if len(received) != 1 or received[0].read_bytes() != content:
             raise RuntimeError("Frozen file transfer did not preserve binary content")
-        await asyncio.gather(contains("a", "experiment.completed", 120), contains("b", "experiment.completed", 120))
         for name in ("a", "b"):
             send(name, "/quit\n")
             await processes[name].stdin.drain()

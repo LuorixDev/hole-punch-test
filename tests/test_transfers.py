@@ -69,6 +69,61 @@ async def wait_until(predicate):
             await asyncio.sleep(0.01)
 
 
+async def test_transfer_live_rates_elapsed_freeze_and_first_block_time(peers, tmp_path, monkeypatch):
+    a, b = peers
+    source = tmp_path / "one-block.bin"
+    source.write_bytes(b"x" * 1024)
+    async with connected(peers) as (pa, _):
+        original = pa._send
+        chunk = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delay(body):
+            if body["kind"] == "file_chunk":
+                chunk.set()
+                await release.wait()
+            await original(body)
+
+        monkeypatch.setattr(pa, "_send", delay)
+        task = asyncio.create_task(a.transfers.send(pa, source))
+        try:
+            await asyncio.wait_for(chunk.wait(), 2)
+            tid = next(iter(b.transfers.incoming))
+            await asyncio.sleep(0.1)
+            live = b.transfers.metrics(tid)
+            assert live["elapsed_seconds"] >= 0.1 and live["average_mbps"] == 0
+            assert b.transfers.records[tid]["started_at"]
+            release.set()
+            result = await asyncio.wait_for(task, 3)
+            assert result["receiver_seconds"] >= 0.1
+            assert result["mbps"] < 0.1
+            before = b.transfers.metrics(tid)
+            await asyncio.sleep(0.02)
+            assert b.transfers.metrics(tid) == before
+            assert a.transfers.records[tid]["mbps"] == b.transfers.records[tid]["mbps"]
+            assert any("elapsed_seconds" in e["fields"] for e in b.log.query() if e["event"] == "file.progress")
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+def test_transfer_rolling_speed_uses_confirmed_bytes_and_decays_when_stalled(peers, monkeypatch):
+    a, _ = peers
+    clock = [10.0]
+    monkeypatch.setattr("p2plab.transfers.time.perf_counter", lambda: clock[0])
+    tid = "0123456789abcdef"
+    a.transfers.record(tid, state="sending", direction="send", attempt="speed", bytes=4_000_000, completed=0)
+    clock[0] = 11
+    a.transfers.progress(tid, 1_000_000)
+    assert a.transfers.metrics(tid) == {"elapsed_seconds": 1, "average_mbps": 8, "current_mbps": 8}
+    clock[0] = 14
+    assert a.transfers.metrics(tid) == {"elapsed_seconds": 4, "average_mbps": 2, "current_mbps": 0}
+    a.transfers.record(tid, state="failed", reason="TEST_CANCEL")
+    clock[0] = 30
+    assert a.transfers.metrics(tid)["elapsed_seconds"] == 4
+
+
 @pytest.mark.parametrize("method", ["tcp", "quic", "webrtc"])
 async def test_binary_duplex_file_and_chat_real_transports(peers, tmp_path, method, task_scheduling):
     a, b = peers
@@ -132,6 +187,20 @@ async def test_empty_images_same_names_no_overwrite_and_view(peers, tmp_path, mo
         pa.remote_capabilities.discard(FILE_CAPABILITY)
         with pytest.raises(ValueError, match="UNSUPPORTED"):
             await a.transfers.send(pa, image)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Headless opener behavior is Unix-specific")
+async def test_open_desktop_reports_headless_environment_without_spawn(peers, monkeypatch):
+    a, _ = peers
+    monkeypatch.setattr("p2plab.client.shutil.which", lambda _: "/usr/bin/xdg-open")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    opened = await a.open_desktop(a.transfers.directory)
+    assert opened is False
+    event = next(row for row in a.log.query() if row["event"] == "file.open_unavailable")
+    assert event["fields"]["launcher"] in ("open", "xdg-open")
+
+
 
 
 @pytest.mark.parametrize("action", ["accept", "reject", "cancel", "disconnect"])
