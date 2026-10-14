@@ -390,11 +390,11 @@ class Client:
             spec["tls_client"] = spec["initiator"]
             spec["host"] = spec["a_host"] if self.leader else spec["b_host"]
             self.log.event("path.reopen_started", attempt=spec["attempt"], source=data["source"], mode=data["mode"])
-            await manager.execute(spec, 0)
+            local_result = await manager.execute(spec, 0)
             await asyncio.wait_for(manager.remote_done_events.setdefault(spec["attempt"], asyncio.Event()).wait(), 130)
             if pair != self.pair or self.closed:
                 raise ConnectionError("SESSION_CHANGED")
-            if not manager.results[-1]["data_path"] or not manager.remote_done[spec["attempt"]].get("data_path"):
+            if not local_result["data_path"] or not manager.remote_done[spec["attempt"]].get("data_path"):
                 raise ConnectionError("REOPEN_FAILED")
             path = next(p for p in self.paths if p.attempt == spec["attempt"] and not p.closed)
             path.pool_managed, path.source_attempt = True, data["source"]

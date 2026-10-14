@@ -124,6 +124,28 @@ def scheme_explanation(spec):
 
 MAX_ATTEMPTS = 200
 MAX_RESEARCH_ATTEMPTS = 1024
+MAX_CONCURRENT_ATTEMPTS = 4
+PEER_RESULT_TIMEOUT = 130
+
+
+def attempt_resource_keys(spec):
+    method = spec["method"]
+    if (
+        spec.get("phase") == "gateway"
+        or method in POOL_METHODS
+        or method in ("nat64", "pwnat", "natblaster")
+    ):
+        return frozenset({"exclusive"})
+
+    if method in ("webrtc", "ice-tcp", "ice-native"):
+        profile = spec.get("profile", "dual")
+        families = (4, 6) if profile == "dual" else (int(profile),)
+    else:
+        address = spec.get("host") or spec.get("a_host") or spec.get("b_host")
+        families = (ipaddress.ip_address(address).version,) if address else (4, 6)
+
+    protocol = "tcp" if method in TCP_METHODS or method.endswith("-tcp") else "udp"
+    return frozenset(("network", family, protocol) for family in families)
 
 
 def build_plan(
@@ -490,7 +512,7 @@ class Experiments:
                 "experiment.plan",
                 count=len(self.plan),
                 plan=self.plan,
-                policy="all-presets-even-after-success;baseline-before-gateway",
+                policy="all-presets-even-after-success;bounded-independent-lanes;gateway-exclusive",
                 coverage=self.coverage,
             )
             versions = {ipaddress.ip_address(a).version for a in hosts} & {
@@ -503,45 +525,7 @@ class Experiments:
                         family=version,
                         reason="NO_SHARED_ADDRESS_FAMILY_NOT_FIREWALL_FAILURE",
                     )
-            for index, original in enumerate(self.plan):
-                if self.closed:
-                    return
-                spec = dict(original)
-                spec["initiator"] = spec["leader_initiator"] == self.owner.leader
-                spec["tls_client"] = spec["initiator"]
-                spec["host"] = spec["a_host"] if self.owner.leader else spec["b_host"]
-                await self.execute(spec, index)
-                try:
-                    await asyncio.wait_for(
-                        self.remote_done_events.setdefault(spec["attempt"], asyncio.Event()).wait(),
-                        130,
-                    )
-                except TimeoutError:
-                    self.owner.log.event(
-                        "experiment.peer_result_missing", attempt=spec["attempt"], level="WARNING"
-                    )
-                local_result = self.results[-1]
-                peer_result = self.remote_done.get(spec["attempt"], {})
-                if local_result["data_path"] and peer_result.get("data_path"):
-                    path = next((p for p in self.owner.paths if p.attempt == spec["attempt"]), None)
-                    if path:
-                        path.pool_managed = True
-                        if path.closed:
-                            path.parked = True
-                await self.owner.park_idle_paths()
-                if spec["phase"] == "gateway":
-                    leases = [r.get("gateway_action") == "lease-created" for r in (local_result, peer_result)]
-                    self.owner.log.event(
-                        "gateway.combined_evidence",
-                        attempt=spec["attempt"],
-                        local_lease=leases[0],
-                        peer_lease=leases[1],
-                        data_path=local_result["data_path"],
-                        conclusion="lease-response-and-connectivity-are-independent;no-causality-claim",
-                        selected_udp_remote=local_result.get("udp_remote"),
-                        local_mapping=local_result.get("mapping_endpoint"),
-                        peer_mapping=peer_result.get("mapping_endpoint"),
-                    )
+            await self.run_plan()
             self.owner.log.event(
                 "experiment.completed",
                 count=len(self.results),
@@ -554,6 +538,110 @@ class Experiments:
             raise
         except Exception as exc:
             self.owner.log.exception("experiment.failed", exc)
+
+    async def run_plan(self):
+        pending = list(enumerate(self.plan))
+        active = {}
+        active_keys = set()
+        self.owner.log.event(
+            "experiment.scheduler_started",
+            max_concurrency=MAX_CONCURRENT_ATTEMPTS,
+            lanes=["IPv4 UDP", "IPv4 TCP", "IPv6 UDP", "IPv6 TCP"],
+            exclusive=["gateway", "socket-pool", "raw-probe", "NAT64"],
+        )
+        try:
+            while pending or active:
+                if self.closed:
+                    break
+
+                while pending and len(active) < MAX_CONCURRENT_ATTEMPTS:
+                    selected = None
+                    for position, (index, original) in enumerate(pending):
+                        spec = dict(original)
+                        spec["initiator"] = spec["leader_initiator"] == self.owner.leader
+                        spec["tls_client"] = spec["initiator"]
+                        spec["host"] = spec["a_host"] if self.owner.leader else spec["b_host"]
+                        keys = attempt_resource_keys(spec)
+                        exclusive = "exclusive" in keys
+                        if exclusive:
+                            if active:
+                                break
+                            selected = (position, index, spec, keys)
+                            break
+                        if "exclusive" in active_keys:
+                            break
+                        if keys.isdisjoint(active_keys):
+                            selected = (position, index, spec, keys)
+                            break
+                    if selected is None:
+                        break
+                    position, index, spec, keys = selected
+                    pending.pop(position)
+                    active_keys.update(keys)
+                    task = asyncio.create_task(
+                        self.run_attempt(spec, index), name="matrix-attempt:" + spec["attempt"]
+                    )
+                    active[task] = (spec, keys)
+                    self.owner.log.event(
+                        "experiment.scheduler_launch",
+                        attempt=spec["attempt"],
+                        method=spec["method"],
+                        active=len(active),
+                        max_concurrency=MAX_CONCURRENT_ATTEMPTS,
+                        resources=sorted(map(str, keys)),
+                    )
+
+                if not active:
+                    if pending and not self.closed:
+                        raise RuntimeError("MATRIX_SCHEDULER_NO_RUNNABLE_ATTEMPT")
+                    break
+
+                completed, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                for task in completed:
+                    spec, keys = active.pop(task)
+                    active_keys.difference_update(keys)
+                    local_result, peer_result = task.result()
+                    if local_result["data_path"] and peer_result.get("data_path"):
+                        path = next((p for p in self.owner.paths if p.attempt == spec["attempt"]), None)
+                        if path:
+                            path.pool_managed = True
+                            if path.closed:
+                                path.parked = True
+                    await self.owner.park_idle_paths()
+                    if spec["phase"] == "gateway":
+                        leases = [
+                            r.get("gateway_action") == "lease-created" for r in (local_result, peer_result)
+                        ]
+                        self.owner.log.event(
+                            "gateway.combined_evidence",
+                            attempt=spec["attempt"],
+                            local_lease=leases[0],
+                            peer_lease=leases[1],
+                            data_path=local_result["data_path"],
+                            conclusion="lease-response-and-connectivity-are-independent;no-causality-claim",
+                            selected_udp_remote=local_result.get("udp_remote"),
+                            local_mapping=local_result.get("mapping_endpoint"),
+                            peer_mapping=peer_result.get("mapping_endpoint"),
+                        )
+        finally:
+            remaining = tuple(active)
+            for task in remaining:
+                task.cancel()
+            if remaining:
+                await asyncio.gather(*remaining, return_exceptions=True)
+
+    async def run_attempt(self, spec, index):
+        local_result = await self.execute(spec, index)
+        try:
+            await asyncio.wait_for(
+                self.remote_done_events.setdefault(spec["attempt"], asyncio.Event()).wait(),
+                PEER_RESULT_TIMEOUT,
+            )
+        except TimeoutError:
+            self.owner.log.event(
+                "experiment.peer_result_missing", attempt=spec["attempt"], level="WARNING"
+            )
+        return local_result, self.remote_done.get(spec["attempt"]) or {}
 
     async def execute(self, spec, index):
         started = time.monotonic()
@@ -640,7 +728,7 @@ class Experiments:
                         result["hairpin_evidence"] = evidence
                         result["state"] = "success" if evidence["confirmed"] else "failed"
                         result["reason"] = "AUTHENTICATED_HAIRPIN_PROBE_ONLY" if evidence["confirmed"] else "HAIRPIN_INCONCLUSIVE"
-                        return
+                        return result
                     if spec["method"] == "lan":
                         await obj.discover(self.owner.timeout)
                     else:
@@ -734,6 +822,7 @@ class Experiments:
                 self.owner.log.event(
                     "experiment.result_signal_pending", attempt=spec["attempt"], level="WARNING"
                 )
+        return result
 
     async def gateway(self, spec, obj, result):
         side = "a" if self.owner.leader else "b"

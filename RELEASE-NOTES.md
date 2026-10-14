@@ -4,6 +4,28 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
+## v0.1.7: Parallel Connectivity Matrix
+
+Upgrade both the client and server. Independent hole-punch experiments now run
+in parallel while attempts that could interfere with the same address-family /
+transport lane remain serialized.
+
+- Run up to four independent IPv4/IPv6 and UDP/TCP experiment lanes concurrently
+  to reduce matrix wall-clock time without cancelling remaining methods after a
+  successful path is found.
+- Keep gateway changes, port-pool scans, NAT64 and raw-packet research exclusive
+  so those tests do not overlap other socket-sensitive experiments.
+- Continue scheduling independent lanes while one method waits for its peer
+  result, and log launches, concurrency and missing peer results.
+- Associate reopened-path checks with their own attempt result instead of the
+  mutable last-result position; return the actual hairpin probe result.
+- Document that concurrent experiments share CPU and WAN capacity, so precision
+  throughput comparisons should run after the matrix completes.
+
+The full Linux regression suite passed (538 passed, 4 skipped) before release;
+native Linux and Windows frozen-binary verification is run by GitHub Actions.
+CI does not establish success across real-world ISP/NAT combinations.
+
 ## v0.1.6: Network Evidence and Transfer Reliability
 
 Upgrade both the client and server. This release improves IPv4 NAT evidence,
