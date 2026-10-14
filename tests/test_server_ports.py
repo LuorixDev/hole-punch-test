@@ -27,9 +27,25 @@ def test_server_ports_follow_main_port_unless_explicitly_overridden(monkeypatch,
     assert (args.port, args.stun_port, args.tcp_port) == ports
 
 
+def test_external_port_and_forwarded_mode_do_not_change_listen_ports(monkeypatch):
+    captured = []
+
+    async def capture(args):
+        captured.append(args)
+
+    monkeypatch.setattr(sys, "argv", ["server.py", "--port", "8443", "--public-port", "57878", "--forwarded"])
+    monkeypatch.setattr(server, "serve", capture)
+    server.main()
+    args = captured[0]
+    assert (args.port, args.stun_port, args.tcp_port) == (8443, 8443, 8443)
+    assert args.public_port == 57878 and args.forwarded
+
+
 @pytest.mark.parametrize("flags", [
     ["--port", "0"], ["--port", "65536"], ["--stun-port", "-1"],
     ["--tcp-port", "65536"],
+    ["--public-port", "0"], ["--public-port", "65536"],
+    ["--public-port", "9000", "--stun-host", "127.0.0.1", "--stun-alt-ip", "127.0.0.2"],
     ["--port", "65535", "--stun-host", "127.0.0.1", "--stun-alt-ip", "127.0.0.2"],
     ["--stun-alt-ip", "127.0.0.2"],
     ["--stun-host", "0.0.0.0", "--stun-alt-ip", "127.0.0.2"],

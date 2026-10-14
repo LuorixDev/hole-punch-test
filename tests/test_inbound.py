@@ -162,6 +162,22 @@ async def test_callback_without_prefix_restriction_remains_disabled_unless_enabl
     assert "INBOUND_DISABLED" in results[-1]["detail"]
 
 
+@pytest.mark.parametrize("source,forwarded", [("192.168.1.88", False), ("100.71.69.142", False),
+                                              ("8.8.8.8", True)])
+async def test_ipv4_callback_never_targets_forwarder_or_private_origin(callback, monkeypatch, source, forwarded):
+    hub, peer, body, results = callback
+    peer["source"] = body["address"] = source
+    hub.forwarded = forwarded
+
+    def never(*args, **kwargs):
+        pytest.fail("Forwarded/private origin is not a client public inbound target")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", never)
+    await hub.inbound(peer, body)
+    assert results[-1]["code"] == "REJECTED_BY_POLICY"
+    assert results[-1]["firewall_assessment"] == "NOT_TESTED"
+
+
 async def test_callback_missing_echo_is_not_success_and_replay_is_rejected(callback, monkeypatch):
     hub, peer, body, results = callback
     calls = []

@@ -199,6 +199,8 @@ class Client:
         configured_families(self.wan_options, [])
         self.wan_result = {"state": "not-tested", "families": {}, "reason": "STARTUP_PENDING"}
         self.wan_task = None
+        self.pair_task = None
+        self.pending_pair_peer = None
         self.wan_lock = asyncio.Lock()
         self.status_revision = 0
         self.chat_receipts = collections.OrderedDict()
@@ -519,12 +521,16 @@ class Client:
         return self.active_path
 
     async def signal(self, data):
+        if not self.pair:
+            raise ConnectionError("NO_SIGNALING_PAIR")
         await self.send_control({"type": "signal", "pair": self.pair, "data": data})
 
     async def send_control(self, body):
         async with self.signal_lock:
             if not self.ws or self.ws.closed:
                 raise ConnectionError("SIGNALING_OFFLINE_P2P_CAN_CONTINUE")
+            if body.get("type") == "signal" and (not self.pair or body.get("pair") != self.pair):
+                raise ConnectionError("SIGNALING_PAIR_CHANGED")
             await asyncio.wait_for(self.ws.send_json({"v": 1, **body}), 5)
 
     def prepare_log_upload(self):
@@ -661,7 +667,7 @@ class Client:
         if evidence != self.last_ip_evidence and (status["public_ips"] or self.last_ip_evidence is not None):
             self.last_ip_evidence = evidence
             self.log.event("network.ip_sources", "HTTP 出口与信令观察分开记录；均非 UDP 映射", evidence=evidence)
-        if not self.pair or not self.connected.is_set():
+        if not self.pair or not self.paired.is_set() or not self.connected.is_set():
             return
         validate_status(status)
         self.status_revision += 1
@@ -721,7 +727,11 @@ class Client:
             await self.publish_status()
             try:
                 async with asyncio.timeout(150):
-                    self.wan_result = await measure_wan(self.network, self.wan_options, self.log)
+                    # A VPN toggle or IPv6 rotation can invalidate the startup snapshot.
+                    await self.refresh_address_inventory()
+                    self.wan_result = await measure_wan(
+                        self.network, self.wan_options, self.log, validate_source=self.validate_local_address,
+                    )
             except asyncio.CancelledError:
                 self.wan_result = {"state": "cancelled", "families": {}, "reason": "CANCELLED"}
                 raise
@@ -875,6 +885,7 @@ class Client:
             finally:
                 self.ws = None
                 self.connected.clear()
+                await self.invalidate_pair()
                 self.upload_inflight.clear()
             if not self.stop.is_set():
                 try:
@@ -886,6 +897,8 @@ class Client:
     async def handle_control(self, body):
         kind = body.get("type")
         if kind == "welcome":
+            await self.invalidate_pair()
+            self.server_observed_ipv4 = None
             self.cold_paths_supported = body.get("cold_paths") is True
             self.log_encoding = CODEC if CODEC in body.get("log_encodings", []) else None
             observed = body.get("observed_ipv4")
@@ -899,14 +912,26 @@ class Client:
                 self.server_host, body["stun_port"], family=socket.AF_INET, type=socket.SOCK_DGRAM
             )
             ipv4 = rows[0][4][0]
-            self.observers = [f"{ipv4}:{body['stun_port']}", *self.extra_observers]
-            self.tcp_observer = (ipv4, body["tcp_port"])
+            non_global_source = bool(self.server_observed_ipv4
+                                    and not ipaddress.ip_address(self.server_observed_ipv4).is_global
+                                    and not self.loopback)
+            forwarded = body.get("observation_mode") == "forwarded" or non_global_source
+            self.observers = [*([f"{ipv4}:{body['stun_port']}"] if not forwarded else []),
+                              *self.extra_observers]
+            self.tcp_observer = None if forwarded else (ipv4, body["tcp_port"])
             protocol = body.get("tcp_observer_protocol", "raw")
             if protocol not in ("raw", "http"):
                 raise ValueError("TCP_OBSERVER_PROTOCOL_UNSUPPORTED")
             self.tcp_observer_protocol = protocol
             self.inbound_supported = body.get("inbound_check", False)
-            self.inbound_ipv4_supported = body.get("inbound_ipv4_check", False)
+            self.inbound_ipv4_supported = body.get("inbound_ipv4_check", False) and not forwarded
+            if forwarded:
+                self.log.event(
+                    "network.server_forwarded",
+                    "服务端转发或非公网来源：不使用本站 TCP/STUN 映射，不以转发器为 IPv4 回连目标；保留公共 STUN 和 IPv6 回连",
+                    "WARNING", signaling_source=self.server_observed_ipv4,
+                    mode=body.get("observation_mode", "non-global-source"), observers=self.observers,
+                )
             if self.inbound_task and not self.inbound_task.done():
                 self.inbound_task.cancel()
             self.inbound_task = self.spawn(self.inbound_check(), "ipv6-inbound-check")
@@ -927,7 +952,11 @@ class Client:
         elif kind == "waiting":
             self.log.event("room.waiting", "Room created; waiting for the second device", room=self.room)
         elif kind == "paired":
-            self.spawn(self.begin_pair(body), "pair-setup")
+            self.pending_pair_peer = body["peer"]["id"]
+            if self.pair_task and not self.pair_task.done():
+                self.pair_task.cancel()
+                await asyncio.gather(self.pair_task, return_exceptions=True)
+            self.pair_task = self.spawn(self.begin_pair(body), "pair-setup")
         elif kind == "signal":
             if body.get("pair") == self.pair and body.get("data", {}).get("kind") == "network_status":
                 self.receive_status(body["data"])
@@ -1016,14 +1045,15 @@ class Client:
             if future and not future.done():
                 future.set_result(body)
         elif kind == "peer_left":
+            current_peer = self.pending_pair_peer or (self.peer["id"] if self.peer else None)
+            if current_peer and body.get("peer") != current_peer:
+                return
             self.log.event(
                 "room.peer_signaling_left",
                 "Existing authenticated P2P paths remain until timeout",
                 peer=body.get("peer"),
             )
-            self.paired.clear()
-            if self.manager:
-                await self.manager.stop_preserving_paths()
+            await self.invalidate_pair()
         elif kind == "error":
             self.log.event("server.error", str(body.get("code")), "ERROR")
             if body.get("code") in (
@@ -1034,6 +1064,19 @@ class Client:
                 "CLIENT_IDENTITY_CHANGED",
             ):
                 self.stop.set()
+
+    async def invalidate_pair(self):
+        self.paired.clear()
+        self.pair = None
+        self.early_signals.clear()
+        self.peer_network = {}
+        self.pending_pair_peer = None
+        if self.pair_task and not self.pair_task.done():
+            self.log.event("experiment.setup_cancelled", "Pair ended before setup completed; live P2P paths preserved")
+            self.pair_task.cancel()
+            await asyncio.gather(self.pair_task, return_exceptions=True)
+        if self.manager and not self.manager.closed:
+            await self.manager.stop_preserving_paths()
 
     async def begin_pair(self, body):
         for manager in self.managers:
@@ -1069,9 +1112,13 @@ class Client:
         )
         # Finish the inbound baseline before any matrix can create gateway mappings.
         if self.inbound_task:
+            if not self.inbound_task.done():
+                self.log.event("experiment.setup_waiting", "等待入站基线探测完成", reason="INBOUND_BASELINE")
             await asyncio.shield(self.inbound_task)
         await self.publish_status()
         if self.wan_task:
+            if not self.wan_task.done():
+                self.log.event("experiment.setup_waiting", "等待启动公网测速完成，再运行打洞矩阵", reason="STARTUP_WAN")
             await asyncio.shield(self.wan_task)
         if self.paired.is_set() and manager is self.manager and pair == self.pair and not self.closed:
             await manager.start()

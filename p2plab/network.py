@@ -546,6 +546,29 @@ def http_ip_summary(observations, inventory):
     return result
 
 
+async def route_to_server(host):
+    resolution = {"host": host}
+    try:
+        try:
+            target = str(ipaddress.ip_address(host))
+            resolution.update(state="literal", addresses=[target])
+        except ValueError:
+            rows = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(host, None, family=socket.AF_INET,
+                                                      type=socket.SOCK_STREAM), 3,
+            )
+            addresses = list(dict.fromkeys(row[4][0] for row in rows))
+            if not addresses:
+                raise ValueError("SERVER_NO_IPV4_DNS_RESULT")
+            target = addresses[0]
+            resolution.update(state="resolved", addresses=addresses)
+        result = await command("ip", "-j", "route", "get", target)
+        return {**result, "resolution": resolution}
+    except (OSError, TimeoutError, ValueError) as exc:
+        return {"state": "not-tested", "reason": type(exc).__name__ + ":" + str(exc),
+                "resolution": {**resolution, "state": "failed"}}
+
+
 async def snapshot(journal, *, server_host, external=True, loopback=False, maximum=4):
     journal.event("network.started", "Collecting bounded, read-only network evidence")
     result = {
@@ -562,7 +585,7 @@ async def snapshot(journal, *, server_host, external=True, loopback=False, maxim
             read_address_inventory(loopback=loopback),
             command("ip", "-j", "-4", "route", "show"),
             command("ip", "-j", "-6", "route", "show"),
-            command("ip", "-j", "route", "get", server_host),
+            route_to_server(server_host),
         ]
         address_result, *routes = await asyncio.gather(*tasks)
         inventory, address_command = address_result

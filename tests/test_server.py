@@ -18,7 +18,8 @@ from tests.test_cli import local_certificate
 
 async def start_hub(tmp_path, *, shared=False, ssl_context=None):
     journal = Journal(tmp_path / "central.db", role="server", console=False)
-    hub = Hub(journal, admin_token="admin", tcp_observer_protocol="http" if shared else "raw")
+    hub = Hub(journal, admin_token="admin", tcp_observer_protocol="http" if shared else "raw",
+              allow_loopback=True)
     runner = web.AppRunner(hub.app())
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=ssl_context)
@@ -212,6 +213,53 @@ async def test_shared_tcp_observer_rejects_invalid_identity_or_proxy(tmp_path, r
                 assert response.status == 403
             assert not any(e["event"] == "tcp.observation" for e in journal.query())
             assert token not in str(journal.query())
+            await ws.close()
+    finally:
+        await cleanup_hub(journal, runner, transport, tcp)
+
+
+@pytest.mark.parametrize("source,forwarded,error", [
+    ("192.168.1.88", False, "NON_GLOBAL_SOURCE"),
+    ("100.71.69.142", False, "NON_GLOBAL_SOURCE"),
+    ("8.8.8.8", True, "DISABLED_FOR_FORWARDED"),
+])
+def test_tcp_observer_does_not_certify_proxy_mapping(tmp_path, source, forwarded, error):
+    journal = Journal(tmp_path / "proxy.db", role="server", console=False)
+    hub = Hub(journal, admin_token="test", forwarded=forwarded)
+    hub.peers["peer"] = {"source": source, "room": "test", "id": "peer"}
+    hub.observation_tokens["token"] = ("peer", float("inf"))
+    try:
+        with pytest.raises(ValueError, match=error):
+            hub.observed_mapping("token", (source, 12345))
+        assert not any(r["event"] == "tcp.observation" for r in journal.query())
+    finally:
+        journal.close()
+
+
+async def test_error_delivery_to_closing_websocket_does_not_escape_request_handler(tmp_path, monkeypatch, caplog):
+    hub, journal, runner, transport, tcp, url = await start_hub(tmp_path)
+    original = web.WebSocketResponse.send_json
+
+    async def fail_dispatch(peer, body):
+        raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+
+    async def send_json(ws, data, *args, **kwargs):
+        if data.get("type") == "error":
+            raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+        return await original(ws, data, *args, **kwargs)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            ws, _ = await join(session, url, tmp_path / "closing")
+            await ws.receive_json()
+            monkeypatch.setattr(hub, "dispatch", fail_dispatch)
+            monkeypatch.setattr(web.WebSocketResponse, "send_json", send_json)
+            await ws.send_json({"v": 1, "type": "trigger"})
+            closed = await asyncio.wait_for(ws.receive(), 3)
+            assert closed.type == aiohttp.WSMsgType.CLOSE
+            assert any(r["event"] == "signal.error_delivery_failed" for r in journal.query())
+            assert not hub.peers
+            assert "Error handling request" not in caplog.text
             await ws.close()
     finally:
         await cleanup_hub(journal, runner, transport, tcp)

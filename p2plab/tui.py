@@ -1350,6 +1350,8 @@ class P2PApp(App):
                 for source, label in (("signaling", "信令"), ("http", "HTTP出口"))
             )
             conflict = " [出口不一致]" if ip_evidence["4"]["state"] == "multiple-observed-addresses" else ""
+            if ip_evidence["4"]["non_global_sources"]["signaling"]:
+                conflict += " [信令非公网/可能经转发]"
             v4_probes = [r for r in inbound.values() if ":" not in r["address"]]
             verdict4 = "未测"
             if v4_probes:
@@ -1406,7 +1408,8 @@ class P2PApp(App):
         banner.tooltip = Text(
             safe_text("\n".join(lines))
             + "\nIPv4 出口是 HTTP/信令观察地址，不代表所有 UDP 映射。入站仅指本次服务端 HTTP/TCP 回连，不能推断所有端口或对端均可入站。"
-            + "\n出口不一致可能来自 VPN/代理/TUN、多出口或分流，不按多数票选地址。" + NETWORK_TEST_NOTICE
+            + "\n非公网信令来源可能是内网连接或服务端转发器，不参与公网出口比较。"
+            + "\n公网出口不一致可能来自服务端转发、VPN/代理/TUN、多出口或分流，不按多数票选地址。" + NETWORK_TEST_NOTICE
         )
 
     def refresh_matrix(self):

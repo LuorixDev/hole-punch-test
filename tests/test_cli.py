@@ -2,6 +2,7 @@ import asyncio
 import datetime as dt
 import ipaddress
 import json
+import shutil
 import socket
 import sys
 
@@ -50,9 +51,12 @@ def local_certificate(directory):
     return cert_path, key_path
 
 
-@pytest.mark.parametrize("tls,shared", [(True, True), (False, True), (False, False)],
-                         ids=["tls-shared", "plaintext-wildcard-shared", "plaintext-legacy"])
-async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, shared):
+@pytest.mark.parametrize("tls,shared,forwarded", [(True, True, False), (False, True, False),
+                                                (False, False, False), (False, True, True)],
+                         ids=["tls-shared", "plaintext-wildcard-shared", "plaintext-legacy", "socat-forwarded"])
+async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, shared, forwarded):
+    if forwarded and not shutil.which("socat"):
+        pytest.skip("Optional socat is unavailable")
     cert, key = local_certificate(tmp_path) if tls else (None, None)
     port, stun_port, tcp_port = (
         free_shared_port() if shared else free_port(socket.SOCK_STREAM),
@@ -61,6 +65,7 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, sh
     )
     if tcp_port == port:
         tcp_port = free_port(socket.SOCK_STREAM)
+    external_port = free_port(socket.SOCK_STREAM) if forwarded else port
     server = await asyncio.create_subprocess_exec(
         sys.executable,
         "server.py",
@@ -68,6 +73,7 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, sh
         "127.0.0.1" if tls else "0.0.0.0",
         "--port",
         str(port),
+        *(["--forwarded", "--public-port", str(external_port)] if forwarded else []),
         *([] if shared else ["--stun-port", str(stun_port), "--tcp-port", str(tcp_port)]),
         *(["--cert", str(cert), "--key", str(key)] if tls else []),
         "--allow-inbound-check",
@@ -96,11 +102,28 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, sh
         await contains("server", "server.started")
         if not tls:
             await contains("server", "server.insecure")
+        if forwarded:
+            proxy = await asyncio.create_subprocess_exec(
+                "socat", f"TCP4-LISTEN:{external_port},bind=127.0.0.1,reuseaddr,fork",
+                f"TCP4:127.0.0.1:{port}", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            processes.append(proxy)
+            async with asyncio.timeout(5):
+                while True:
+                    try:
+                        _, writer = await asyncio.open_connection("127.0.0.1", external_port)
+                    except OSError:
+                        assert proxy.returncode is None, "socat exited"
+                        await asyncio.sleep(0.05)
+                    else:
+                        writer.close()
+                        await writer.wait_closed()
+                        break
         clients = []
         for name in ("a", "b"):
             config = tmp_path / (name + ".toml")
             config.write_text(
-                f'server = "{"wss" if tls else "ws"}://127.0.0.1:{port}/ws"\n'
+                f'server = "{"wss" if tls else "ws"}://127.0.0.1:{external_port}/ws"\n'
                 + (
                     f'ca_file = "{cert}"\n'
                     if tls
@@ -147,7 +170,7 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, sh
             sys.executable,
             "export_logs.py",
             "--server",
-            f"{'https' if tls else 'http'}://127.0.0.1:{port}",
+            f"{'https' if tls else 'http'}://127.0.0.1:{external_port}",
             *(["--ca-file", str(cert)] if tls else []),
             "--token-file",
             str(tmp_path / "server" / "admin.token"),
@@ -166,8 +189,14 @@ async def test_real_server_and_two_terminal_clients_and_export(tmp_path, tls, sh
         assert any(e["event"] == "chat.delivered" for e in events)
         assert sum(e["event"] == "speed.result" for e in events) == 2
         mapped = [e for e in events if e["event"] == "tcp.mapped"]
-        assert mapped and all(e["fields"]["observer_protocol"] == ("http" if shared else "raw") for e in mapped)
-        if shared:
+        if forwarded:
+            assert not mapped
+            assert not any(e["event"] == "stun.observed" for e in events)
+            assert sum(e["event"] == "network.server_forwarded" for e in events) == 2
+            assert not any(e["event"] in ("client.background_failed", "runtime.asyncio_error") for e in events)
+        else:
+            assert mapped and all(e["fields"]["observer_protocol"] == ("http" if shared else "raw") for e in mapped)
+        if shared and not forwarded:
             assert any(e["event"] == "stun.observed" and e["fields"]["observer"][1] == port for e in events)
         callbacks = [e for e in events if e["event"] == "ipv6.inbound_result"]
         assert len(callbacks) == 2

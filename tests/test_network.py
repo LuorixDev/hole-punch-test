@@ -6,12 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from p2plab import network
 from p2plab.client import Client
 from p2plab.experiments import Experiments
 from p2plab.network import (
     address_fingerprint,
     address_rejection,
     read_address_inventory,
+    route_to_server,
     select_addresses,
     snapshot,
 )
@@ -118,6 +120,47 @@ async def test_snapshot_filters_states_before_budgets_and_preserves_both_ipv6_ty
     assert "aa:bb:cc:dd:ee:ff" not in str(result)
     assert kernel[0][0]["address"] == "aa:bb:cc:dd:ee:ff"
     assert any(name == "network.address_inventory" for name, _ in log.events)
+
+
+async def test_server_route_resolves_ipv4_domain_before_calling_ip_and_logs_evidence(kernel, monkeypatch):
+    calls = []
+
+    async def resolve(host, port, **options):
+        assert host == "server.example" and options["family"] == socket.AF_INET
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("125.111.10.112", 0))]
+
+    original = network.command
+
+    async def run(*args, **options):
+        calls.append(args)
+        return await original(*args, **options)
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+    monkeypatch.setattr("p2plab.network.command", run)
+    log = Evidence()
+    result = await snapshot(log, server_host="server.example", external=False)
+    route = result["system_commands"][3]
+    assert ("ip", "-j", "route", "get", "125.111.10.112") in calls
+    assert not any("server.example" in args for args in calls)
+    assert route["resolution"] == {"host": "server.example", "state": "resolved", "addresses": ["125.111.10.112"]}
+    assert any(name == "network.system_commands" and fields["evidence"][3] == route for name, fields in log.events)
+
+
+@pytest.mark.parametrize("failure", [socket.gaierror("not found"), TimeoutError("DNS timeout"), None])
+async def test_server_route_dns_failure_is_recorded_without_running_bad_ip_command(monkeypatch, failure):
+    async def resolve(*args, **kwargs):
+        if failure:
+            raise failure
+        return []
+
+    async def never(*args, **kwargs):
+        pytest.fail("Unresolved hostname must not reach ip route get")
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+    monkeypatch.setattr("p2plab.network.command", never)
+    result = await route_to_server("server.example")
+    assert result["state"] == "not-tested" and result["resolution"]["state"] == "failed"
+    assert result["reason"]
 
 
 @pytest.mark.parametrize(

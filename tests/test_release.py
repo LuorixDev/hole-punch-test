@@ -2,6 +2,7 @@ import ast
 import asyncio
 import hashlib
 import json
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -13,6 +14,14 @@ from tools.build_release import collect_licenses, write_checksums
 from tools.smoke_frozen import finish_pumps, read_room_events, stop_process
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_package_and_distribution_release_versions_match():
+    from p2plab import __version__
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert project["project"]["version"] == __version__
+    assert "## v" + __version__ + ":" in (ROOT / "RELEASE-NOTES.md").read_text()
 
 
 async def test_frozen_verification_reads_every_log_page_including_final_receipts(tmp_path):

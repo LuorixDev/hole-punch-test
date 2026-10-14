@@ -220,3 +220,35 @@ async def test_tui_shows_conflicting_egresses_and_separate_signaling_observation
         table = app.query_one("#public-ips", DataTable)
         assert "信令" in str(table.get_row("0"))
         assert "国内适用" in str(table.get_row("1"))
+
+
+@pytest.mark.parametrize("source", ["192.168.1.88", "100.71.69.142", "198.18.0.17", "127.0.0.1"])
+async def test_non_global_signaling_is_not_a_public_egress_conflict(peers, source):
+    client, _ = peers
+    client.server_observed_ipv4 = source
+    client.network["http_observations"] = [
+        {"provider": "3322", "family": 4, "state": "observed", "address": "122.239.218.91"},
+    ]
+    status = validate_status(client.network_status())
+    evidence = public_ip_evidence(status)["4"]
+    assert evidence["state"] == "observed"
+    assert evidence["non_global_sources"]["signaling"] == [source]
+    assert evidence["sources"]["signaling"] == [source]
+    await client.publish_status()
+    logged = next(r for r in client.log.query() if r["event"] == "network.ip_sources")
+    assert logged["fields"]["evidence"]["4"] == evidence
+    app = P2PApp(client=client, start_backend=False)
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause()
+        banner = str(app.query_one("#network-banner", Static).content)
+        assert "出口不一致" not in banner
+        assert "信令非公网/可能经转发" in banner and source in banner
+
+
+def test_private_signaling_does_not_hide_real_http_egress_disagreement():
+    evidence = public_ip_evidence({"public_ips": [
+        {"family": 4, "source": "signaling", "address": "192.168.1.88"},
+        {"family": 4, "source": "http", "address": "1.1.1.1"},
+        {"family": 4, "source": "http", "address": "8.8.8.8"},
+    ]})
+    assert evidence["4"]["state"] == "multiple-observed-addresses"

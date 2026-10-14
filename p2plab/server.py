@@ -37,6 +37,7 @@ class Hub:
         stun_port=3478,
         tcp_port=3479,
         tcp_observer_protocol="raw",
+        forwarded=False,
         allow_inbound=False,
         allow_loopback=False,
         inbound_prefixes=(),
@@ -44,6 +45,7 @@ class Hub:
         self.log, self.admin_token, self.access_token = journal, admin_token, access_token
         self.stun_port, self.tcp_port = stun_port, tcp_port
         self.tcp_observer_protocol = tcp_observer_protocol
+        self.forwarded = forwarded
         self.allow_inbound, self.allow_loopback = allow_inbound, allow_loopback
         self.rooms, self.peers, self.observation_tokens = {}, {}, {}
         self.reach_active = asyncio.Semaphore(2)
@@ -155,6 +157,7 @@ class Hub:
                 "obs": obs,
                 "pair": None,
                 "signals": {},
+                "retired_pairs": deque(maxlen=32),
                 "checks": 0,
                 "checks4": 0,
                 "reach_requests": set(),
@@ -171,8 +174,9 @@ class Hub:
                     "stun_port": self.stun_port,
                     "tcp_port": self.tcp_port,
                     "tcp_observer_protocol": self.tcp_observer_protocol,
+                    "observation_mode": "forwarded" if self.forwarded else "direct",
                     "inbound_check": self.allow_inbound,
-                    "inbound_ipv4_check": self.allow_inbound,
+                    "inbound_ipv4_check": self.allow_inbound and not self.forwarded,
                     "inbound_max_checks": 2,
                     "strict_p2p": True,
                     "log_encodings": [CODEC],
@@ -215,7 +219,10 @@ class Hub:
         except Exception as exc:
             self.log.exception("signaling.error", exc, source=source)
             if not ws.closed:
-                await ws.send_json({"type": "error", "code": str(exc)[:200]})
+                try:
+                    await ws.send_json({"type": "error", "code": str(exc)[:200]})
+                except (ConnectionError, aiohttp.ClientError, RuntimeError) as send_error:
+                    self.log.event("signal.error_delivery_failed", str(send_error), "WARNING", source=source)
         finally:
             if peer:
                 await self.leave(peer)
@@ -247,7 +254,10 @@ class Hub:
         if not members:
             self.rooms.pop(peer["room"], None)
         for other in members:
+            if other["pair"]:
+                other["retired_pairs"].append(other["pair"])
             other["pair"] = None
+            other["signals"].clear()
             if not other["ws"].closed:
                 try:
                     await self.send(other, {"type": "peer_left", "peer": peer["id"]})
@@ -275,6 +285,10 @@ class Hub:
             )
         elif kind == "signal":
             if not peer["pair"] or body.get("pair") != peer["pair"]:
+                if not peer["pair"] or body.get("pair") in peer["retired_pairs"]:
+                    self.log.event("signal.stale_pair", "Dropped signal from a departed pair; session remains online",
+                                   room=peer["room"], peer=peer["id"], pair=body.get("pair"))
+                    return
                 raise ValueError("PAIR_MISMATCH")
             data = body.get("data")
             if not isinstance(data, dict) or data.get("kind") not in (
@@ -399,12 +413,17 @@ class Hub:
             raise ValueError("UNKNOWN_MESSAGE_TYPE")
 
     def observed_mapping(self, token, remote):
+        if self.forwarded:
+            raise ValueError("TCP_OBSERVER_DISABLED_FOR_FORWARDED_SERVER")
         record = self.observation_tokens.get(token)
         if not record or record[1] < time.monotonic():
             raise ValueError("OBSERVATION_TOKEN_INVALID")
         peer = self.peers.get(record[0])
         if not peer or not remote or remote[0] != peer["source"]:
             raise ValueError("OBSERVATION_SOURCE_MISMATCH")
+        ip = ipaddress.ip_address(remote[0])
+        if not ip.is_global and not (self.allow_loopback and ip.is_loopback):
+            raise ValueError("TCP_OBSERVER_NON_GLOBAL_SOURCE_NOT_A_PUBLIC_MAPPING")
         self.log.event("tcp.observation", room=peer["room"], peer=peer["id"], mapped=remote[:2])
         return {"mapped": remote[:2]}
 
@@ -460,6 +479,8 @@ class Hub:
                 if ip.version == 6
                 else (
                     host == peer["source"]
+                    and not self.forwarded
+                    and (ip.is_global or self.allow_loopback and ip.is_loopback)
                     and not ip.is_multicast
                     and not ip.is_unspecified
                     and (not ip.is_loopback or self.allow_loopback)
@@ -564,10 +585,16 @@ async def serve(args):
         stun_port=args.stun_port,
         tcp_port=args.tcp_port,
         tcp_observer_protocol="http" if args.tcp_port == args.port else "raw",
+        forwarded=args.forwarded,
         allow_inbound=args.allow_inbound_check,
         allow_loopback=args.allow_loopback_check,
     )
     hub.inbound_prefixes = [ipaddress.ip_network(prefix) for prefix in args.inbound_prefix]
+    if args.public_port:
+        if args.stun_port == args.port:
+            hub.stun_port = args.public_port
+        if args.tcp_port == args.port:
+            hub.tcp_port = args.public_port
     runner, udp_transports, tcp = web.AppRunner(hub.app(), access_log=None), [], None
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -594,7 +621,7 @@ async def serve(args):
                 for host in (args.stun_host or args.host, args.stun_alt_ip)
                 for port in (args.stun_port, args.stun_port + 1)
             ]
-        for host, port in points:
+        for host, port in ([] if args.forwarded else points):
             alt = None
             if args.stun_alt_ip:
                 alt = (
@@ -607,21 +634,29 @@ async def serve(args):
                 family=socket.AF_INET,
             )
             udp_transports.append(transport)
-        if args.tcp_port != args.port:
+        if args.tcp_port != args.port and not args.forwarded:
             tcp = await asyncio.start_server(hub.observe_tcp, args.host, args.tcp_port, limit=4096)
         journal.event(
             "server.started",
             signaling=f"{'https' if context else 'http'}://{args.host}:{args.port}",
-            stun=points,
-            tcp_observer=args.tcp_port,
+            stun=[] if args.forwarded else points,
+            tcp_observer=None if args.forwarded else args.tcp_port,
             tcp_observer_protocol=hub.tcp_observer_protocol,
             shared_port=args.port == args.stun_port == args.tcp_port,
+            observation_mode="forwarded" if args.forwarded else "direct",
+            advertised_stun_port=hub.stun_port,
+            advertised_tcp_port=hub.tcp_port,
             log_database=str(data / "central.sqlite3"),
             admin_token_file=str(token_file),
             inbound_check=args.allow_inbound_check,
             inbound_ipv6_policy="prefix-allowlist" if hub.inbound_prefixes else "any-global-ipv6",
             inbound_prefixes=[str(prefix) for prefix in hub.inbound_prefixes],
         )
+        if args.forwarded:
+            journal.event(
+                "server.forwarded", "转发模式：本站 TCP/STUN 观察及 IPv4 回连禁用；信令、日志、IPv6 回连保留",
+                "WARNING",
+            )
         if not context and not ipaddress.ip_address(args.host).is_loopback:
             journal.event(
                 "server.insecure",
@@ -648,6 +683,9 @@ def main():
     parser = argparse.ArgumentParser(description="IPv4 rendezvous + STUN + persistent diagnostics; no relay")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8443)
+    parser.add_argument("--public-port", type=int, help="Advertised shared external port for source-preserving NAT")
+    parser.add_argument("--forwarded", action="store_true",
+                        help="socat/reverse-proxy signaling: disable invalid local TCP/STUN observations and IPv4 callbacks")
     parser.add_argument("--stun-host")
     parser.add_argument("--stun-port", type=int, help="UDP STUN port; defaults to --port")
     parser.add_argument("--stun-alt-ip", help="Second IPv4 on this host for complete RFC 5780 tests")
@@ -671,6 +709,10 @@ def main():
         args.tcp_port = args.port
     if not all(1 <= port <= 65535 for port in (args.port, args.stun_port, args.tcp_port)):
         parser.error("Ports must be between 1 and 65535")
+    if args.public_port is not None and not 1 <= args.public_port <= 65535:
+        parser.error("--public-port must be between 1 and 65535")
+    if args.public_port is not None and args.stun_alt_ip:
+        parser.error("--public-port cannot describe the alternate IP/port topology of --stun-alt-ip")
     if args.stun_alt_ip and args.stun_port == 65535:
         parser.error("--stun-alt-ip needs an alternate UDP port below 65536")
     if args.stun_alt_ip and (not args.stun_host or ipaddress.ip_address(args.stun_host).is_unspecified):

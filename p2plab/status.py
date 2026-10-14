@@ -46,9 +46,13 @@ def public_ip_evidence(status):
                             if r["family"] == family and r["source"] == source})
             for source in ("http", "signaling", "stun")
         }
-        observed = {a for addresses in sources.values() for a in addresses}
+        observed = {a for addresses in sources.values() for a in addresses
+                    if ipaddress.ip_address(a).is_global and not ipaddress.ip_address(a).is_multicast}
+        non_global = {source: [a for a in addresses if a not in observed]
+                      for source, addresses in sources.items()}
         result[str(family)] = {
             "sources": sources,
+            "non_global_sources": non_global,
             "state": "multiple-observed-addresses" if len(observed) > 1 else
             "observed" if observed else "not-observed",
         }

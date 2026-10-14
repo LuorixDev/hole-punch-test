@@ -8,7 +8,7 @@ import pytest
 
 from p2plab.network import command
 from p2plab.status import direction_reference, speed_assessment, utcnow, validate_status
-from p2plab.wan import measure, parse_result, sources
+from p2plab.wan import discover_servers, measure, parse_result, sources
 from tests.test_server import cleanup_hub, join, start_hub
 
 
@@ -255,6 +255,97 @@ async def test_command_timeout_kills_subprocess_and_limits_output():
     assert result["state"] == "failed" and "TimeoutError" in result["reason"]
     result = await command(sys.executable, "-c", "print('x'*10000)", limit=100)
     assert result["state"] == "failed" and "COMMAND_OUTPUT_LIMIT" in result["reason"]
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_wan_server_list_reads_fragmented_response_to_eof(tmp_path, monkeypatch, oversized):
+    from aiohttp import web
+
+    from p2plab.journal import Journal
+
+    async def handler(request):
+        response = web.StreamResponse()
+        await response.prepare(request)
+        await response.write(b"[")
+        await asyncio.sleep(0.03)
+        await response.write(b" " * (131072 if oversized else 5000) + b"]")
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_get("/list", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    monkeypatch.setattr("p2plab.wan.SERVER_LIST", f"http://127.0.0.1:{port}/list")
+    journal = Journal(tmp_path / "list.sqlite3", role="client", console=False)
+    try:
+        source = {"address": "127.0.0.1", "family": 4}
+        if oversized:
+            with pytest.raises(ValueError, match="WAN_SERVER_LIST_LIMIT"):
+                await discover_servers(source, journal)
+        else:
+            assert await discover_servers(source, journal) == []
+    finally:
+        await runner.cleanup()
+        journal.close()
+
+
+async def test_wan_revalidates_rotated_source_before_cli_start(tmp_path, monkeypatch):
+    import p2plab.wan as wan
+    from p2plab.journal import Journal
+
+    checked = []
+
+    async def validate(host, *, expected):
+        checked.append(host)
+        if len(checked) == 2:
+            raise ValueError("LOCAL_IPV6_ADDRESS_UNAVAILABLE:ADDRESS_REMOVED_OR_INTERFACE_CHANGED")
+
+    async def discover(*args, **kwargs):
+        return [{"id": 1, "server": "https://example.org"}]
+
+    async def never(*args, **kwargs):
+        pytest.fail("Removed source must not start a speedtest process")
+
+    monkeypatch.setattr(wan, "executable", lambda options: "librespeed-cli")
+    monkeypatch.setattr(wan, "discover_servers", discover)
+    monkeypatch.setattr(wan, "command", never)
+    journal = Journal(tmp_path / "rotation.sqlite3", role="client", console=False)
+    try:
+        result = await measure({"address_inventory": [
+            {"address": "240e::1", "family": 6, "interface": "eth0", "state": "preferred"},
+        ]}, {}, journal, validate_source=validate)
+        assert result["state"] == "failed" and result["families"] == {}
+        assert checked == ["240e::1", "240e::1"]
+        assert any("ADDRESS_REMOVED" in r["message"] for r in journal.query())
+    finally:
+        journal.close()
+
+
+async def test_client_wan_refreshes_startup_inventory_before_selecting_source(peers, monkeypatch):
+    client, _ = peers
+    client.loopback = False
+    client.diagnostics_enabled = True
+    client.network = {"address_inventory": [
+        {"address": "10.255.115.19", "family": 4, "interface": "vpn", "state": "preferred"},
+    ]}
+    current = [{"address": "192.168.0.5", "family": 4, "interface": "eth0", "state": "preferred"}]
+
+    async def inventory(**kwargs):
+        return current, {"state": "completed"}
+
+    async def measure(network, options, journal, *, validate_source):
+        assert network["address_inventory"] == current
+        assert validate_source == client.validate_local_address
+        return {"state": "failed", "families": {}, "reason": "CONTROLLED_TEST"}
+
+    monkeypatch.setattr("p2plab.client.read_address_inventory", inventory)
+    monkeypatch.setattr("p2plab.client.measure_wan", measure)
+    await client.test_wan()
+    assert client.wan_result["reason"] == "CONTROLLED_TEST"
 
 
 async def test_real_librespeed_binary_against_controlled_local_backend(tmp_path):

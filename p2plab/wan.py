@@ -95,9 +95,11 @@ async def discover_servers(source, journal, *, selected_ids=(), maximum=2):
     ) as session:
         async with session.get(SERVER_LIST, allow_redirects=False) as response:
             response.raise_for_status()
-            raw = await response.content.read(131073)
-            if len(raw) > 131072:
-                raise ValueError("WAN_SERVER_LIST_LIMIT")
+            raw = bytearray()
+            while chunk := await response.content.read(min(16384, 131073 - len(raw))):
+                raw.extend(chunk)
+                if len(raw) > 131072:
+                    raise ValueError("WAN_SERVER_LIST_LIMIT")
             rows = json.loads(raw)
         if not isinstance(rows, list):
             raise ValueError("WAN_SERVER_LIST_INVALID")
@@ -162,7 +164,7 @@ async def discover_servers(source, journal, *, selected_ids=(), maximum=2):
         ]
 
 
-async def measure(network, options, journal):
+async def measure(network, options, journal, *, validate_source=None):
     cli = executable(options)
     if not cli:
         return {"state": "not-tested", "families": {}, "reason": "LIBRESPEED_CLI_MISSING"}
@@ -181,11 +183,15 @@ async def measure(network, options, journal):
     }
     for source in sources(network):
         try:
+            if validate_source:
+                await validate_source(source["address"], expected=source)
             targets = await discover_servers(source, journal, selected_ids=ids, maximum=count)
             with tempfile.TemporaryDirectory(prefix="p2plab-wan-") as directory:
                 path = Path(directory) / "servers.json"
                 path.write_text(json.dumps(targets), encoding="utf-8")
                 for target in targets:
+                    if validate_source:
+                        await validate_source(source["address"], expected=source)
                     journal.event(
                         "wan.test_started",
                         family=source["family"],
