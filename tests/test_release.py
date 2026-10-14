@@ -11,7 +11,7 @@ import pytest
 from aiohttp import web
 
 from tools.build_release import collect_licenses, write_checksums
-from tools.smoke_frozen import finish_pumps, read_room_events, stop_process
+from tools.smoke_frozen import finish_pumps, read_room_events, smoke, stop_process
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,6 +22,20 @@ def test_package_and_distribution_release_versions_match():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert project["project"]["version"] == __version__
     assert "## v" + __version__ + ":" in (ROOT / "RELEASE-NOTES.md").read_text()
+
+
+async def test_frozen_smoke_explicitly_enables_loopback_mapping_observations(tmp_path, monkeypatch):
+    import tools.smoke_frozen as frozen
+
+    launch = AsyncMock(side_effect=RuntimeError("stop-before-launch"))
+    monkeypatch.setattr(frozen.asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setattr(frozen, "free_shared_port", lambda: 18443)
+    with pytest.raises(RuntimeError, match="stop-before-launch"):
+        await smoke(tmp_path / "client", tmp_path / "server", tmp_path / "smoke")
+    assert launch.call_args.args == (
+        str(tmp_path / "server"), "--host", "127.0.0.1", "--port", "18443",
+        "--data", str(tmp_path / "smoke/server"), "--allow-loopback-check",
+    )
 
 
 async def test_frozen_verification_reads_every_log_page_including_final_receipts(tmp_path):

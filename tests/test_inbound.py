@@ -361,7 +361,8 @@ async def test_client_prints_and_persists_inconclusive_callback_result(tmp_path,
 def test_cli_preserves_plaintext_opt_in_from_config(tmp_path, monkeypatch):
     config = tmp_path / "client.toml"
     config.write_text(
-        f'server = "ws://198.51.100.1:8443/ws"\nallow_insecure = true\ndata_dir = "{tmp_path / "client"}"\n'
+        'server = "ws://198.51.100.1:8443/ws"\nallow_insecure = true\n'
+        f'data_dir = "{(tmp_path / "client").as_posix()}"\n'
     )
     observed = []
 

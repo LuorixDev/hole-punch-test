@@ -120,7 +120,7 @@ async def smoke(client, server, output):
     message = "release-smoke-private-chat-\u4e2d\u6587\u6d88\u606f"
     try:
         await launch("server", server, "--host", "127.0.0.1", "--port", port,
-                     "--data", output / "server")
+                     "--data", output / "server", "--allow-loopback-check")
         await contains("server", "server.started")
         for name in ("a", "b"):
             config = output / (name + ".toml")

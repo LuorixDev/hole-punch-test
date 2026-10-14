@@ -4,10 +4,16 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
-## v0.1.4: Forwarded Deployment Fixes
+## v0.1.5: Forwarded Deployment Fixes
 
 Upgrade both the client and server. This release fixes misleading egress warnings
 and reconnect loops observed in real socat-forwarded deployments.
+
+The v0.1.4 candidate was withheld by the release gates: a Windows regression
+fixture wrote an unescaped TOML path, and the frozen loopback test omitted its
+explicit server permission for local TCP mapping observations. Both verification
+issues are corrected and covered without relaxing production source validation
+or skipping the shared-port TCP/STUN checks.
 
 - Non-global signaling sources remain visible and logged, but no longer count as
   conflicting public egress addresses. Real public-address disagreements remain visible.
