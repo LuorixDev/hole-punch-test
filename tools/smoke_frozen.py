@@ -10,9 +10,10 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from p2plab.journal import Journal
+from p2plab.export import download
 from p2plab.runtime import configure_console_encoding
 
 
@@ -65,12 +66,11 @@ async def finish_pumps(pumps, timeout=10):
         raise RuntimeError("Timed out closing frozen test log pipes")
 
 
-def read_room_events(journal, room):
-    events, after = [], 0
-    while batch := journal.query(room=room, after=after):
-        events.extend(batch)
-        after = batch[-1]["cursor"]
-    return events
+async def read_room_events(server, token_file, output):
+    await download(SimpleNamespace(server=server, token_file=token_file, output=output,
+                                  room="release", client=None, after=0, ca_file=None))
+    with gzip.open(output, "rt", encoding="utf-8") as stream:
+        return [json.loads(line) for line in stream]
 
 
 async def smoke(client, server, output):
@@ -158,6 +158,9 @@ async def smoke(client, server, output):
         await asyncio.wait_for(asyncio.gather(*(processes[name].wait() for name in ("a", "b"))), 30)
         if any(processes[name].returncode != 0 for name in ("a", "b")):
             raise RuntimeError("Frozen client did not exit cleanly")
+        # Exercise the deployed log API while its WAL owner is alive, before forced test cleanup.
+        events = await read_room_events(f"http://127.0.0.1:{port}", output / "server/admin.token",
+                                       output / "central.log.gz")
     finally:
         cleanup = await asyncio.gather(*(stop_process(process) for process in processes.values()),
                                        return_exceptions=True)
@@ -165,11 +168,6 @@ async def smoke(client, server, output):
         for result in cleanup:
             if isinstance(result, BaseException):
                 raise result
-    journal = Journal(output / "server/central.sqlite3", role="server", console=False)
-    try:
-        events = read_room_events(journal, "release")
-    finally:
-        journal.close()
     failures = [event for event in events if event["event"] in (
         "runtime.asyncio_error", "client.background_failed", "runtime.unhandled_exception",
     )]

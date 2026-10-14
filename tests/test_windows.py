@@ -283,10 +283,38 @@ def test_windows_ice_ipv6_send_uses_four_tuple_without_changing_scope_or_ipv4():
     from p2plab.rtc import normalize_ice_transport
 
     sent = []
-    transport = SimpleNamespace(sendto=lambda data, address: sent.append((data, address)))
+    transport = SimpleNamespace(sendto=lambda data, address: sent.append((data, address)), abort=lambda: None)
     normalize_ice_transport(transport)
     normalize_ice_transport(transport)
     for address in (("::1", 3000), ("127.0.0.1", 3001), ("fe80::1", 3002, 4, 7)):
         transport.sendto(b"test", address)
     assert sent == [(b"test", ("::1", 3000, 0, 0)), (b"test", ("127.0.0.1", 3001)),
                     (b"test", ("fe80::1", 3002, 4, 7))]
+
+
+async def test_windows_ice_close_releases_buffered_proactor_datagrams():
+    from p2plab.rtc import normalize_ice_transport
+
+    loop = asyncio.get_running_loop()
+    lost = loop.create_future()
+
+    class Probe(asyncio.DatagramProtocol):
+        def connection_lost(self, exc):
+            if not lost.done():
+                lost.set_result(exc)
+
+    receiver, _ = await loop.create_datagram_endpoint(asyncio.DatagramProtocol, local_addr=("127.0.0.1", 0))
+    sender, _ = await loop.create_datagram_endpoint(Probe, local_addr=("127.0.0.1", 0))
+    try:
+        normalize_ice_transport(sender)
+        for _ in range(8):
+            sender.sendto(b"pending-ice-datagram", receiver.get_extra_info("sockname"))
+        if sys.platform == "win32":
+            assert sender.get_write_buffer_size() > 0
+        sender.close()
+        assert await asyncio.wait_for(lost, 2) is None
+        assert sender.is_closing()
+        assert sender.get_extra_info("socket").fileno() == -1
+    finally:
+        sender.abort()
+        receiver.abort()

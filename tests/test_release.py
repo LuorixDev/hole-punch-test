@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aiohttp import web
 
 from tools.build_release import collect_licenses, write_checksums
 from tools.smoke_frozen import finish_pumps, read_room_events, stop_process
@@ -14,22 +15,31 @@ from tools.smoke_frozen import finish_pumps, read_room_events, stop_process
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_frozen_verification_reads_every_log_page_including_final_receipts(tmp_path):
+async def test_frozen_verification_reads_every_log_page_including_final_receipts(tmp_path):
     from p2plab.journal import Journal
+    from p2plab.server import Hub
 
     journal = Journal(tmp_path / "central.sqlite3", role="server", room="release", console=False)
+    runner = web.AppRunner(Hub(journal, admin_token="admin").app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    token = tmp_path / "admin.token"
+    token.write_text("admin")
     try:
         for index in range(1005):
             journal.event("experiment.result", index=index)
         journal.event("client.stopped")
         journal.event("unrelated-room", room="other")
         assert len(journal.query(room="release", limit=10000)) == 1000
-        events = read_room_events(journal, "release")
-        assert len(events) == 1006
-        assert events[-1]["event"] == "client.stopped"
+        events = await read_room_events(f"http://127.0.0.1:{port}", token, tmp_path / "central.log.gz")
+        assert sum(e["event"] == "experiment.result" for e in events) == 1005
+        assert sum(e["event"] == "client.stopped" for e in events) == 1
         assert len({e["cursor"] for e in events}) == len(events)
         assert all(e["room"] == "release" for e in events)
     finally:
+        await runner.cleanup()
         journal.close()
 
 

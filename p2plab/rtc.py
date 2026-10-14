@@ -52,6 +52,9 @@ def normalize_ice_transport(transport):
         return original(data, sockaddr(address) if address is not None and len(address) == 2 else address)
 
     transport.sendto = sendto
+    # CPython gh-156920: queued Proactor UDP writes can suppress connection_lost on close.
+    # ICE is already shutting down here; discard pending datagrams rather than leave sockets open.
+    transport.close = transport.abort
     transport._p2plab_sockaddr = True
 
 

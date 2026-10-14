@@ -4,7 +4,7 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
-## v0.1.2: Shared Server Port
+## v0.1.3: Shared Server Port
 
 The default server now uses only **8443/TCP + 8443/UDP**. TCP mapping probes use
 the same HTTP/HTTPS listener as signaling and logs, but retain their actual
@@ -15,6 +15,10 @@ The v0.1.1 candidate was not released: an older integration assertion incorrectl
 required a failed loopback method, and the expanded frozen test exceeded the
 verifier's first log page. Tests now verify all actual outcomes, including an
 entirely successful matrix, and paginate every log entry without discarding logs.
+The v0.1.2 candidate was also withheld. Windows ICE shutdown now aborts pending
+UDP writes to avoid the CPython gh-156920 Proactor close hang. Frozen verification
+exports compressed logs through the running server's authenticated HTTP API
+before stopping it, instead of reopening its WAL after forced process teardown.
 
 ## Downloads
 
