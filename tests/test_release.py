@@ -9,9 +9,28 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from tools.build_release import collect_licenses, write_checksums
-from tools.smoke_frozen import finish_pumps, stop_process
+from tools.smoke_frozen import finish_pumps, read_room_events, stop_process
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_frozen_verification_reads_every_log_page_including_final_receipts(tmp_path):
+    from p2plab.journal import Journal
+
+    journal = Journal(tmp_path / "central.sqlite3", role="server", room="release", console=False)
+    try:
+        for index in range(1005):
+            journal.event("experiment.result", index=index)
+        journal.event("client.stopped")
+        journal.event("unrelated-room", room="other")
+        assert len(journal.query(room="release", limit=10000)) == 1000
+        events = read_room_events(journal, "release")
+        assert len(events) == 1006
+        assert events[-1]["event"] == "client.stopped"
+        assert len({e["cursor"] for e in events}) == len(events)
+        assert all(e["room"] == "release" for e in events)
+    finally:
+        journal.close()
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,14 @@ async def finish_pumps(pumps, timeout=10):
         raise RuntimeError("Timed out closing frozen test log pipes")
 
 
+def read_room_events(journal, room):
+    events, after = [], 0
+    while batch := journal.query(room=room, after=after):
+        events.extend(batch)
+        after = batch[-1]["cursor"]
+    return events
+
+
 async def smoke(client, server, output):
     if output.exists() and any(output.iterdir()):
         raise ValueError("SMOKE_OUTPUT_MUST_BE_EMPTY; existing logs and identities will not be deleted")
@@ -159,7 +167,7 @@ async def smoke(client, server, output):
                 raise result
     journal = Journal(output / "server/central.sqlite3", role="server", console=False)
     try:
-        events = journal.query(room="release", limit=10000)
+        events = read_room_events(journal, "release")
     finally:
         journal.close()
     failures = [event for event in events if event["event"] in (

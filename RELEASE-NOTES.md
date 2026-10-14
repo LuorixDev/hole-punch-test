@@ -4,13 +4,17 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
-## v0.1.1: Shared Server Port
+## v0.1.2: Shared Server Port
 
 The default server now uses only **8443/TCP + 8443/UDP**. TCP mapping probes use
 the same HTTP/HTTPS listener as signaling and logs, but retain their actual
 experiment socket. Separate legacy ports remain opt-in. Upgrade both programs.
 Source and frozen-program regression tests cover same-port TCP mapping and
 UDP STUN alongside chat, file transfers, ping, throughput and central logging.
+The v0.1.1 candidate was not released: an older integration assertion incorrectly
+required a failed loopback method, and the expanded frozen test exceeded the
+verifier's first log page. Tests now verify all actual outcomes, including an
+entirely successful matrix, and paginate every log entry without discarding logs.
 
 ## Downloads
 

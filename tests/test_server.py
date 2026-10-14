@@ -421,7 +421,9 @@ async def test_full_client_pair_matrix_and_central_upload(tmp_path):
         assert sum(e["event"] == "network.peer_status" for e in events) >= 2
         assert all("integration chat" not in str(e) for e in events)
         for client in clients:
-            assert any(r["state"] != "success" for r in client.manager.results)
+            recorded = {e["fields"]["attempt"]: e["fields"]["state"] for e in events
+                        if e["client"] == client.log.client and e["event"] == "experiment.result"}
+            assert recorded == {r["attempt"]: r["state"] for r in client.manager.results}
     finally:
         for client in clients:
             await client.close()
