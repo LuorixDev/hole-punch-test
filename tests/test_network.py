@@ -486,3 +486,20 @@ async def test_ipv6_p2p_attempt_checks_state_before_creating_transport(tmp_path,
     finally:
         await manager.close()
         await client.close()
+
+
+async def test_path_route_evidence_uses_ip_route_get_on_linux(monkeypatch):
+    monkeypatch.setattr("p2plab.network.platform.system", lambda: "Linux")
+    calls = []
+
+    async def run(*args, **options):
+        calls.append(args)
+        return {"command": list(args), "state": "completed", "returncode": 0, "stderr": "", "output": []}
+
+    monkeypatch.setattr("p2plab.network.command", run)
+    await network.path_route_evidence("203.0.113.5", "10.0.0.2")
+    await network.path_route_evidence("203.0.113.5")
+    assert calls == [
+        ("ip", "-j", "route", "get", "203.0.113.5", "from", "10.0.0.2"),
+        ("ip", "-j", "route", "get", "203.0.113.5"),
+    ]

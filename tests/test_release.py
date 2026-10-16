@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from aiohttp import web
 
-from tools.build_release import collect_licenses, write_checksums
+from tools.build_release import collect_licenses, release_target, write_checksums
 from tools.smoke_frozen import finish_pumps, read_room_events, smoke, stop_process
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -159,3 +159,46 @@ def test_license_inventory_contains_exact_versions_and_only_license_related_file
     assert (destination / "PYTHON-LICENSE.txt").read_text() == "Python license"
     assert not list(destination.rglob("device.key"))
     assert json.loads((destination / "dependencies.json").read_text()) == inventory
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "target"),
+    [
+        ("win32", "AMD64", "windows-x64"),
+        ("win32", "x86_64", "windows-x64"),
+        ("linux", "x86_64", "linux-x64"),
+        ("linux", "amd64", "linux-x64"),
+        ("darwin", "arm64", "macos-arm64"),
+        ("Darwin", "ARM64", "macos-arm64"),
+        ("darwin", "x86_64", "macos-x64"),
+    ],
+)
+def test_release_target_maps_each_supported_host(system, machine, target):
+    assert release_target(system, machine) == target
+
+
+@pytest.mark.parametrize(
+    ("system", "machine"),
+    [("linux", "aarch64"), ("win32", "ARM64"), ("freebsd13", "amd64"), ("darwin", "i386")],
+)
+def test_release_target_refuses_hosts_with_no_shipped_artifact(system, machine):
+    """Refusing is safer than mislabelling: the publish job asserts on these exact names."""
+    assert release_target(system, machine) is None
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "native_names"),
+    [("linux", ("libutp.so", "libnice.so.10")), ("darwin", ("libutp.dylib", "libnice.10.dylib"))],
+)
+def test_client_spec_selects_platform_native_library_names(platform_name, native_names, tmp_path):
+    """macOS stores these as .dylib, so Linux sonames would silently bundle nothing."""
+    tree = ast.parse((ROOT / "packaging/client.spec").read_text())
+    assignments = {
+        node.targets[0].id: node
+        for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+    }
+    namespace = {"sys": SimpleNamespace(platform=platform_name), "root": tmp_path}
+    for name in ("utp", "nice"):
+        exec(ast.unparse(assignments[name]), namespace)
+    assert (namespace["utp"].name, namespace["nice"].name) == native_names

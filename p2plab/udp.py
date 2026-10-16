@@ -32,6 +32,35 @@ PROFILES = {
     "staggered": {"initial": 0.2, "ceiling": 1.0, "offset": 0.35},
 }
 
+# Darwin's <netinet/in.h> defines IP_DONTFRAG as 28 but Python does not export it, while its
+# <netinet6/in6.h> twin IPV6_DONTFRAG (62) is exported as socket.IPV6_DONTFRAG.
+DARWIN_IP_DONTFRAG = 28
+DARWIN_IPV6_DONTFRAG = 62
+
+
+def dont_fragment_option(family, *, system=None):
+    """Describe the kernel switch that stops silent fragmentation, or None when there is none.
+
+    Linux reports the oversize datagram through IP_MTU_DISCOVER; Windows and macOS use a boolean
+    don't-fragment flag. Returning None instead of guessing an option number keeps the PMTU evidence
+    honest: the caller records that it could not ask the kernel at all.
+    """
+    system = sys.platform if system is None else system
+    if system.startswith("linux"):
+        if family == socket.AF_INET:
+            return socket.IPPROTO_IP, getattr(socket, "IP_MTU_DISCOVER", 10), 2, "linux-ip-mtu-discover"
+        return socket.IPPROTO_IPV6, getattr(socket, "IPV6_MTU_DISCOVER", 23), 2, "linux-ipv6-mtu-discover"
+    if system == "darwin":
+        if family == socket.AF_INET:
+            return socket.IPPROTO_IP, DARWIN_IP_DONTFRAG, 1, "darwin-ip-dontfrag"
+        return socket.IPPROTO_IPV6, DARWIN_IPV6_DONTFRAG, 1, "darwin-ipv6-dontfrag"
+    if family == socket.AF_INET:
+        # Windows-only name, absent from the Darwin/Linux stubs, so resolve it dynamically.
+        dontfragment = getattr(socket, "IP_DONTFRAGMENT", None)
+        if dontfragment is not None:
+            return socket.IPPROTO_IP, dontfragment, 1, "windows-ip-dontfragment"
+    return None
+
 
 def probe_packet(body, size=512):
     raw = packed(body)
@@ -46,7 +75,10 @@ def parse_probe(data):
     size = struct.unpack_from("!H", data, 4)[0]
     if size > len(data) - 6 or any(data[6 + size :]):
         raise ValueError("PROBE_PADDING")
-    body = json.loads(data[6 : 6 + size])
+    try:
+        body = json.loads(data[6 : 6 + size])
+    except ValueError as exc:
+        raise ValueError("PROBE_BODY_INVALID") from exc
     if not isinstance(body, dict) or body.get("size") != len(data):
         raise ValueError("PROBE_SIZE_MISMATCH")
     return body
@@ -78,21 +110,32 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
         self.received_probes = 0
         self.stun_observations, self.stun_failures = [], []
         self.last_error = None
+        self.dont_fragment = "unsupported"
         self.init_stun()
 
     async def open(self):
         sock = new_socket(self.host, socket.SOCK_DGRAM, self.spec.get("bind_port", 0))
-        # Ask the kernel not to silently fragment IPv4 probes, when the platform supports it.
-        if sys.platform.startswith("linux"):
-            if sock.family == socket.AF_INET:
-                sock.setsockopt(socket.IPPROTO_IP, getattr(socket, "IP_MTU_DISCOVER", 10), 2)
-            else:
-                sock.setsockopt(socket.IPPROTO_IPV6, getattr(socket, "IPV6_MTU_DISCOVER", 23), 2)
-        elif sock.family == socket.AF_INET and hasattr(socket, "IP_DONTFRAGMENT"):
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_DONTFRAGMENT, 1)
+        # Ask the kernel to fail oversize probes instead of silently fragmenting them, where it can.
+        option = dont_fragment_option(sock.family)
+        if option:
+            level, name, value, backend = option
+            try:
+                sock.setsockopt(level, name, value)
+                self.dont_fragment = backend
+            except OSError as exc:
+                self.owner.log.event(
+                    "udp.dont_fragment_unavailable",
+                    "DONT_FRAGMENT_OPTION_REJECTED_BY_KERNEL",
+                    "WARNING",
+                    attempt=self.attempt,
+                    backend=backend,
+                    errno=getattr(exc, "errno", None),
+                )
         await asyncio.get_running_loop().create_datagram_endpoint(lambda: self, sock=sock)
         self.candidates = [list(sock.getsockname()[:2])]
-        self.owner.log.event("udp.bound", attempt=self.attempt, local=self.candidates[0])
+        self.owner.log.event(
+            "udp.bound", attempt=self.attempt, local=self.candidates[0], dont_fragment=self.dont_fragment
+        )
 
     def connection_made(self, transport):
         self.transport = transport
@@ -130,11 +173,12 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
         )
 
     def send(self, target, body):
-        if not self.closed:
-            self.transport.sendto(probe_packet(body, body["size"]), sockaddr(target))
-            if body["kind"] == "hello":
-                self.challenge_started.setdefault(target, time.monotonic())
-            self.sends += 1
+        if self.closed or self.transport is None:
+            return
+        self.transport.sendto(probe_packet(body, body["size"]), sockaddr(target))
+        if body["kind"] == "hello":
+            self.challenge_started.setdefault(target, time.monotonic())
+        self.sends += 1
 
     def datagram_received(self, data, addr):
         if self.receive_stun(data, addr):
@@ -364,7 +408,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
         offset = self.spec.get("offset", profile["offset"]) if not self.spec["initiator"] else 0
         await asyncio.sleep(offset)
         ttl = self.spec.get("ttl")
-        if ttl:
+        if ttl and self.transport is not None:
             sock = self.transport.get_extra_info("socket")
             level = socket.IPPROTO_IPV6 if ":" in self.host else socket.IPPROTO_IP
             option = socket.IPV6_UNICAST_HOPS if ":" in self.host else socket.IP_TTL
@@ -421,6 +465,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
             remote=self.remote,
             results=result,
             conclusion="size-specific-evidence-not-certified-pmtu",
+            dont_fragment=self.dont_fragment,
             kernel_error=self.last_error,
             probe_timeout_seconds=self.mtu_timeout(),
         )
@@ -546,7 +591,7 @@ class QuicDriver:
         self.queue = asyncio.Queue(maxsize=128)
         self.flush_handle = None
         self.timer = QuicTimer(self.tick, precise=udp.spec.get("quic_precise_timer", True))
-        self.counters = {k: 0 for k in (
+        self.counters: dict[str, float] = {k: 0 for k in (
             "tx_datagrams", "rx_datagrams", "flushes", "timer_fires", "timer_late_seconds",
             "pacing_fires", "pacing_requested_seconds", "pacing_late_seconds",
         )}
@@ -652,24 +697,26 @@ class QuicDriver:
         recovery = getattr(cc, "_congestion_recovery_start_time", None)
         if recovery is not None:
             result["congestion_recovery_time"] = recovery
-        try:
-            connection_credit = self.connection._remote_max_data - self.connection._remote_max_data_used
-            stream_credits = [
-                stream.max_stream_data_remote - stream.sender.highest_offset
-                for stream_id, stream in self.connection._streams.items()
-                if stream_id in (4, 5)
-            ]
-            if stream_credits:
-                result["send_flow_control_remaining_bytes"] = max(
-                    0, min(connection_credit, *stream_credits)
-                )
-                result["send_flow_control_blocked_streams"] = sum(
-                    bool(stream.is_blocked)
-                    for stream_id, stream in self.connection._streams.items()
+        connection = self.connection
+        if connection is not None:
+            try:
+                connection_credit = connection._remote_max_data - connection._remote_max_data_used
+                stream_credits = [
+                    stream.max_stream_data_remote - stream.sender.highest_offset
+                    for stream_id, stream in connection._streams.items()
                     if stream_id in (4, 5)
-                )
-        except (AttributeError, TypeError):
-            pass
+                ]
+                if stream_credits:
+                    result["send_flow_control_remaining_bytes"] = max(
+                        0, min(connection_credit, *stream_credits)
+                    )
+                    result["send_flow_control_blocked_streams"] = sum(
+                        bool(stream.is_blocked)
+                        for stream_id, stream in connection._streams.items()
+                        if stream_id in (4, 5)
+                    )
+            except (AttributeError, TypeError):
+                pass
         return result
 
     def transmit(self):

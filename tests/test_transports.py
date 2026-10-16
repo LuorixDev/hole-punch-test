@@ -1,13 +1,14 @@
 import asyncio
 import ipaddress
 import secrets
+import socket
 import sys
 
 import pytest
 
 from p2plab.rtc import RtcAttempt
 from p2plab.tcp import TcpAttempt
-from p2plab.udp import UdpAttempt
+from p2plab.udp import UdpAttempt, dont_fragment_option
 
 
 def specs(method, host, **params):
@@ -69,6 +70,70 @@ async def test_udp_mutual_auth_and_directional_mtu(peers, host):
         assert not a.paths and not b.paths
     finally:
         await asyncio.gather(ua.close(), ub.close())
+
+
+@pytest.mark.parametrize(
+    ("system", "family", "expected"),
+    [
+        ("linux", socket.AF_INET, (socket.IPPROTO_IP, 10, 2, "linux-ip-mtu-discover")),
+        ("linux", socket.AF_INET6, (socket.IPPROTO_IPV6, 23, 2, "linux-ipv6-mtu-discover")),
+        ("darwin", socket.AF_INET, (socket.IPPROTO_IP, 28, 1, "darwin-ip-dontfrag")),
+        ("darwin", socket.AF_INET6, (socket.IPPROTO_IPV6, 62, 1, "darwin-ipv6-dontfrag")),
+    ],
+)
+def test_dont_fragment_option_maps_each_platform(system, family, expected):
+    assert dont_fragment_option(family, system=system) == expected
+
+
+def test_dont_fragment_option_is_absent_where_the_kernel_has_no_switch():
+    # Never guess a numeric option on an unverified kernel: opt-in must fail closed to "unsupported".
+    assert dont_fragment_option(socket.AF_INET, system="freebsd13") is None
+    assert dont_fragment_option(socket.AF_INET6, system="freebsd13") is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires an actual macOS host")
+def test_darwin_dont_fragment_options_are_accepted_by_the_kernel():
+    # Python does not export Darwin's IP_DONTFRAG, so the literal must be validated against the kernel.
+    for family in (socket.AF_INET, socket.AF_INET6):
+        level, option, value, _ = dont_fragment_option(family, system="darwin")
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(level, option, value)
+            assert sock.getsockopt(level, option) == value
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+async def test_udp_open_records_the_dont_fragment_backend(peers, host):
+    a, _ = peers
+    ua = UdpAttempt(a, specs("udp", host)[0], host)
+    try:
+        await ua.open()
+        option = dont_fragment_option(socket.AF_INET if ":" not in host else socket.AF_INET6)
+        expected = option[3] if option else "unsupported"
+        assert ua.dont_fragment == expected
+        # The bound event must carry it, otherwise a weak PMTU verdict is not traceable to the kernel.
+        assert a.log.query()[-1]["fields"]["dont_fragment"] == expected
+    finally:
+        await ua.close()
+
+
+async def test_udp_mtu_evidence_reports_the_dont_fragment_backend(peers):
+    a, b = peers
+    host = "127.0.0.1"
+    sa, sb = specs("udp", host)
+    ua, ub = UdpAttempt(a, sa, host), UdpAttempt(b, sb, host)
+    try:
+        await asyncio.gather(ua.open(), ub.open())
+        ua.set_candidates(ub.candidates)
+        ub.set_candidates(ua.candidates)
+        await asyncio.gather(ua.punch(2), ub.punch(2))
+        await ua.mtu()
+        event = [r for r in a.log.query() if r["event"] == "mtu.directional"][-1]
+        assert event["fields"]["dont_fragment"] == ua.dont_fragment
+        assert ua.dont_fragment == dont_fragment_option(socket.AF_INET)[3]
+    finally:
+        await asyncio.gather(ua.close(), ub.close())
+
+
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1"])

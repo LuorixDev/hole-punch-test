@@ -1,11 +1,14 @@
 import asyncio
 import copy
+import statistics
+import sys
+import threading
 import time
 from types import SimpleNamespace
 
 import pytest
 
-from p2plab.performance import BenchProbe, bottleneck_assessment
+from p2plab.performance import BenchProbe, bottleneck_assessment, darwin_udp_errors, udp_errors
 from p2plab.quic_timer import QuicTimer
 
 
@@ -120,6 +123,61 @@ async def test_timerfd_settime_failure_falls_back_and_keeps_deadline():
         timer.close()
 
 
+async def _median_lateness(precise, delay=.01, samples=15):
+    """Median (observed - requested) wakeup delay, re-arming one timer to exercise the hot path."""
+    loop = asyncio.get_running_loop()
+    state = {"fut": None, "errors": []}
+
+    def callback(deadline):
+        state["errors"].append(time.monotonic() - deadline)
+        fut = state["fut"]
+        if fut is not None and not fut.done():
+            fut.set_result(None)
+
+    timer = QuicTimer(callback, precise=precise)
+    try:
+        for _ in range(samples):
+            state["fut"] = loop.create_future()
+            timer.arm(time.monotonic() + delay)
+            await asyncio.wait_for(state["fut"], 1)
+        return statistics.median(state["errors"]), timer.backend
+    finally:
+        timer.close()
+
+
+async def test_imprecise_timer_never_starts_a_poller_thread():
+    before = threading.active_count()
+    timer = QuicTimer(lambda deadline: None, precise=False)
+    try:
+        assert timer.backend == "asyncio" and threading.active_count() == before
+    finally:
+        timer.close()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires an actual macOS host")
+async def test_darwin_precise_timer_uses_kqueue_and_beats_timer_coalescing():
+    kqueue_lateness, kqueue_backend = await _median_lateness(precise=True)
+    asyncio_lateness, asyncio_backend = await _median_lateness(precise=False)
+    assert kqueue_backend == "darwin-kqueue"
+    assert asyncio_backend == "asyncio"
+    # macOS coalesces kevent select() timeouts to roughly a millisecond, so the plain asyncio
+    # fallback wakes ~1000us late where a NOTE_CRITICAL kernel timer wakes ~30us late.
+    assert kqueue_lateness < asyncio_lateness / 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires an actual macOS host")
+async def test_darwin_timer_close_stops_its_poller_thread():
+    before = threading.active_count()
+    timer = QuicTimer(lambda deadline: None, precise=True)
+    assert timer.backend == "darwin-kqueue" and threading.active_count() == before + 1
+    timer.close()
+    for _ in range(200):
+        if threading.active_count() == before:
+            break
+        await asyncio.sleep(.01)
+    assert threading.active_count() == before
+
+
 @pytest.mark.parametrize("mutation", [
     lambda r: r["sender_runtime"].update(samples="bad"),
     lambda r: r["receiver_runtime"].update(udp_buffer_errors="bad"),
@@ -129,3 +187,80 @@ def test_malformed_optional_peer_diagnostics_do_not_crash_classification(mutatio
     result = measurement()
     mutation(result)
     assert bottleneck_assessment(result)["state"] == "unknown"
+
+
+# Captured from `netstat -s -p udp` on macOS 26 (arm64). The two-tab rows are sub-items of the
+# row above them, so only the named counters must be picked up.
+NETSTAT_UDP = """
+udp:
+\t5431061 datagrams received
+\t\t0 with incomplete header
+\t\t0 with bad data length field
+\t\t0 with bad checksum
+\t\t615126 with no checksum
+\t\t2838 checksummed in software
+\t\t\t323 datagrams (61655 bytes) over IPv4
+\t\t\t2515 datagrams (629219 bytes) over IPv6
+\t\t49147 dropped due to no socket
+\t\t85421 broadcast/multicast datagrams undelivered
+\t\t19 IPv6 multicast datagrams undelivered
+\t\t0 time multicast source filter matched
+\t\t200299 dropped due to full socket buffers
+\t\t0 not for hashed pcb
+\t\t5096194 delivered
+\t3272488 datagrams output
+\t\t1122203 checksummed in software
+\t\t\t1064401 datagrams (112880051 bytes) over IPv4
+\t\t\t57802 datagrams (18799003 bytes) over IPv6
+\t51 open UDP sockets
+"""
+
+DARWIN_UDP_DROPS = {
+    "with_bad_checksum": 0,
+    "dropped_due_to_no_socket": 49147,
+    "broadcast_multicast_undelivered": 85421,
+    "dropped_due_to_full_socket_buffers": 200299,
+}
+
+
+def test_darwin_udp_errors_reads_only_the_named_counters():
+    assert darwin_udp_errors(NETSTAT_UDP) == DARWIN_UDP_DROPS
+
+
+def test_udp_errors_reads_netstat_on_darwin(monkeypatch):
+    monkeypatch.setattr("p2plab.performance.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("p2plab.performance.darwin_netstat_udp", lambda: NETSTAT_UDP)
+    assert udp_errors() == DARWIN_UDP_DROPS
+
+
+def test_udp_errors_is_empty_when_netstat_cannot_be_read(monkeypatch):
+    """Missing telemetry must stay absent rather than become zeros people mistake for evidence."""
+    monkeypatch.setattr("p2plab.performance.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("p2plab.performance.darwin_netstat_udp", lambda: "")
+    assert udp_errors() == {}
+
+
+def test_udp_errors_still_reads_proc_on_linux(monkeypatch):
+    files = {
+        "/proc/net/snmp": (
+            "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors\n"
+            "Udp: 100 0 0 100 7 9 0\n"
+        ),
+        "/proc/net/snmp6": "Udp6RcvbufErrors 3\nUdp6SndbufErrors 4\n",
+    }
+
+    class FakePath:
+        def __init__(self, name):
+            self.name = name
+
+        def read_text(self):
+            return files[self.name]
+
+    monkeypatch.setattr("p2plab.performance.platform.system", lambda: "Linux")
+    monkeypatch.setattr("p2plab.performance.Path", FakePath)
+    assert udp_errors() == {
+        "RcvbufErrors": 7,
+        "SndbufErrors": 9,
+        "Udp6RcvbufErrors": 3,
+        "Udp6SndbufErrors": 4,
+    }

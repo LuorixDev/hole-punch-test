@@ -6,6 +6,7 @@ import collections
 import secrets
 import time
 import uuid
+from typing import Callable
 
 from .common import BENCH_CHUNK, MAX_TEXT, Identity
 from .performance import BenchProbe
@@ -52,6 +53,7 @@ class Path:
         self.latest_speed = {}
         self.remote_capabilities = set()
         self.pings = {}
+        self.transport_diagnostics: Callable[[], dict] | None = None
         self.benches = {}
         self.receive_benches = {}
         self.lock = asyncio.Lock()

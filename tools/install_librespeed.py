@@ -14,6 +14,8 @@ HASHES = {
     ("Linux", "aarch64"): ("linux_arm64", "75e51a2494d03cb35a92ddbf862b40571a25a1526f3cf3dfa8b1d5d7bc622bd9"),
     ("Windows", "AMD64"): ("windows_amd64", "324f9bc16f3b9bb6bfa6af89bad1e3e5183ae8c91464b3cb3fc2db8df1d6b503"),
     ("Windows", "x86_64"): ("windows_amd64", "324f9bc16f3b9bb6bfa6af89bad1e3e5183ae8c91464b3cb3fc2db8df1d6b503"),
+    ("Darwin", "arm64"): ("darwin_arm64", "2c19acf8cf751341ca4edcf6ce5ca460c1091646e68fcea885d941ce3542af7d"),
+    ("Darwin", "x86_64"): ("darwin_amd64", "1daa058118e8fc788d985734110f7a51f6d8d37c641be4782d0276cd21458eb8"),
 }
 
 
@@ -41,13 +43,19 @@ def install_archive(raw, directory, *, windows=False):
     return directory / binary
 
 
+def archive_url(asset):
+    """Release URL of `asset`; only the Windows build is published as a zip, not a tarball."""
+    base = f"https://github.com/librespeed/speedtest-cli/releases/download/v{VERSION}/"
+    suffix = "zip" if asset.startswith("windows_") else "tar.gz"
+    return base + f"librespeed-cli_{VERSION}_{asset}.{suffix}"
+
+
 def main():
     asset, digest = HASHES.get((platform.system(), platform.machine()), (None, None))
     if not asset:
         raise SystemExit("Install librespeed-cli using your platform package manager instead")
-    base = f"https://github.com/librespeed/speedtest-cli/releases/download/v{VERSION}/"
     windows = asset.startswith("windows_")
-    url = base + f"librespeed-cli_{VERSION}_{asset}.{'zip' if windows else 'tar.gz'}"
+    url = archive_url(asset)
     with urllib.request.urlopen(url, timeout=30) as response:
         raw = response.read(16 * 1024 * 1024 + 1)
     if len(raw) > 16 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:

@@ -116,16 +116,30 @@ def run(*args):
     subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True)
 
 
+def release_target(system, machine):
+    """Release target name for a build host, or None when no artifact is shipped for it.
+
+    The mapping is explicit rather than "anything that is not Windows" because a mislabelled
+    artifact is worse than none: the publish job asserts on these exact names.
+    """
+    system, machine = system.lower(), machine.lower()
+    if machine in ("amd64", "x86_64"):
+        return {"win32": "windows-x64", "linux": "linux-x64", "darwin": "macos-x64"}.get(system)
+    if machine == "arm64" and system == "darwin":
+        return "macos-arm64"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-speedtest-install", action="store_true")
     args = parser.parse_args()
-    if sys.version_info[:2] != (3, 12) or platform.machine().lower() not in ("amd64", "x86_64"):
-        raise SystemExit("Release builds require native x64 Python 3.12")
-    target = {"win32": "windows-x64", "linux": "linux-x64"}.get(sys.platform)
+    if sys.version_info[:2] != (3, 12):
+        raise SystemExit("Release builds require Python 3.12")
+    target = release_target(sys.platform, platform.machine())
     if not target:
-        raise SystemExit("Release builds support Windows x64 and Linux x64")
+        raise SystemExit("Release builds support Windows x64, Linux x64 and macOS arm64/x64")
     if not args.skip_speedtest_install:
         run(sys.executable, ROOT / "tools/install_librespeed.py")
     output = ROOT / "dist/release"
