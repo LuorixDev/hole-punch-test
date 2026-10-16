@@ -2,6 +2,9 @@
 
 import hashlib
 import io
+import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,9 +19,52 @@ SHA256 = "55ee4553f2e324be88cd95a5335095ea1658512157370d90c21580d9606b59ac"
 URL = f"https://codeload.github.com/libnice/libnice/tar.gz/{REVISION}"
 
 
+def bundle_windows_dependencies(prefix):
+    """Copy only the transitive PE imports, never depend on the build machine PATH."""
+    compiler = Path(shutil.which("gcc") or "")
+    if not compiler.is_file():
+        raise RuntimeError("WINDOWS_NATIVE_BUILD_REQUIRES_MSYS2_UCRT64")
+    directory = compiler.resolve().parent
+    destination = prefix / "bin"
+    pending = list(destination.glob("*.dll"))
+    seen = set()
+    system = Path(os.environ["SystemRoot"]) / "System32"
+    packages = set()
+    while pending:
+        path = pending.pop()
+        if path.name.lower() in seen:
+            continue
+        seen.add(path.name.lower())
+        imports = subprocess.run(["objdump", "-p", str(path)], capture_output=True,
+                                 text=True, check=True, timeout=30).stdout
+        for name in re.findall(r"DLL Name:\s*(\S+)", imports):
+            if name.lower().startswith(("api-ms-", "ext-ms-")) or (system / name).is_file():
+                continue
+            source = directory / name
+            target = destination / name
+            if not target.is_file():
+                if not source.is_file():
+                    raise RuntimeError("MISSING_NATIVE_DLL_DEPENDENCY:" + name)
+                shutil.copy2(source, target)
+                package = subprocess.run(["pacman", "-Qqo", str(source)], check=True,
+                                         text=True, capture_output=True, timeout=30).stdout.strip()
+                packages.add(package)
+            pending.append(target)
+    licenses = prefix / "dependency-licenses"
+    records = []
+    for package in sorted(packages):
+        info = subprocess.run(["pacman", "-Qi", package], check=True, text=True,
+                              capture_output=True, timeout=30).stdout
+        records.append({"package": package, "metadata": info})
+    license_root = directory.parent / "share/licenses"
+    if license_root.is_dir():
+        shutil.copytree(license_root, licenses, dirs_exist_ok=True)
+    (prefix / "windows-dependencies.json").write_text(json.dumps(records, indent=2) + "\n")
+
+
 def main():
-    if sys.platform != "linux":
-        raise SystemExit("This libnice build recipe requires Linux")
+    if sys.platform not in ("linux", "win32"):
+        raise SystemExit("This libnice build recipe requires Linux or Windows UCRT64")
     root = Path(__file__).resolve().parents[1]
     prefix = root / ".tools/libnice"
     prefix.mkdir(parents=True, exist_ok=True)
@@ -41,6 +87,8 @@ def main():
         subprocess.run(["meson", "install", "-C", str(build)], check=True, timeout=60)
         for name in ("COPYING", "COPYING.LGPL", "COPYING.MPL"):
             shutil.copyfile(source / name, prefix / name)
+    if sys.platform == "win32":
+        bundle_windows_dependencies(prefix)
     print("Installed tested libnice", VERSION, "in", prefix)
 
 

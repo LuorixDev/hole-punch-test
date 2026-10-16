@@ -93,7 +93,9 @@ Linux 可在 Python 3.12 x64 环境中安装 `packaging/build-requirements.txt` 
 
 Windows 用只读 PowerShell JSON 获取网卡地址、DAD 状态、寿命和默认路由。随机 IPv6 后缀不足以确认临时/稳定隐私地址，界面标为“类型未确认”，但已确认可用状态的地址仍参与实验；未确认状态、DAD 未完成、重复、过期、网卡关闭或 `SkipAsSource` 地址不参与建链。PowerShell 不可用时保留降级证据，不猜测 IPv6 状态。
 
-原生 libnice、libutp 和 Linux 原始报文实验不是此 Windows 包的已验收能力；缺少原生库或系统能力会显示不适用并保留原因，不能宣称 Windows 与 Linux 全方案等价。防火墙放行与真实 IPv6 入站仍需在朋友的 Windows 网络上确认；程序不会自动关闭系统防火墙。
+Windows Actions 现在从固定提交构建 libnice/libutp，收集传递 DLL 依赖并内嵌到单文件客户端。构建会强制运行原生后端 IPv4/IPv6 聊天、文件校验和双向测速，再在打包后的 exe 中重复验证，结果写入 `build-record-windows-x64.json` 的 `native_smoke`。这仅验证本机回环，不代表广域网千兆性能或跨运营商连通率。Linux 原始报文实验、SO_REUSEPORT 同端口竞争和 timerfd 不能靠 Windows 编译获得；缺失能力仍明确记录不适用。防火墙放行与真实 IPv6 入站仍需在朋友的 Windows 网络上确认；程序不会自动关闭系统防火墙。
+
+Windows 手动原生构建需 MSYS2 UCRT64，安装 `mingw-w64-ucrt-x86_64-{gcc,meson,ninja,pkgconf,glib2,gnutls}` 后运行 `tools/build_windows.ps1`；非默认安装目录使用 `-Msys2Root` 指定。源码客户端也会优先加载这些构建出的 DLL，不要求修改系统 PATH。
 
 聊天侧栏用 `#001 IPv6 QUIC打洞` 等编号与昵称关联矩阵、链路和日志；原始尝试 ID 仍保留在完整日志/详情。侧栏保留最近 1000 条事件的原始文本，在隐藏期间不按零宽度渲染，切回或调整窗口宽度后重新排版；超出该范围的事件仍可从持久完整日志查询。聊天历史不会因切换页签而清空。
 

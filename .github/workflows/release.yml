@@ -27,10 +27,11 @@ jobs:
           - os: windows-2022
             target: windows-x64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
+      P2PLAB_REQUIRE_NATIVE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -53,6 +54,25 @@ jobs:
           sudo apt-get install --no-install-recommends -y iproute2 socat libnice10 make g++ meson ninja-build libglib2.0-dev libgnutls28-dev pkg-config
           python tools/install_libnice.py
           python tools/install_libutp.py
+      - name: Windows native compiler and dependencies
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-gnutls
+      - name: Build Windows native experiment libraries from pinned sources
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          python tools/install_libnice.py
+          python tools/install_libutp.py
       - name: Lint
         run: python -m ruff check p2plab tests tools
       - name: Linux full regression suite
@@ -60,7 +80,7 @@ jobs:
         run: python -m pytest -q --junitxml=build/source-tests.xml
       - name: Windows startup, native network and UI regression suite
         if: runner.os == 'Windows'
-        run: python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_public_ip.py tests/test_tui.py tests/test_speed.py tests/test_transports.py tests/test_server.py tests/test_server_ports.py tests/test_reconnect.py tests/test_status_wan.py tests/test_inbound.py tests/test_release.py --junitxml=build/source-tests.xml
+        run: python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_public_ip.py tests/test_tui.py tests/test_speed.py tests/test_transports.py tests/test_server.py tests/test_server_ports.py tests/test_reconnect.py tests/test_status_wan.py tests/test_inbound.py tests/test_release.py tests/test_cold_paths.py tests/test_native.py tests/test_research.py -k "not raw_namespace and not same_port_listener" --junitxml=build/source-tests.xml
       - name: Build and verify real single-file programs
         run: python tools/build_release.py
       - name: Upload release assets
@@ -78,6 +98,7 @@ jobs:
           path: |
             build/source-tests.xml
             build/frozen-smoke-*/report.json
+            build/frozen-smoke-*/native-report.json
             build/frozen-smoke-*/*.log.gz
           if-no-files-found: warn
           retention-days: 14

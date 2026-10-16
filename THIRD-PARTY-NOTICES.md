@@ -31,13 +31,17 @@ with an independently installed program; neither uses an application relay.
   Download: https://github.com/librespeed/speedtest-cli/archive/refs/tags/v1.0.14.tar.gz.
   Build with the upstream Go build recipe and its pinned `go.mod`/`go.sum`.
   The executable is unmodified, checksum-verified by `tools/install_librespeed.py`.
-- Optional Linux libutp: MIT, exact revision and source in
+- Linux/Windows libutp: MIT, exact revision and source in
   `tools/install_libutp.py`; its original license is bundled when present.
-- Optional Linux libnice 0.1.22: exact revision/checksum/build in
+- Linux/Windows libnice 0.1.22: exact revision/checksum/build in
   `tools/install_libnice.py`; original LGPL/MPL notices and source archive are
   bundled. Source: https://github.com/libnice/libnice/tree/0.1.22.
   GLib uses Ubuntu 22.04 packages; original license/source information is included
   with the binaries. See https://launchpad.net/ubuntu/+source/glib2.0.
+  Windows uses MSYS2 UCRT64 dependencies. Their exact package metadata and
+  original license texts are in `windows-dependencies.json` and
+  `dependency-licenses` inside the extracted bundle. Build recipes and sources:
+  https://github.com/msys2/MINGW-packages and https://mirror.msys2.org/mingw/sources/.
 
 For source distributions of a Python dependency, use its exact version's PyPI
 source distribution and the recorded upstream URLs, not a moving default branch.

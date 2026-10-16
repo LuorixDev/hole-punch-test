@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import ctypes as C
-import ctypes.util
 import ipaddress
 import socket
 from collections import deque
-from pathlib import Path
 
 from .encrypted_stream import EncryptedStream
+from .native_loader import load_library
 from .rtc import filter_sdp
 from .stun import resolve_observer
 
@@ -22,11 +21,9 @@ WRITABLE = C.CFUNCTYPE(None, PTR, UINT, UINT, PTR)
 class Libraries:
     def __init__(self):
         try:
-            bundled = Path(__file__).resolve().parents[1] / ".tools/libnice/lib/libnice.so.10"
-            self.nice = C.CDLL(str(bundled) if bundled.is_file() else
-                              ctypes.util.find_library("nice") or "libnice.so.10")
-            self.glib = C.CDLL(ctypes.util.find_library("glib-2.0") or "libglib-2.0.so.0")
-            self.obj = C.CDLL(ctypes.util.find_library("gobject-2.0") or "libgobject-2.0.so.0")
+            self.nice = load_library("nice")
+            self.glib = load_library("glib-2.0")
+            self.obj = load_library("gobject-2.0")
             for lib, name, result, args in (
                 (self.glib, "g_main_context_new", PTR, []),
                 (self.glib, "g_main_context_iteration", INT, [PTR, INT]),

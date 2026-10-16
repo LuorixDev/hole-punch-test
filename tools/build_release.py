@@ -59,6 +59,9 @@ def collect_licenses(destination):
             shutil.copyfile(source, destination / source.name)
     for source in (ROOT / ".tools/libnice").glob("COPYING*"):
         shutil.copyfile(source, destination / ("libnice-" + source.name))
+    native_licenses = ROOT / ".tools/libnice/dependency-licenses"
+    if native_licenses.is_dir():
+        shutil.copytree(native_licenses, destination / "native-windows", dirs_exist_ok=True)
     if sys.platform == "linux":
         for name in ("libnice10", "libglib2.0-0", "libglib2.0-0t64"):
             copyright = Path("/usr/share/doc") / name / "copyright"
@@ -144,6 +147,12 @@ def main():
             raise RuntimeError("One-file bundle is missing redistribution notices")
         if role == "Client" and not any("librespeed-cli" in name for name in archive.toc):
             raise RuntimeError("Client bundle is missing LibreSpeed")
+        if role == "Client":
+            required = ("libutp.dll", "libnice-10.dll", "libglib-2.0-0.dll", "libgobject-2.0-0.dll") if extension else (
+                "libutp.so", "libnice.so.10")
+            for name in required:
+                if not any(Path(entry.replace("\\", "/")).name == name for entry in archive.toc):
+                    raise RuntimeError("Client bundle is missing native library: " + name)
         run(source, "--help")
         destination = output / f"P2PLab-{role}-{target}{extension}"
         shutil.copy2(source, destination)
@@ -156,11 +165,14 @@ def main():
     smoke = Path(tempfile.mkdtemp(prefix=f"frozen-smoke-{target}-", dir=ROOT / "build"))
     run(sys.executable, ROOT / "tools/smoke_frozen.py", "--client", binaries["client"],
         "--server", binaries["server"], "--output", smoke)
+    native_report = smoke / "native-report.json"
+    run(binaries["client"], "--native-self-test", native_report)
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
                               capture_output=True, check=False).stdout.strip() or "uncommitted-local-build"
     record = {"git_revision": revision, "platform": platform.platform(), "python": sys.version,
               "target": target, "format": "pyinstaller-onefile", "dependencies": inventory,
               "native_sources": native_sources,
+              "native_smoke": json.loads(native_report.read_text(encoding="utf-8")),
               "smoke": json.loads((smoke / "report.json").read_text()),
               "binaries": {role: {"name": path.name, "sha256": sha256(path), "bytes": path.stat().st_size}
                            for role, path in binaries.items()}}

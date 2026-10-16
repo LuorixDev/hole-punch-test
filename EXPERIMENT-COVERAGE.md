@@ -30,6 +30,7 @@
 - 先完成无网关改动的基线，再执行全部主动网关申请。已成功的出站连接可能改变后续同拓扑状态，真实测量须结合时间顺序解释。
 - `raw_probes = false` 默认记录未启用。启用后没有 `CAP_NET_RAW` 仍记录权限不可用，客户端不会修改宿主机权限或防火墙。
 - 原生 ICE 需 libnice；uTP 运行 `tools/install_libutp.py`，或设 `P2PLAB_LIBUTP`。构建来源、固定提交和产物 SHA-256 记录在 `data/native/libutp-build.json`。
+- Windows Actions 使用 UCRT64 编译同一固定源码，打包 DLL 依赖；源码及冻结客户端验收均覆盖 IPv4/IPv6 的 uTP、ICE-TCP、原生 ICE 聊天/文件/双向测速。结果属于回环功能验证，不是高 RTT 广域网吞吐保证。
 - 收集/协调和日志通过 IPv4 服务器；聊天、附件、ping、P2P 测速始终直达对端，不经该服务器转发。
 - 网关租约、ICMP 回包、签名 UDP 探针、可靠通道和应用 pong 是不同证据。没有辅助机制证据的直连，不标为该机制已生效。
 - 原生流和 Python QUIC 的性能各不相同。既有千兆实验不代表新增 uTP/PseudoTCP 也达到同样速度；需单独实测。

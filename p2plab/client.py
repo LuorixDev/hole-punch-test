@@ -418,9 +418,6 @@ class Client:
             await self.park_idle_paths()
             return path
         except BaseException as exc:
-            future = self.reopen_futures.get(data["request"])
-            if future and not future.done():
-                future.set_exception(ConnectionError("REOPEN_FAILED"))
             for candidate in tuple(self.paths):
                 if candidate.attempt == data["attempt"]:
                     if candidate is self.active_path:
@@ -436,20 +433,27 @@ class Client:
 
     async def coordinate_reopen(self, source, request, mode):
         try:
-            async with self.reopen_lock:
+            async with self.reopen_lock, asyncio.timeout(140):
                 _, spec = self.reopen_source(source)
-                data = {"kind": "path_reopen", "attempt": secrets.token_hex(6) + "-wake-" + spec["method"],
-                        "source": source, "request": request, "mode": mode}
-                # Register the receiver before publishing any candidate-producing work.
-                task = self.start_reopen(data)
-                try:
-                    await self.signal(data)
-                except BaseException:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                    raise
-                self.reopen_managers[data["attempt"]].reopen_start.set()
-                await task
+                limit = 2 if spec["method"] in ("tcp-simopen", "tcp-sync", "tcp-ttl") else 1
+                for retry in range(limit):
+                    data = {"kind": "path_reopen", "attempt": secrets.token_hex(6) + "-wake-" + spec["method"],
+                            "source": source, "request": request, "mode": mode}
+                    # Fresh sockets and bilateral results for each retry; preserve the original method.
+                    task = self.start_reopen(data)
+                    try:
+                        await self.signal(data)
+                        self.reopen_managers[data["attempt"]].reopen_start.set()
+                        await task
+                        return
+                    except BaseException as exc:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        if not isinstance(exc, ConnectionError) or retry + 1 == limit:
+                            raise
+                        self.log.event("path.reopen_retry", source=source, attempt=data["attempt"],
+                                       retry=retry + 1, limit=limit, reason=str(exc))
+                        await asyncio.sleep(0.2)
         except Exception as exc:
             future = self.reopen_futures.get(request)
             if future and not future.done():
@@ -1921,6 +1925,7 @@ class Client:
 def main():
     configure_console_encoding()
     parser = argparse.ArgumentParser(description="Two-person terminal P2P connectivity lab")
+    parser.add_argument("--native-self-test", metavar="REPORT", help=argparse.SUPPRESS)
     parser.add_argument("--config", default="client.local.toml")
     parser.add_argument("--server")
     parser.add_argument("--room")
@@ -1937,6 +1942,11 @@ def main():
     interface.add_argument("--tui", action="store_true", help="Use the Chinese full-screen interface")
     interface.add_argument("--plain", action="store_true", help="Use line-oriented terminal output")
     args = parser.parse_args()
+    if args.native_self_test:
+        from .native_check import check_native
+
+        asyncio.run(check_native(args.native_self_test))
+        return
     config = {}
     path = FilePath(args.config)
     if args.config == "client.local.toml" and getattr(sys, "frozen", False):

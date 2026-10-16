@@ -9,6 +9,7 @@ from p2plab.experiments import Experiments, build_plan, prediction_candidates
 from p2plab.gateway import natpmp_request, parse_natpmp, parse_pcp, pcp_address, pcp_request
 from p2plab.nat64 import Nat64Attempt, discover_prefixes, synthesize
 from p2plab.native_ice import NativeIceAttempt
+from p2plab.native_loader import load_library
 from p2plab.native_utp import UtpAttempt, library_path
 from p2plab.raw_probes import checksum, icmp_echo, icmp_error, ipv4_packet, synack
 from p2plab.research import SocketPoolAttempt, Synchronizer
@@ -91,7 +92,11 @@ async def test_pool_winner_agreement_preserves_real_socket_quic(peers, method, t
 @pytest.mark.parametrize("method", ["ice-tcp", "ice-native"])
 @pytest.mark.parametrize("profile", ["4", "6", "dual"])
 async def test_libnice_real_no_relay_selected_transport_tls_chat_file(peers, method, profile, tmp_path):
-    if not ctypes.util.find_library("nice"):
+    try:
+        load_library("nice")
+    except OSError:
+        if os.environ.get("P2PLAB_REQUIRE_NATIVE"):
+            raise
         pytest.skip("libnice is not installed")
     a, b = peers
     sa, sb = specs(method, "127.0.0.1", profile=profile)
@@ -169,6 +174,8 @@ async def test_libutp_real_encrypted_chat_file_and_bidirectional_speed(peers, ho
     from pathlib import Path
 
     if not Path(library_path()).exists() and not ctypes.util.find_library("utp"):
+        if os.environ.get("P2PLAB_REQUIRE_NATIVE"):
+            pytest.fail("required libutp unavailable")
         pytest.skip("optional libutp unavailable")
     a, b = peers
     sa, sb = specs("utp", host)

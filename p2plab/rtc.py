@@ -8,7 +8,10 @@ import sys
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
 from .common import encode_frame, extract_frames, sockaddr
+from .ice_compat import install_retry_guard
 from .session import Path
+
+install_retry_guard()
 
 
 def filter_sdp(sdp, profile, *, allow_loopback=False):

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import ctypes as C
-import ctypes.util
 import ipaddress
-import os
 import socket
 import struct
 from collections import deque
-from pathlib import Path
 
+from .common import sockaddr
 from .encrypted_stream import EncryptedStream
+from .native_loader import library_path as resolve_library
+from .native_loader import load_library
 from .udp import MAGIC, UdpAttempt
 
 
@@ -28,8 +28,7 @@ CALLBACK = C.CFUNCTYPE(C.c_uint64, C.POINTER(Arguments))
 
 
 def library_path():
-    return os.environ.get("P2PLAB_LIBUTP") or ctypes.util.find_library("utp") or str(
-        Path(__file__).resolve().parents[1] / "data/native/libutp.so")
+    return resolve_library("utp")
 
 
 def address_buffer(target):
@@ -46,7 +45,7 @@ class UtpAttempt(UdpAttempt):
     def __init__(self, owner, spec, host):
         super().__init__(owner, spec, host)
         try:
-            self.lib = C.CDLL(library_path())
+            self.lib = load_library("utp")
             for name, result, args in (
                 ("utp_init", C.c_void_p, [C.c_int]),
                 ("utp_destroy", None, [C.c_void_p]),
@@ -132,7 +131,7 @@ class UtpAttempt(UdpAttempt):
                 address = socket.inet_ntop(family, raw[8:24] if family == socket.AF_INET6 else raw[4:8])
                 target = (address, struct.unpack_from("!H", raw, 2)[0])
                 if target == self.remote:
-                    self.transport.sendto(C.string_at(arg.buffer, arg.length), target)
+                    self.transport.sendto(C.string_at(arg.buffer, arg.length), sockaddr(target))
         except Exception as exc:
             self.fail(type(exc).__name__ + ":" + str(exc))
         return 0

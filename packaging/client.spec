@@ -17,8 +17,8 @@ for name in ("LICENSE", "THIRD-PARTY-NOTICES.md", "client.example.toml"):
 if (root / ".tools/licenses").is_dir():
     datas.append((str(root / ".tools/licenses"), "third-party-licenses"))
 
-utp = root / "data/native/libutp.so"
-if sys.platform == "linux" and utp.is_file():
+utp = root / "data/native" / ("libutp.dll" if sys.platform == "win32" else "libutp.so")
+if utp.is_file():
     binaries.append((str(utp), "data/native"))
     datas.append((str(root / "data/native/libutp.LICENSE"), "data/native"))
 
@@ -27,6 +27,14 @@ if sys.platform == "linux" and nice.is_file():
     binaries.append((str(nice), ".tools/libnice/lib"))
     for name in ("COPYING", "COPYING.LGPL", "COPYING.MPL"):
         datas.append((str(root / ".tools/libnice" / name), ".tools/libnice"))
+
+if sys.platform == "win32":
+    for dll in (root / ".tools/libnice/bin").glob("*.dll"):
+        binaries.append((str(dll), ".tools/libnice/bin"))
+    for name in ("COPYING", "COPYING.LGPL", "COPYING.MPL", "windows-dependencies.json", "dependency-licenses"):
+        source = root / ".tools/libnice" / name
+        if source.exists():
+            datas.append((str(source), ".tools/libnice"))
 
 speedtest = root / ".tools" / ("librespeed-cli.exe" if sys.platform == "win32" else "librespeed-cli")
 if speedtest.is_file():
