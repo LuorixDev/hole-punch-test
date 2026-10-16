@@ -85,9 +85,9 @@ HTTP 查询得到的是该 HTTP 请求的出口地址，不是 UDP NAT 映射。
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/build_windows.ps1
 ```
 
-脚本安装锁定依赖、校验并安装固定版本 Windows LibreSpeed CLI、运行 Windows 地址读取/启动测试，再构建客户端和服务端单文件程序并实测聊天/ping/测速/日志。成功后生成 `dist/release/P2PLab-Client-windows-x64.exe` 和 `P2PLab-Server-windows-x64.exe`；不需要另装 Python。保留控制台是 TUI 的要求，不使用隐藏控制台的 `--windowed` 模式。脚本中的进程级执行策略只用于运行该构建脚本，不更改系统级设置。
+脚本安装锁定依赖，使用 MSYS2 UCRT64 构建原生库，运行 Windows 地址读取/启动及原生传输测试，再校验安装固定版本 LibreSpeed CLI、构建客户端和服务端单文件程序并实测聊天/ping/测速/日志。成功后生成 `dist/release/P2PLab-Client-windows-x64.exe` 和 `P2PLab-Server-windows-x64.exe`；使用发布包不需要另装 Python 或 MSYS2。保留控制台是 TUI 的要求，不使用隐藏控制台的 `--windowed` 模式。脚本中的进程级执行策略只用于运行该构建脚本，不更改系统级设置。
 
-Linux 可在 Python 3.12 x64 环境中安装 `packaging/build-requirements.txt` 后运行 `python tools/build_release.py`。脚本使用 `packaging/client.spec`、`packaging/server.spec` 的 one-file 模式，输出 `dist/release`；运行时会解压内嵌依赖到临时目录，因此需要可写、可执行的临时目录。客户端内嵌 LibreSpeed，不要求朋友另装测速程序。源码版本仍支持从 PATH 或配置覆盖测速程序。Linux CI 在项目目录构建固定版本 libnice 0.1.22 与 libutp 并内嵌，不修改系统库；原始报文实验仍需权限，不自动提权。手动构建若需要这些原生后端，可先运行 `tools/install_libnice.py`、`tools/install_libutp.py`；前者需要 Meson、Ninja、GLib/GnuTLS 开发包及 C 编译器。
+Linux 可在 Python 3.12 x64 环境中安装 `packaging/build-requirements.txt` 后运行 `python tools/build_release.py`。脚本使用 `packaging/client.spec`、`packaging/server.spec` 的 one-file 模式，输出 `dist/release`；运行时会解压内嵌依赖到临时目录，因此需要可写、可执行的临时目录。客户端内嵌 LibreSpeed，不要求朋友另装测速程序。源码版本仍支持从 PATH 或配置覆盖测速程序。Linux CI 在项目目录构建固定版本 libnice 0.1.22 与 libutp 并内嵌，不修改系统库；原始报文实验仍需权限，不自动提权。手动构建发布包必须先运行 `tools/install_libnice.py`、`tools/install_libutp.py`；前者需要 Meson、Ninja、GLib/GnuTLS 开发包及 C 编译器。发布脚本会拒绝缺少原生库的客户端包；直接运行源码时，缺失的可选后端仍显示不适用。
 
 冻结版默认将身份、离线队列和压缩日志保存在 `%LOCALAPPDATA%\P2PLab\client`，不写到 exe 的依赖目录；高级配置可放到 exe 同目录的 `client.local.toml`。同机多实例仍须指定不同 `--data`，设备目录锁在 Windows 也生效。
 
