@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import struct
+import sys
 
 from .common import new_socket, sockaddr
 from .tcp import TcpAttempt
@@ -25,6 +27,10 @@ class StuntAttempt(TcpAttempt):
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            # A short route may complete the probe handshake. Reset this disposable
+            # connection so TIME_WAIT does not prevent reusing its exact tuple.
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                 struct.pack("HH" if sys.platform == "win32" else "ii", 1, 0))
             self.sock.close()
         self.sock = new_socket(self.host, socket.SOCK_STREAM, self.candidates[0][1])
         if not self.spec["initiator"]:

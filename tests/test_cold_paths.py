@@ -1,5 +1,7 @@
 import asyncio
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -8,6 +10,70 @@ from p2plab.experiments import Experiments
 from p2plab.tui import P2PApp
 from tests.test_reconnect import wait_for
 from tests.test_server import cleanup_hub, start_hub
+
+
+async def test_failed_reopen_attempt_keeps_request_pending_until_coordinator_decides(peers):
+    owner, _ = peers
+    request = "retry-request"
+    future = asyncio.get_running_loop().create_future()
+    owner.reopen_futures[request] = future
+    ready = asyncio.Event()
+    ready.set()
+    manager = SimpleNamespace(
+        reopen_start=ready, plan=[{"attempt": "failed-wake", "leader_initiator": True,
+                                  "a_host": "127.0.0.1", "b_host": "127.0.0.1"}],
+        execute=AsyncMock(return_value={"data_path": False}),
+        remote_done_events={"failed-wake": ready}, remote_done={"failed-wake": {"data_path": False}},
+        close=AsyncMock(),
+    )
+    try:
+        with pytest.raises(ConnectionError, match="REOPEN_FAILED"):
+            await owner.run_reopen(manager, None, {"attempt": "failed-wake", "source": "source",
+                                                  "request": request, "mode": "measure"})
+        assert not future.done()
+        manager.close.assert_awaited_once()
+    finally:
+        owner.reopen_futures.pop(request)
+        future.cancel()
+
+
+@pytest.mark.parametrize("succeed", [False, True])
+async def test_simopen_coordinator_retries_fresh_attempt_and_only_reports_final_failure(peers, monkeypatch, succeed):
+    owner, _ = peers
+    request = "retry-request"
+    future = asyncio.get_running_loop().create_future()
+    owner.reopen_futures[request] = future
+    monkeypatch.setattr(owner, "reopen_source", lambda source: (None, {"method": "tcp-simopen"}))
+    monkeypatch.setattr(owner, "signal", AsyncMock())
+    attempts = []
+
+    def start(data):
+        attempts.append(data)
+        owner.reopen_managers[data["attempt"]] = SimpleNamespace(reopen_start=asyncio.Event())
+
+        async def execute():
+            assert not future.done()
+            if len(attempts) == 2 and succeed:
+                future.set_result("verified-path")
+                return
+            raise ConnectionError("REOPEN_FAILED")
+
+        return asyncio.create_task(execute())
+
+    monkeypatch.setattr(owner, "start_reopen", start)
+    try:
+        await owner.coordinate_reopen("original-source", request, "measure")
+        assert len(attempts) == 2 and attempts[0]["attempt"] != attempts[1]["attempt"]
+        assert all(data["source"] == "original-source" for data in attempts)
+        if succeed:
+            assert future.result() == "verified-path"
+            assert not any(call.args[0]["kind"] == "path_reopen_reject" for call in owner.signal.call_args_list)
+        else:
+            with pytest.raises(ConnectionError, match="REOPEN_FAILED"):
+                await future
+            assert owner.signal.call_args_list[-1].args[0]["kind"] == "path_reopen_reject"
+    finally:
+        owner.reopen_futures.pop(request)
 
 
 async def cold_pair(peers, monkeypatch, method="tcp"):

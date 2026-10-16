@@ -60,12 +60,12 @@ def family(host: str) -> int:
     return socket.AF_INET6 if ":" in host else socket.AF_INET
 
 
-def new_socket(host: str, kind: int, port: int = 0, *, reuse_port=False) -> socket.socket:
+def new_socket(host: str, kind: int, port: int = 0, *, reuse_port=False, reuse_address=False) -> socket.socket:
     sock = socket.socket(family(host), kind)
     try:
         if sock.family == socket.AF_INET6:
             sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-        if kind == socket.SOCK_STREAM:
+        if kind == socket.SOCK_STREAM or reuse_address:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if reuse_port:
             if not hasattr(socket, "SO_REUSEPORT"):

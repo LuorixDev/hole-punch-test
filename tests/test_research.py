@@ -47,6 +47,7 @@ async def test_sync_uses_echo_rtt_and_not_wall_clocks(peers, task_scheduling):
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
 @pytest.mark.parametrize("offset", [0, 0.5])
+@pytest.mark.skipif(not hasattr(socket, "SO_REUSEPORT"), reason="OS has no same-port TCP reuse API")
 async def test_tcp_same_port_listener_connect_tls_chat_file(peers, host, offset, task_scheduling, tmp_path):
     a, b = peers
     sa, sb = specs("tcp-race", host, offset=offset)
@@ -477,7 +478,12 @@ async def test_integrated_mechanism_matrix_continues_after_success(peers, monkey
         for manager in managers:
             assert len(manager.results) == len(manager.plan) >= 20
             results = {row["method"]: row for row in manager.results}
-            assert results["quic"]["data_path"] and results["tcp-race"]["data_path"]
+            assert results["quic"]["data_path"]
+            if hasattr(socket, "SO_REUSEPORT"):
+                assert results["tcp-race"]["data_path"]
+            else:
+                assert results["tcp-race"]["state"] == "not-applicable"
+                assert "SO_REUSEPORT_UNAVAILABLE" in results["tcp-race"]["reason"]
             assert results["lan"]["data_path"] and results["tcp-stunt"]["data_path"]
             assert results["pwnat"]["state"] == results["natblaster"]["state"] == "not-applicable"
             assert results["hairpin"]["data_path"] is False

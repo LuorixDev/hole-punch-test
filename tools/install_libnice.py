@@ -27,6 +27,9 @@ def bundle_windows_dependencies(prefix):
     directory = compiler.resolve().parent
     destination = prefix / "bin"
     pending = list(destination.glob("*.dll"))
+    utp = prefix.parents[1] / "data/native/libutp.dll"
+    if utp.is_file():
+        pending.append(utp)
     seen = set()
     system = Path(os.environ["SystemRoot"]) / "System32"
     packages = set()
@@ -46,7 +49,9 @@ def bundle_windows_dependencies(prefix):
                 if not source.is_file():
                     raise RuntimeError("MISSING_NATIVE_DLL_DEPENDENCY:" + name)
                 shutil.copy2(source, target)
-                package = subprocess.run(["pacman", "-Qqo", str(source)], check=True,
+                posix_path = subprocess.run(["cygpath", "-u", str(source)], check=True, text=True,
+                                            capture_output=True, timeout=30).stdout.strip()
+                package = subprocess.run(["pacman", "-Qqo", posix_path], check=True,
                                          text=True, capture_output=True, timeout=30).stdout.strip()
                 packages.add(package)
             pending.append(target)
@@ -59,7 +64,10 @@ def bundle_windows_dependencies(prefix):
     license_root = directory.parent / "share/licenses"
     if license_root.is_dir():
         shutil.copytree(license_root, licenses, dirs_exist_ok=True)
-    (prefix / "windows-dependencies.json").write_text(json.dumps(records, indent=2) + "\n")
+    inventory = {"packages": records, "dlls": [
+        {"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for path in sorted(destination.glob("*.dll"))]}
+    (prefix / "windows-dependencies.json").write_text(json.dumps(inventory, indent=2) + "\n")
 
 
 def main():

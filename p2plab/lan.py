@@ -5,6 +5,7 @@ import ipaddress
 import json
 import socket
 import struct
+import sys
 
 from cryptography.exceptions import InvalidSignature
 
@@ -43,7 +44,9 @@ class LanAttempt(UdpAttempt):
         port = self.owner.config.get("experiment", {}).get("lan_port", 45555)
         endpoint("127.0.0.1", port)
         ipv6 = ":" in self.host
-        sock = new_socket("::" if ipv6 else "0.0.0.0", socket.SOCK_DGRAM, port, reuse_port=True)
+        # Winsock broadcasts fan out to SO_REUSEADDR listeners; TCP still requires SO_REUSEPORT.
+        sock = new_socket("::" if ipv6 else "0.0.0.0", socket.SOCK_DGRAM, port,
+                          reuse_port=sys.platform != "win32", reuse_address=True)
         try:
             records = self.owner.network.get("address_inventory", self.owner.network.get("addresses", []))
             record = next((r for r in records if r["address"] == self.host), {})
