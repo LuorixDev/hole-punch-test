@@ -1,0 +1,6 @@
+# Workflow YAML carries single tokens that cannot be wrapped -- action SHAs, pytest node ids and
+# package lists -- so this project does not apply yamllint's default 80-column limit to it. Only
+# this rule is configured on purpose: inheriting yamllint's defaults would add cosmetic findings
+# (truthy `on:` keys, document start markers) that this repository has never enforced.
+rules:
+  line-length: disable

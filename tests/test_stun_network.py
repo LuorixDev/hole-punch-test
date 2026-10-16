@@ -7,6 +7,30 @@ from p2plab.common import new_socket
 from p2plab.stun import COOKIE, HEADER, StunServer
 from p2plab.udp import UdpAttempt
 
+SECOND_LOOPBACK = "127.0.0.2"
+
+
+def second_loopback_available():
+    """Report whether this host has a second address inside 127.0.0.0/8.
+
+    Linux makes the whole range local, so 127.0.0.2 is bindable there. macOS and Windows configure
+    only 127.0.0.1, and a changed-source observer cannot be simulated without a second local address.
+    """
+    probe = socket.socket()
+    try:
+        probe.bind((SECOND_LOOPBACK, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+requires_second_loopback = pytest.mark.skipif(
+    not second_loopback_available(),
+    reason=f"{SECOND_LOOPBACK} is not a local address on this platform",
+)
+
 
 class IgnoringChangeServer(StunServer):
     def datagram_received(self, data, addr):
@@ -15,6 +39,7 @@ class IgnoringChangeServer(StunServer):
         super().datagram_received(data, addr)
 
 
+@requires_second_loopback
 async def test_fresh_filtering_socket_avoids_own_mapping_traffic_contamination(peers):
     a, _ = peers
     contacted, traces, hub, transports = {}, [], {}, []
@@ -65,6 +90,7 @@ async def test_fresh_filtering_socket_avoids_own_mapping_traffic_contamination(p
             sock.close()
 
 
+@requires_second_loopback
 @pytest.mark.parametrize("ignore_change", [False, True])
 async def test_four_observers_and_change_source_validation(peers, ignore_change):
     a, _ = peers

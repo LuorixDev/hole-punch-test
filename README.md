@@ -89,7 +89,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/build_windows.ps1
 
 Linux 可在 Python 3.12 x64 环境中安装 `packaging/build-requirements.txt` 后运行 `python tools/build_release.py`。脚本使用 `packaging/client.spec`、`packaging/server.spec` 的 one-file 模式，输出 `dist/release`；运行时会解压内嵌依赖到临时目录，因此需要可写、可执行的临时目录。客户端内嵌 LibreSpeed，不要求朋友另装测速程序。源码版本仍支持从 PATH 或配置覆盖测速程序。Linux CI 在项目目录构建固定版本 libnice 0.1.22 与 libutp 并内嵌，不修改系统库；原始报文实验仍需权限，不自动提权。手动构建发布包必须先运行 `tools/install_libnice.py`、`tools/install_libutp.py`；前者需要 Meson、Ninja、GLib/GnuTLS 开发包及 C 编译器。发布脚本会拒绝缺少原生库的客户端包；直接运行源码时，缺失的可选后端仍显示不适用。
 
-冻结版默认将身份、离线队列和压缩日志保存在 `%LOCALAPPDATA%\P2PLab\client`，不写到 exe 的依赖目录；高级配置可放到 exe 同目录的 `client.local.toml`。同机多实例仍须指定不同 `--data`，设备目录锁在 Windows 也生效。
+冻结版默认将身份、离线队列和压缩日志保存在 `%LOCALAPPDATA%\P2PLab\client`（macOS 为 `~/Library/Application Support/P2PLab/client`，显式设置的 `XDG_DATA_HOME` 仍然优先），不写到 exe 的依赖目录；高级配置可放到 exe 同目录的 `client.local.toml`。同机多实例仍须指定不同 `--data`，设备目录锁在 Windows 也生效。
 
 Windows 用只读 PowerShell JSON 获取网卡地址、DAD 状态、寿命和默认路由。随机 IPv6 后缀不足以确认临时/稳定隐私地址，界面标为“类型未确认”，但已确认可用状态的地址仍参与实验；未确认状态、DAD 未完成、重复、过期、网卡关闭或 `SkipAsSource` 地址不参与建链。PowerShell 不可用时保留降级证据，不猜测 IPv6 状态。
 

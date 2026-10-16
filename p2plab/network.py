@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import time
@@ -104,7 +105,7 @@ async def command(*args, timeout=4.0, limit=65536, env=None):
         raise
 
 
-def system_addresses(*, loopback=False, maximum=4):
+def system_addresses(*, loopback=False, maximum: int | None = 4):
     result = []
     stats = psutil.net_if_stats()
     for interface, addresses in psutil.net_if_addrs().items():
@@ -156,6 +157,11 @@ def remaining_lifetime(record, key, *, now=None):
     return max(0.0, seconds - elapsed)
 
 
+def lifetimes_reported(record):
+    """False when this platform's address inventory cannot report lifetimes (macOS ifconfig)."""
+    return record.get("lifetime_source") != DARWIN_LIFETIME_SOURCE
+
+
 def address_rejection(record, *, minimum=MIN_ADDRESS_LIFETIME, now=None):
     if not record.get("interface_up", True):
         return "INTERFACE_DOWN"
@@ -190,7 +196,7 @@ def address_fingerprint(records):
     )
 
 
-def select_addresses(records, *, maximum=4, inbound=False, loopback=False, routes=()):
+def select_addresses(records, *, maximum: int | None = 4, inbound=False, loopback=False, routes=()):
     now = time.monotonic()
     defaults = {}
     for family, route in routes:
@@ -254,6 +260,8 @@ async def read_address_inventory(*, loopback=False):
     fallback = system_addresses(loopback=loopback, maximum=None)
     if platform.system() == "Windows":
         return await windows_address_inventory(fallback, loopback=loopback)
+    if platform.system() == "Darwin":
+        return await darwin_address_inventory(fallback, loopback=loopback)
     if platform.system() != "Linux":
         return fallback, {"state": "unsupported", "reason": "LINUX_STRUCTURED_ADDRESS_ONLY"}
     observed = time.monotonic()
@@ -349,30 +357,57 @@ async def windows_address_inventory(fallback, *, loopback=False):
             prefix = int(row["prefixlen"])
             if not 0 <= prefix <= ip.max_prefixlen:
                 continue
-            if (ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_loopback != loopback
-                    or ip.version == 4 and ip in ipaddress.ip_network("198.18.0.0/15")):
+            if (
+                ip.is_link_local
+                or ip.is_multicast
+                or ip.is_unspecified
+                or ip.is_loopback != loopback
+                or ip.version == 4
+                and ip in ipaddress.ip_network("198.18.0.0/15")
+            ):
                 continue
             name = row["interface"]
             stat = stats.get(name)
-            state = {"preferred": "preferred", "deprecated": "deprecated", "tentative": "tentative",
-                     "duplicate": "dadfailed", "invalid": "invalid"}.get(str(row["state"]).lower(), "unverified")
+            state = {
+                "preferred": "preferred",
+                "deprecated": "deprecated",
+                "tentative": "tentative",
+                "duplicate": "dadfailed",
+                "invalid": "invalid",
+            }.get(str(row["state"]).lower(), "unverified")
             lifetimes = {}
             for key in ("valid_lifetime", "preferred_lifetime"):
                 value = row.get(key)
                 lifetimes[key] = None if value is not None and float(value) >= 4294967295 else lifetime(value)
             origin = str(row.get("suffix_origin", ""))
             # Random suffix origin alone does not prove temporary versus stable privacy addressing.
-            kind = "stable" if ip.version == 4 or origin in ("Manual", "Link", "Dhcp", "WellKnown") else "unverified"
-            records.append({
-                "address": str(ip), "family": ip.version, "interface": name,
-                "interface_up": bool(stat and stat.isup), "mtu": stat.mtu if stat else None,
-                "prefixlen": prefix, "prefix": str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False)),
-                "state": state, "type": kind, "suffix_origin": origin,
-                "temporary": None if kind == "unverified" else False,
-                "tentative": state == "tentative", "dadfailed": state == "dadfailed",
-                "deprecated": state == "deprecated", "skip_as_source": row.get("skip_as_source", False),
-                "observed_monotonic": observed, "source": "windows-netipaddress", **lifetimes,
-            })
+            kind = (
+                "stable"
+                if ip.version == 4 or origin in ("Manual", "Link", "Dhcp", "WellKnown")
+                else "unverified"
+            )
+            records.append(
+                {
+                    "address": str(ip),
+                    "family": ip.version,
+                    "interface": name,
+                    "interface_up": bool(stat and stat.isup),
+                    "mtu": stat.mtu if stat else None,
+                    "prefixlen": prefix,
+                    "prefix": str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False)),
+                    "state": state,
+                    "type": kind,
+                    "suffix_origin": origin,
+                    "temporary": None if kind == "unverified" else False,
+                    "tentative": state == "tentative",
+                    "dadfailed": state == "dadfailed",
+                    "deprecated": state == "deprecated",
+                    "skip_as_source": row.get("skip_as_source", False),
+                    "observed_monotonic": observed,
+                    "source": "windows-netipaddress",
+                    **lifetimes,
+                }
+            )
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
     return records, result
@@ -387,8 +422,9 @@ async def windows_routes():
                 ip = ipaddress.ip_address(row["gateway"].split("%", 1)[0])
                 if row["prefix"] != ("0.0.0.0/0" if ip.version == 4 else "::/0") or ip.is_unspecified:
                     continue
-                outputs[ip.version].append({"dst": "default", "gateway": str(ip), "dev": row["dev"],
-                                            "metric": row.get("metric")})
+                outputs[ip.version].append(
+                    {"dst": "default", "gateway": str(ip), "dev": row["dev"], "metric": row.get("metric")}
+                )
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
     return [{**evidence, "output": outputs[version]} for version in (4, 6)]
@@ -400,6 +436,8 @@ async def read_default_routes():
     if platform.system() == "Linux":
         return await asyncio.gather(command("ip", "-j", "-4", "route", "show"),
                                     command("ip", "-j", "-6", "route", "show"))
+    if platform.system() == "Darwin":
+        return await darwin_routes()
     return [{"state": "unsupported", "output": []} for _ in range(2)]
 
 
@@ -426,6 +464,277 @@ def default_routes(result):
             routes.extend((version, route) for route in output
                           if isinstance(route, dict) and route.get("dst") == "default")
     return routes
+
+
+
+# macOS ships no structured `ip -j` equivalent: ifconfig is the only read-only source that reports
+# per-address IPv6 flags, and netstat is the only one that reports the default route list.
+DARWIN_INTERFACE = re.compile(
+    r"^(?P<name>[^\s:]+):\s+flags=(?P<flags>[0-9a-fx]+)<(?P<set>[^>]*)>(?:\s+mtu\s+(?P<mtu>\d+))?"
+)
+DARWIN_ANGLE = re.compile(r"<([^>]*)>")
+DARWIN_INET6_FLAGS = ("tentative", "dadfailed", "deprecated", "temporary", "autoconf", "secured")
+DARWIN_ROUTE_KEYS = ("route to", "destination", "mask", "gateway", "interface", "flags")
+# ifconfig never prints an address lifetime, so a missing value here means unreported, not forever.
+DARWIN_LIFETIME_SOURCE = "unreported"
+
+
+def system_tool(name):
+    """Resolve a system utility that may sit outside a frozen or GUI-launched process PATH."""
+    found = shutil.which(name)
+    if found:
+        return found
+    return shutil.which(name, path="/sbin:/usr/sbin:/usr/bin:/bin") or name
+
+
+def darwin_prefix_length(fields, ip):
+    """ifconfig prints an IPv6 prefixlen or an IPv4 netmask; nothing else is guessed."""
+    for index, token in enumerate(fields[:-1]):
+        value = fields[index + 1]
+        if token == "prefixlen":
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        if token == "netmask" and ip.version == 4:
+            try:
+                if value.lower().startswith("0x"):
+                    return bin(int(value, 16)).count("1")
+                return ipaddress.IPv4Network(f"0.0.0.0/{value}").prefixlen
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def darwin_address_record(family, fields, *, interface, up, mtu, neighbor_discovery, loopback, observed):
+    try:
+        ip = ipaddress.ip_address(fields[0].split("%", 1)[0])
+    except (IndexError, ValueError):
+        return None
+    if ip.version != (4 if family == "inet" else 6):
+        return None
+    if ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_loopback != loopback:
+        return None
+    if ip.version == 4 and ip in ipaddress.ip_network("198.18.0.0/15"):
+        return None
+    flags = {token for token in fields[1:] if token in DARWIN_INET6_FLAGS}
+    prefixlen = darwin_prefix_length(fields, ip)
+    record = {
+        "address": str(ip),
+        "family": ip.version,
+        "interface": interface,
+        "interface_up": up,
+        "mtu": mtu,
+        "prefixlen": prefixlen,
+        "type": "temporary" if "temporary" in flags else "stable",
+        "temporary": "temporary" in flags,
+        "tentative": "tentative" in flags,
+        "dadfailed": "dadfailed" in flags,
+        "deprecated": "deprecated" in flags,
+        "observed_monotonic": observed,
+        "source": "darwin-ifconfig",
+        "valid_lifetime": None,
+        "preferred_lifetime": None,
+        "lifetime_source": DARWIN_LIFETIME_SOURCE,
+    }
+    if prefixlen is not None:
+        record["prefix"] = str(ipaddress.ip_network(f"{ip}/{prefixlen}", strict=False))
+    if ip.version == 6 and neighbor_discovery is not None:
+        record["neighbor_discovery"] = neighbor_discovery
+    record["state"] = (
+        "dadfailed"
+        if record["dadfailed"]
+        else "tentative"
+        if record["tentative"]
+        else "deprecated"
+        if record["deprecated"]
+        else "preferred"
+    )
+    return record
+
+
+def parse_ifconfig(text, *, loopback=False, observed=None):
+    """Read macOS ifconfig output into the record shape the Linux ip-json reader produces.
+
+    The kernel flags an IPv6 address as tentative, dadfailed or deprecated; it reports no
+    lifetimes, so an address is never called permanent and no lifetime is invented. The IPv6
+    ifconfig `nd6 options` line is kept verbatim as `neighbor_discovery` evidence.
+    """
+    observed = time.monotonic() if observed is None else observed
+    interfaces, current = [], None
+    for line in text.splitlines():
+        header = DARWIN_INTERFACE.match(line)
+        if header:
+            current = {
+                "name": header["name"],
+                "up": "UP" in header["set"].split(","),
+                "mtu": int(header["mtu"]) if header["mtu"] else None,
+                "status": None,
+                "neighbor_discovery": None,
+                "addresses": [],
+            }
+            interfaces.append(current)
+            continue
+        if current is None or not line[:1].isspace():
+            continue
+        fields = line.split()
+        key = fields[0].rstrip(":")
+        if key == "status" and len(fields) > 1:
+            current["status"] = fields[1]
+        elif key == "nd6":
+            match = DARWIN_ANGLE.search(line)
+            current["neighbor_discovery"] = match[1] if match else line.strip()
+        elif key in ("inet", "inet6"):
+            current["addresses"].append((key, fields[1:]))
+    records, seen = [], set()
+    for interface in interfaces:
+        # A UP flag alone is not reachability: Wi-Fi and bridge members keep UP with no carrier.
+        up = interface["up"] and interface["status"] in (None, "active")
+        for family, fields in interface["addresses"]:
+            record = darwin_address_record(
+                family,
+                fields,
+                interface=interface["name"],
+                up=up,
+                mtu=interface["mtu"],
+                neighbor_discovery=interface["neighbor_discovery"],
+                loopback=loopback,
+                observed=observed,
+            )
+            key = None if record is None else (record["interface"], record["address"])
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            records.append(record)
+    return records
+
+
+async def darwin_address_inventory(fallback, *, loopback=False):
+    observed = time.monotonic()
+    result = await command(system_tool("ifconfig"), "-a")
+    text = result.get("output")
+    if result.get("state") != "completed" or not isinstance(text, str):
+        return fallback, result
+    records = parse_ifconfig(text, loopback=loopback, observed=observed)
+    if not records and fallback:
+        # psutil still sees addresses, so an empty parse means the output format moved.
+        return fallback, {**result, "state": "failed", "reason": "DARWIN_IFCONFIG_UNPARSED"}
+    return records, result
+
+
+def parse_netstat_defaults(text):
+    """Read usable default routes from `netstat -rn -f inet|inet6`.
+
+    A row flagged with `!` is a kernel entry that is not in the routing table, and a `link#N`
+    gateway is a local interface rather than a next hop, so neither becomes a gateway.
+    """
+    routes, seen = [], set()
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[0] != "default" or "!" in fields[2]:
+            continue
+        gateway, interface = fields[1], fields[3]
+        try:
+            ip = ipaddress.ip_address(gateway.split("%", 1)[0])
+        except ValueError:
+            continue
+        if ip.is_unspecified or ip.is_multicast or (str(ip), interface) in seen:
+            continue
+        seen.add((str(ip), interface))
+        routes.append(
+            {
+                "dst": "default",
+                "gateway": str(ip),
+                "dev": interface,
+                "metric": None,
+                "flags": fields[2],
+                "scoped_gateway": gateway,
+            }
+        )
+    return routes
+
+
+async def darwin_routes():
+    evidence = []
+    for family in ("inet", "inet6"):
+        result = await command(system_tool("netstat"), "-rn", "-f", family)
+        text = result.get("output")
+        evidence.append(
+            {
+                **result,
+                "family": family,
+                "output": parse_netstat_defaults(text) if isinstance(text, str) else [],
+            }
+        )
+    return evidence
+
+
+def parse_route_get(text):
+    """Read `route -n get` keyed text; None means the kernel reported no usable route."""
+    fields = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition(":")
+        key = key.strip().lower()
+        if separator and key in DARWIN_ROUTE_KEYS:
+            fields[key.replace(" ", "_")] = value.strip().strip("<>")
+    return fields if "gateway" in fields or "interface" in fields else None
+
+
+async def darwin_route_to(target, resolution):
+    """macOS route(8) resolves an IPv4 next hop; its IPv6 lookup returns no usable route."""
+    if ipaddress.ip_address(target).version == 6:
+        return {
+            "state": "unsupported",
+            "reason": "DARWIN_ROUTE_GET_IPV6_UNSUPPORTED",
+            "resolution": resolution,
+        }
+    result = await command(system_tool("route"), "-n", "get", target)
+    text = result.get("output")
+    parsed = parse_route_get(text) if isinstance(text, str) else None
+    if parsed is None:
+        return {
+            "state": "not-tested",
+            "reason": "DARWIN_ROUTE_NOT_IN_TABLE",
+            "command": result.get("command"),
+            "stderr": result.get("stderr", ""),
+            "resolution": resolution,
+        }
+    return {**result, "output": parsed, "resolution": resolution}
+
+
+def path_route_backend(system=None):
+    """Name the tool that can report the kernel's route to a peer, or None where none can."""
+    name = (system or platform.system()).lower()
+    if name == "linux":
+        return "linux-ip-route"
+    if name == "darwin":
+        return "darwin-route-get"
+    return None
+
+
+async def path_route_evidence(target, source=None):
+    """Report the route the kernel would use to reach `target`, pinned to `source` when asked.
+
+    Linux answers with `ip -j route get`. macOS route(8) has no source-pinned form and cannot
+    resolve an IPv6 next hop, so those cases say so instead of inventing evidence. Platforms with
+    neither tool return None and the caller records nothing at all.
+    """
+    backend = path_route_backend()
+    if backend is None:
+        return None
+    if backend == "darwin-route-get":
+        try:
+            ipaddress.ip_address(target)
+        except ValueError:
+            return {"state": "not-tested", "reason": "ROUTE_TARGET_NOT_AN_ADDRESS", "target": target}
+        result = await darwin_route_to(target, {"host": target, "state": "literal", "addresses": [target]})
+        result["source"] = source
+        result["source_scoped"] = False
+        return result
+    arguments = ["ip", "-j", "route", "get", target]
+    if source:
+        arguments += ["from", source]
+    return await command(*arguments)
 
 
 def apply_address_inventory(result, records, *, maximum=4):
@@ -551,10 +860,12 @@ async def query_ip(provider, url, version):
                     "evidence": "https-egress-not-udp-mapping",
                 }
     except Exception as exc:
+        # Read the status through getattr: the isinstance guard already proves the attribute exists.
+        status = getattr(exc, "status", None)
         retryable = (
             isinstance(exc, (TimeoutError, aiohttp.ClientConnectionError))
             and not isinstance(exc, aiohttp.ClientSSLError)
-        ) or (isinstance(exc, aiohttp.ClientResponseError) and exc.status in (500, 502, 503, 504))
+        ) or (isinstance(exc, aiohttp.ClientResponseError) and status in (500, 502, 503, 504))
         return {
             **details,
             "state": "unavailable",
@@ -604,19 +915,26 @@ async def route_to_server(host):
             resolution.update(state="literal", addresses=[target])
         except ValueError:
             rows = await asyncio.wait_for(
-                asyncio.get_running_loop().getaddrinfo(host, None, family=socket.AF_INET,
-                                                      type=socket.SOCK_STREAM), 3,
+                asyncio.get_running_loop().getaddrinfo(
+                    host, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+                ),
+                3,
             )
             addresses = list(dict.fromkeys(row[4][0] for row in rows))
             if not addresses:
                 raise ValueError("SERVER_NO_IPV4_DNS_RESULT")
             target = addresses[0]
             resolution.update(state="resolved", addresses=addresses)
+        if platform.system() == "Darwin":
+            return await darwin_route_to(target, resolution)
         result = await command("ip", "-j", "route", "get", target)
         return {**result, "resolution": resolution}
     except (OSError, TimeoutError, ValueError) as exc:
-        return {"state": "not-tested", "reason": type(exc).__name__ + ":" + str(exc),
-                "resolution": {**resolution, "state": "failed"}}
+        return {
+            "state": "not-tested",
+            "reason": type(exc).__name__ + ":" + str(exc),
+            "resolution": {**resolution, "state": "failed"},
+        }
 
 
 async def snapshot(journal, *, server_host, external=True, loopback=False, maximum=4):
@@ -654,6 +972,20 @@ async def snapshot(journal, *, server_host, external=True, loopback=False, maxim
             result["active_commands"] = await asyncio.gather(
                 command("ping.exe", "-n", "1", "-w", "2000", server_host),
                 command("tracert.exe", "-d", "-h", "5", "-w", "500", server_host, timeout=5),
+            )
+    elif platform.system() == "Darwin":
+        (inventory, address_command), routes, server_route = await asyncio.gather(
+            read_address_inventory(loopback=loopback),
+            darwin_routes(),
+            route_to_server(server_host),
+        )
+        result["system_commands"] = [address_command, *routes, server_route]
+        if external:
+            result["active_commands"] = await asyncio.gather(
+                command(system_tool("ping"), "-n", "-c", "1", "-W", "2000", server_host),
+                command(
+                    system_tool("traceroute"), "-n", "-w", "1", "-q", "1", "-m", "5", server_host, timeout=6
+                ),
             )
     else:
         inventory, address_command = await read_address_inventory(loopback=loopback)

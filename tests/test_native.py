@@ -76,3 +76,54 @@ async def test_native_acceptance_report_contains_every_backend_and_family(tmp_pa
     assert result["state"] == "passed" and not result["background_errors"]
     assert {(row["method"], row["host"]) for row in result["cases"]} == {
         (method, host) for method in ("utp", "ice-native", "ice-tcp") for host in ("127.0.0.1", "::1")}
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("nice", "libnice.10.dylib"), ("glib-2.0", "libglib-2.0.0.dylib"),
+     ("gobject-2.0", "libgobject-2.0.0.dylib"), ("utp", "libutp.dylib")],
+)
+def test_darwin_library_names_are_versioned_dylibs(name, expected, monkeypatch):
+    monkeypatch.setattr(native_loader.sys, "platform", "darwin")
+    assert native_loader.library_filename(name) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("nice", "libnice.so.10"), ("glib-2.0", "libglib-2.0.so.0"), ("utp", "libutp.so")],
+)
+def test_linux_library_names_stay_versioned_sonames(name, expected, monkeypatch):
+    monkeypatch.setattr(native_loader.sys, "platform", "linux")
+    assert native_loader.library_filename(name) == expected
+
+
+def test_darwin_loader_prefers_bundle_then_homebrew(tmp_path, monkeypatch):
+    """ctypes.util.find_library does not search Homebrew's lib, which is where brew puts libnice."""
+    monkeypatch.setattr(native_loader, "ROOT", tmp_path)
+    monkeypatch.setattr(native_loader.sys, "platform", "darwin")
+    monkeypatch.setattr(native_loader, "_DARWIN_PACKAGE_DIRECTORIES", (tmp_path / "brew/lib",))
+    monkeypatch.setattr(native_loader.ctypes.util, "find_library", lambda name: "system-library")
+    brewed = tmp_path / "brew/lib/libnice.10.dylib"
+    brewed.parent.mkdir(parents=True)
+    brewed.touch()
+    assert native_loader.library_path("nice") == str(brewed)
+    bundled = tmp_path / ".tools/libnice/lib/libnice.10.dylib"
+    bundled.parent.mkdir(parents=True)
+    bundled.touch()
+    assert native_loader.library_path("nice") == str(bundled)
+
+
+def test_darwin_loader_falls_back_to_the_system_loader(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_loader, "ROOT", tmp_path)
+    monkeypatch.setattr(native_loader.sys, "platform", "darwin")
+    monkeypatch.setattr(native_loader, "_DARWIN_PACKAGE_DIRECTORIES", ())
+    monkeypatch.setattr(native_loader.ctypes.util, "find_library", lambda name: "libglib-2.0.dylib")
+    assert native_loader.library_path("glib-2.0") == "libglib-2.0.dylib"
+
+
+def test_darwin_loader_reports_the_bundled_name_when_nothing_is_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_loader, "ROOT", tmp_path)
+    monkeypatch.setattr(native_loader.sys, "platform", "darwin")
+    monkeypatch.setattr(native_loader, "_DARWIN_PACKAGE_DIRECTORIES", ())
+    monkeypatch.setattr(native_loader.ctypes.util, "find_library", lambda name: None)
+    assert native_loader.library_path("utp") == str(tmp_path / "data/native/libutp.dylib")

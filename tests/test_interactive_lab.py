@@ -1,4 +1,5 @@
 import os
+import sys
 import tomllib
 
 import pytest
@@ -10,6 +11,11 @@ from tools.interactive_lab import (
     server_command,
     update_state,
     write_config,
+)
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="The interactive lab drives Linux namespaces, /proc and konsole",
 )
 
 

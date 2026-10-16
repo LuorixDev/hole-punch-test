@@ -28,9 +28,14 @@ class StuntAttempt(TcpAttempt):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             # A short route may complete the probe handshake. Reset this disposable
-            # connection so TIME_WAIT does not prevent reusing its exact tuple.
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
-                                 struct.pack("HH" if sys.platform == "win32" else "ii", 1, 0))
+            # connection so TIME_WAIT does not prevent reusing its exact tuple. macOS rejects
+            # the linger option once an aborted connect has errored the socket, and a connection
+            # that never reached a peer has no TIME_WAIT to avoid, so the reset stays best effort.
+            try:
+                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                     struct.pack("HH" if sys.platform == "win32" else "ii", 1, 0))
+            except OSError:
+                pass
             self.sock.close()
         self.sock = new_socket(self.host, socket.SOCK_STREAM, self.candidates[0][1])
         if not self.spec["initiator"]:

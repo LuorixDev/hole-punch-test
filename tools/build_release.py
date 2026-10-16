@@ -17,6 +17,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# What a Client bundle must embed for its target. Windows and Linux recipes provision the native
+# uTP/libnice backends, so a bundle missing them is a broken release. The macOS recipes are not
+# written yet, so a macOS bundle ships only the pure-Python transports; the runtime reports the
+# missing backends as unavailable instead of pretending, and the build record states the same.
+NATIVE_LIBRARIES = {
+    "windows-x64": ("libutp.dll", "libnice-10.dll", "libglib-2.0-0.dll", "libgobject-2.0-0.dll"),
+    "linux-x64": ("libutp.so", "libnice.so.10"),
+    "macos-arm64": (),
+    "macos-x64": (),
+}
+
 
 def sha256(path):
     with Path(path).open("rb") as stream:
@@ -116,16 +127,30 @@ def run(*args):
     subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True)
 
 
+def release_target(system, machine):
+    """Release target name for a build host, or None when no artifact is shipped for it.
+
+    The mapping is explicit rather than "anything that is not Windows" because a mislabelled
+    artifact is worse than none: the publish job asserts on these exact names.
+    """
+    system, machine = system.lower(), machine.lower()
+    if machine in ("amd64", "x86_64"):
+        return {"win32": "windows-x64", "linux": "linux-x64", "darwin": "macos-x64"}.get(system)
+    if machine == "arm64" and system == "darwin":
+        return "macos-arm64"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-speedtest-install", action="store_true")
     args = parser.parse_args()
-    if sys.version_info[:2] != (3, 12) or platform.machine().lower() not in ("amd64", "x86_64"):
-        raise SystemExit("Release builds require native x64 Python 3.12")
-    target = {"win32": "windows-x64", "linux": "linux-x64"}.get(sys.platform)
+    if sys.version_info[:2] < (3, 12):
+        raise SystemExit("Release builds require Python 3.12 or newer")
+    target = release_target(sys.platform, platform.machine())
     if not target:
-        raise SystemExit("Release builds support Windows x64 and Linux x64")
+        raise SystemExit("Release builds support Windows x64, Linux x64 and macOS arm64/x64")
     if not args.skip_speedtest_install:
         run(sys.executable, ROOT / "tools/install_librespeed.py")
     output = ROOT / "dist/release"
@@ -148,9 +173,7 @@ def main():
         if role == "Client" and not any("librespeed-cli" in name for name in archive.toc):
             raise RuntimeError("Client bundle is missing LibreSpeed")
         if role == "Client":
-            required = ("libutp.dll", "libnice-10.dll", "libglib-2.0-0.dll", "libgobject-2.0-0.dll") if extension else (
-                "libutp.so", "libnice.so.10")
-            for name in required:
+            for name in NATIVE_LIBRARIES[target]:
                 if not any(Path(entry.replace("\\", "/")).name == name for entry in archive.toc):
                     raise RuntimeError("Client bundle is missing native library: " + name)
         run(source, "--help")
@@ -166,13 +189,20 @@ def main():
     run(sys.executable, ROOT / "tools/smoke_frozen.py", "--client", binaries["client"],
         "--server", binaries["server"], "--output", smoke)
     native_report = smoke / "native-report.json"
-    run(binaries["client"], "--native-self-test", native_report)
+    if NATIVE_LIBRARIES[target]:
+        run(binaries["client"], "--native-self-test", native_report)
+        native_smoke = json.loads(native_report.read_text(encoding="utf-8"))
+    else:
+        # Nothing was provisioned for this target, so there is no frozen backend to exercise. The
+        # record says so rather than reporting a pass the bundle never earned.
+        native_smoke = {"state": "not-provisioned", "reason": "NO_NATIVE_BACKEND_FOR_TARGET"}
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
                               capture_output=True, check=False).stdout.strip() or "uncommitted-local-build"
     record = {"git_revision": revision, "platform": platform.platform(), "python": sys.version,
-              "target": target, "format": "pyinstaller-onefile", "dependencies": inventory,
+              "target": target, "native_libraries": list(NATIVE_LIBRARIES[target]),
+              "format": "pyinstaller-onefile", "dependencies": inventory,
               "native_sources": native_sources,
-              "native_smoke": json.loads(native_report.read_text(encoding="utf-8")),
+              "native_smoke": native_smoke,
               "smoke": json.loads((smoke / "report.json").read_text()),
               "binaries": {role: {"name": path.name, "sha256": sha256(path), "bytes": path.stat().st_size}
                            for role, path in binaries.items()}}

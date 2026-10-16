@@ -34,7 +34,7 @@ from textual.widgets import (
 from .client import NETWORK_TEST_NOTICE, Client, normalize_server_address
 from .experiments import scheme_explanation, scheme_nickname
 from .journal import redact
-from .network import address_rejection, remaining_lifetime
+from .network import address_rejection, lifetimes_reported, remaining_lifetime
 from .performance import bottleneck_assessment
 from .status import public_ip_evidence, speed_assessment, timestamp_age
 from .udp import PROFILES
@@ -1565,8 +1565,9 @@ class P2PApp(App):
         for index, record in enumerate(network.get("address_inventory", [])):
             key = str(index)
             lifetimes = [remaining_lifetime(record, k) for k in ("preferred_lifetime", "valid_lifetime")]
+            unreported = record.get("state") == "unverified" or not lifetimes_reported(record)
             lifetime = " / ".join(
-                ("未知" if record.get("state") == "unverified" else "永久")
+                ("未知" if unreported else "永久")
                 if v is None
                 else f"{max(int(v), 0)}s"
                 for v in lifetimes

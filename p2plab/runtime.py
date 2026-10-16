@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+MACOS_DATA_DIRECTORY = "Library/Application Support"
+
 
 def configure_console_encoding():
     if sys.platform != "win32":
@@ -20,9 +22,18 @@ def application_directory():
 
 
 def default_client_data():
+    """Locate writable client state, preferring each platform's own convention."""
     if not getattr(sys, "frozen", False):
         return Path("data/client")
-    base = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) if sys.platform == "win32" else (
-        Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
-    )
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "P2PLab/client"
+    # An explicitly exported XDG_DATA_HOME is a deliberate choice and still wins; macOS otherwise
+    # keeps state in Application Support rather than Linux's ~/.local/share.
+    override = os.environ.get("XDG_DATA_HOME")
+    if override:
+        base = Path(override)
+    elif sys.platform == "darwin":
+        base = Path.home() / MACOS_DATA_DIRECTORY
+    else:
+        base = Path.home() / ".local/share"
     return base / "P2PLab/client"

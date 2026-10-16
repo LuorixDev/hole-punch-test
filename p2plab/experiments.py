@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import math
-import platform
 import secrets
 import time
 from collections import Counter, deque
 
 from .gateway import create_lease
-from .network import command
+from .network import path_route_evidence
 from .research import (
     GATEWAY_METHODS,
     POOL_METHODS,
@@ -742,8 +741,8 @@ class Experiments:
                         await self.synchronizers.setdefault(spec["attempt"], Synchronizer(self.owner, spec["attempt"])).synchronize(self.owner.timeout + 10)
                     await obj.punch(self.owner.timeout)
                     result["udp_remote"] = list(obj.remote)
-                    if platform.system() == "Linux":
-                        route = await command("ip", "-j", "route", "get", obj.remote[0], "from", spec["host"])
+                    route = await path_route_evidence(obj.remote[0], spec["host"])
+                    if route is not None:
                         self.owner.log.event("network.path_route", attempt=spec["attempt"], evidence=route)
                     evidence = await obj.mtu()
                     result["mtu_evidence"] = evidence

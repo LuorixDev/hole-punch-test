@@ -4,14 +4,56 @@ from __future__ import annotations
 
 import asyncio
 import math
+import platform
+import shutil
 import statistics
+import subprocess
 import time
 from pathlib import Path
 
 from .status import speed_assessment
 
+DARWIN_UDP_COUNTERS = {
+    "dropped due to full socket buffers": "dropped_due_to_full_socket_buffers",
+    "dropped due to no socket": "dropped_due_to_no_socket",
+    "with bad checksum": "with_bad_checksum",
+    "broadcast/multicast datagrams undelivered": "broadcast_multicast_undelivered",
+}
+
+
+def darwin_udp_errors(text):
+    """Read the macOS system-wide UDP drop counters out of `netstat -s -p udp`.
+
+    netstat's two-tab rows are sub-items of the row above them, so only the named counters are
+    taken; the indented per-family datagram rows are deliberately ignored.
+    """
+    result = {}
+    for line in text.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        key = DARWIN_UDP_COUNTERS.get(fields[1].strip())
+        if key is not None:
+            result[key] = int(fields[0])
+    return result
+
+
+def darwin_netstat_udp():
+    """Resolve netstat beyond a GUI process's PATH and read its UDP section; "" on any failure."""
+    executable = shutil.which("netstat", path="/sbin:/usr/sbin:/usr/bin:/bin") or "netstat"
+    try:
+        completed = subprocess.run(
+            [executable, "-s", "-p", "udp"], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return completed.stdout
+
 
 def udp_errors():
+    """System-wide UDP drop counters, from whichever source this platform keeps them in."""
+    if platform.system() == "Darwin":
+        return darwin_udp_errors(darwin_netstat_udp())
     result = {}
     try:
         lines = Path("/proc/net/snmp").read_text().splitlines()
