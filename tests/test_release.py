@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from aiohttp import web
 
-from tools.build_release import collect_licenses, release_target, write_checksums
+from tools.build_release import NATIVE_LIBRARIES, collect_licenses, release_target, write_checksums
 from tools.smoke_frozen import finish_pumps, read_room_events, smoke, stop_process
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,6 +184,25 @@ def test_release_target_maps_each_supported_host(system, machine, target):
 def test_release_target_refuses_hosts_with_no_shipped_artifact(system, machine):
     """Refusing is safer than mislabelling: the publish job asserts on these exact names."""
     assert release_target(system, machine) is None
+
+
+@pytest.mark.parametrize(
+    ("system", "machine"),
+    [("win32", "AMD64"), ("linux", "x86_64"), ("darwin", "arm64"), ("darwin", "x86_64")],
+)
+def test_every_shipped_target_declares_its_native_expectation(system, machine):
+    """A target cannot start shipping before it states whether its client embeds native backends."""
+    assert release_target(system, machine) in NATIVE_LIBRARIES
+
+
+def test_client_native_expectation_matches_what_each_build_recipe_provisions():
+    assert NATIVE_LIBRARIES["windows-x64"] == (
+        "libutp.dll", "libnice-10.dll", "libglib-2.0-0.dll", "libgobject-2.0-0.dll")
+    assert NATIVE_LIBRARIES["linux-x64"] == ("libutp.so", "libnice.so.10")
+    # macOS ships the pure-Python transports until its own native recipes exist; the empty tuple is
+    # the declaration, and the build record carries it so a bundle cannot silently lose backends.
+    assert NATIVE_LIBRARIES["macos-arm64"] == ()
+    assert NATIVE_LIBRARIES["macos-x64"] == ()
 
 
 @pytest.mark.parametrize(
