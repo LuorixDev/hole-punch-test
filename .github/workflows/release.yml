@@ -24,14 +24,25 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: linux-x64
+            native: '1'
           - os: windows-2022
             target: windows-x64
+            native: '1'
+          # Pin the label: macos-latest could change architecture under a tag.
+          - os: macos-26
+            target: macos-arm64
+            native: ''
+          - os: macos-26-intel
+            target: macos-x64
+            native: ''
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
-      P2PLAB_REQUIRE_NATIVE: '1'
+      # Empty on macOS: it provisions no native backend, so the optional-backend
+      # tests skip instead of failing.
+      P2PLAB_REQUIRE_NATIVE: ${{ matrix.native }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -93,6 +104,9 @@ jobs:
           tests/test_transfers.py::test_slow_progress_below_byte_ack_threshold_keeps_transfer_alive
           tests/test_transfers.py::test_file_ack_timeout_has_progress_and_transport_evidence
           --junitxml=build/source-tests.xml
+      - name: macOS full regression suite
+        if: runner.os == 'macOS'
+        run: python -m pytest -q --junitxml=build/source-tests.xml
       - name: Build and verify real single-file programs
         run: python tools/build_release.py
       - name: Upload release assets
@@ -130,7 +144,7 @@ jobs:
           pattern: p2plab-*
           path: dist/release
           merge-multiple: true
-      - name: Combine checksums and publish both platforms together
+      - name: Combine checksums and publish every platform together
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -142,7 +156,9 @@ jobs:
           from pathlib import Path
           directory = Path('dist/release')
           required = ('P2PLab-Client-linux-x64', 'P2PLab-Server-linux-x64',
-                      'P2PLab-Client-windows-x64.exe', 'P2PLab-Server-windows-x64.exe')
+                      'P2PLab-Client-windows-x64.exe', 'P2PLab-Server-windows-x64.exe',
+                      'P2PLab-Client-macos-arm64', 'P2PLab-Server-macos-arm64',
+                      'P2PLab-Client-macos-x64', 'P2PLab-Server-macos-x64')
           assert all((directory / name).is_file() for name in required), 'Missing platform binaries'
           rows = []
           for path in sorted(directory.iterdir()):
