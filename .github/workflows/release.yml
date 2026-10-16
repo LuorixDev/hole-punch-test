@@ -47,6 +47,8 @@ jobs:
         run: |
           uv pip install --only-binary=:all: -r requirements.lock -r packaging/build-requirements.txt
           uv pip install --no-deps -e .
+      - name: Verify history rendering before native compilation
+        run: python -m pytest -q tests/test_tui.py::test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_history
       - name: Linux native experiment libraries
         if: runner.os == 'Linux'
         run: |

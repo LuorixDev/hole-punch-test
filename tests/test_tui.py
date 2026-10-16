@@ -147,10 +147,18 @@ async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_hist
     app = LogApp()
     async with app.run_test(size=(60, 12)) as pilot:
         log = app.query_one(HistoryLog)
+
+        async def rendered_history():
+            async with asyncio.timeout(5):
+                while (log.rendered_serial != log.serial
+                       or log.rendered_width != log.scrollable_content_region.width):
+                    await pilot.pause(0.02)
+            await pilot.pause()
+
         for index in range(20):
             log.append_entry(Text(f"entry-{index:03d}\n" + "中文测试" * 30))
         log.flush_history()
-        await pilot.pause()
+        await rendered_history()
         assert "entry-000" in log._render_line(0, 0, 60).text
         assert log.is_vertical_scroll_end
         log.scroll_to(y=10, animate=False, immediate=True)
@@ -171,7 +179,7 @@ async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_hist
         assert "entry-001" in log._render_line(0, 0, 60).text
         assert log.scroll_y == max(0, 10 - removed_lines)
         await pilot.resize_terminal(45, 12)
-        await pilot.pause()
+        await rendered_history()
         rendered = "\n".join(strip.text for strip in log.lines)
         assert "entry-000" not in rendered and "entry-001" in rendered and "new-tail" in rendered
         log.display = False
@@ -180,7 +188,7 @@ async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_hist
             log.append_entry(Text(f"entry-{index:03d}\nhidden-tail"))
         log.flush_history()
         log.display = True
-        await pilot.pause()
+        await rendered_history()
         rendered = "\n".join(strip.text for strip in log.lines)
         assert "entry-020" not in rendered and "entry-045" not in rendered
         assert "entry-046" in rendered and "entry-065" in rendered

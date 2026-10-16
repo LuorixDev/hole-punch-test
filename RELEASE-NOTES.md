@@ -4,7 +4,7 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
-## v0.1.9: Network Selection and Sustained Chat Reliability
+## v0.1.10: Network Selection and Sustained Chat Reliability
 
 Upgrade both the client and server. This release addresses the real-network log
 findings and a reproduced TUI slowdown after the activity sidebar fills up.
@@ -13,6 +13,10 @@ The v0.1.8 candidate was withheld by the Windows release checks: deferred
 per-entry automatic scrolling could override the user's reading position.
 This release scrolls once per rendered batch immediately and adds a regression
 that deliberately delays old scroll callbacks, without rerendering retained logs.
+The v0.1.9 candidate fixed scrolling but was also withheld: its hidden-history
+test asserted before Windows completed the asynchronous redraw. The test now
+waits for the rendered serial and width with a fixed deadline, and both platforms
+run this check before compiling native libraries.
 
 - Prefer interfaces carrying the default route, including Windows interface
   metrics, while retaining alternative candidates within the configured budget.
