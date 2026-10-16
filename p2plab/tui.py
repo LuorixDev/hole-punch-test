@@ -476,11 +476,14 @@ class HistoryLog(RichLog):
             new_entries.append((serial, content))
         for serial, content in reversed(new_entries):
             previous_lines = len(self.lines)
-            self.write(content, width=width, scroll_end=follow)
+            self.write(content, width=width, scroll_end=False)
             self.rendered_entries.append((serial, len(self.lines) - previous_lines))
             self.rendered_serial = serial
         self.rendered_width = width
-        if not follow and (rebuild or removed_lines):
+        if follow and (rebuild or removed_lines or new_entries):
+            # Deferred per-entry scrolling can override a later manual scroll.
+            self.scroll_end(animate=False, immediate=True, x_axis=False)
+        elif not follow and (rebuild or removed_lines):
             self.scroll_to(y=max(0, position - removed_lines), animate=False, immediate=True)
 
 

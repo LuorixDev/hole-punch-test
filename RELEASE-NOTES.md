@@ -4,10 +4,15 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
-## v0.1.8: Network Selection and Sustained Chat Reliability
+## v0.1.9: Network Selection and Sustained Chat Reliability
 
 Upgrade both the client and server. This release addresses the real-network log
 findings and a reproduced TUI slowdown after the activity sidebar fills up.
+
+The v0.1.8 candidate was withheld by the Windows release checks: deferred
+per-entry automatic scrolling could override the user's reading position.
+This release scrolls once per rendered batch immediately and adds a regression
+that deliberately delays old scroll callbacks, without rerendering retained logs.
 
 - Prefer interfaces carrying the default route, including Windows interface
   metrics, while retaining alternative candidates within the configured budget.
@@ -40,8 +45,8 @@ Linux/headless-TUI results, not Windows or cross-ISP performance guarantees.
 See `CHAT-LATENCY-REPRO-2026-10-17.md` and `LOG-AUDIT-2026-10-16-33.md`.
 
 Both platforms must pass source tests and frozen-binary checks before Actions
-publishes their client/server executables together. The complete local Linux
-suite passed with required native backends: 576 passed, 4 skipped. Windows CI
+publishes their client/server executables together. The local Linux
+suite and isolated-network supplements run with required native backends. Windows CI
 also covers the route/STUN selection and slow-transfer ACK regressions.
 Real-router compatibility,
 WAN throughput and real-world connectivity rates remain experimental.

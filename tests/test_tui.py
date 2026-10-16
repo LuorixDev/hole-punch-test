@@ -114,7 +114,8 @@ async def test_activity_history_survives_hidden_writes_resize_and_repeated_tab_c
         save_preview(app, "activity-history-restored")
 
 
-async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_history(monkeypatch):
+@pytest.mark.parametrize("delay_follow", [False, True])
+async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_history(monkeypatch, delay_follow):
     from rich.text import Text
     from textual.app import App
     from textual.widgets import RichLog
@@ -133,6 +134,16 @@ async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_hist
         return original(widget, content, **kwargs)
 
     monkeypatch.setattr(RichLog, "write", write)
+    pending_scrolls = []
+    original_scroll = RichLog.scroll_end
+
+    def scroll_end(widget, **kwargs):
+        if delay_follow and not kwargs.get("immediate", False):
+            pending_scrolls.append(lambda: original_scroll(widget, **{**kwargs, "immediate": True}))
+        else:
+            original_scroll(widget, **kwargs)
+
+    monkeypatch.setattr(RichLog, "scroll_end", scroll_end)
     app = LogApp()
     async with app.run_test(size=(60, 12)) as pilot:
         log = app.query_one(HistoryLog)
@@ -141,12 +152,17 @@ async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_hist
         log.flush_history()
         await pilot.pause()
         assert "entry-000" in log._render_line(0, 0, 60).text
+        assert log.is_vertical_scroll_end
         log.scroll_to(y=10, animate=False, immediate=True)
         await pilot.pause()
+        assert log.scroll_y == 10
         removed_lines = log.rendered_entries[0][1] if log.rendered_entries else 0
         writes.clear()
         log.append_entry(Text("entry-020\nnew-tail"))
         log.flush_history()
+        for callback in pending_scrolls:
+            callback()
+        pending_scrolls.clear()
         await pilot.pause()
         assert len(writes) == 1, "Rollover must not rerender the retained history"
         rendered = "\n".join(strip.text for strip in log.lines)
@@ -170,6 +186,12 @@ async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_hist
         assert "entry-046" in rendered and "entry-065" in rendered
         assert len(log.rendered_entries) == 20
         assert sum(count for _, count in log.rendered_entries) == len(log.lines)
+        log.scroll_end(animate=False, immediate=True)
+        log.append_entry(Text("entry-066\nfollow-tail"))
+        log.flush_history()
+        await pilot.pause()
+        assert log.is_vertical_scroll_end
+        assert "follow-tail" in "\n".join(strip.text for strip in log.lines)
 
 
 @pytest.mark.parametrize("size", [(80, 24), (140, 40)])
