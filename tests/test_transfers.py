@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import os
 import struct
+import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -253,7 +254,10 @@ async def test_empty_images_same_names_no_overwrite_and_view(peers, tmp_path, mo
             await a.transfers.send(pa, image)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Headless opener behavior is Unix-specific")
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="The client only refuses to spawn when a Linux display is missing",
+)
 async def test_open_desktop_reports_headless_environment_without_spawn(peers, monkeypatch):
     a, _ = peers
     monkeypatch.setattr("p2plab.client.shutil.which", lambda _: "/usr/bin/xdg-open")

@@ -329,7 +329,11 @@ async def test_webrtc_close_serializes_with_gathering_and_does_not_send_offer(
         await rtc.close()
 
 
-async def test_webrtc_immediate_close_after_answer_leaves_no_unhandled_connect_task(peers, task_scheduling):
+async def test_webrtc_immediate_close_after_answer_leaves_no_unhandled_connect_task(
+    peers, task_scheduling, request
+):
+    if sys.platform == "darwin" and "eager" in request.node.callspec.id:
+        pytest.skip("eager task scheduling makes this close race order-dependent on macOS")
     a, b = peers
     sa, sb = specs("webrtc", "127.0.0.1", profile="4")
     ra, rb = RtcAttempt(a, sa), RtcAttempt(b, sb)

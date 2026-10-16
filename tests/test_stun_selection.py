@@ -1,4 +1,5 @@
 import asyncio
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,30 @@ from p2plab.rtc import RtcAttempt
 from p2plab.stun import StunServer, select_ice_observer
 from p2plab.udp import UdpAttempt
 from tests.test_transports import specs
+
+SECOND_LOOPBACK = "127.0.0.2"
+
+
+def second_loopback_available():
+    """Report whether this host has a second address inside 127.0.0.0/8.
+
+    Linux makes the whole range local, so 127.0.0.2 is bindable there. macOS and Windows configure
+    only 127.0.0.1, and a changed-source observer cannot be simulated without a second local address.
+    """
+    probe = socket.socket()
+    try:
+        probe.bind((SECOND_LOOPBACK, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+requires_second_loopback = pytest.mark.skipif(
+    not second_loopback_available(),
+    reason=f"{SECOND_LOOPBACK} is not a local address on this platform",
+)
 
 
 @pytest_asyncio.fixture
@@ -33,6 +58,7 @@ async def observer_pair(peers):
         silent.close()
 
 
+@requires_second_loopback
 async def test_real_health_falls_back_and_cache_is_source_specific(peers, observer_pair):
     client, _ = peers
     observers, target, _ = observer_pair
