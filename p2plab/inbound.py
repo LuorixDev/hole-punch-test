@@ -6,6 +6,7 @@ MESSAGES = {
     "REACHABLE": "IPv6 HTTP callback reached the client and verified its one-time token.",
     "TIMEOUT_INCONCLUSIVE": "IPv6 HTTP callback timed out; firewall blocking is possible, not proven.",
     "OBSERVER_NO_ROUTE": "The server has no IPv6 route; client firewall status is unknown.",
+    "OBSERVER_SOURCE_UNAVAILABLE": "The server cannot select a usable IPv6 source address; check its network or container configuration. Client firewall status is unknown.",
     "OBSERVER_OR_DESTINATION_UNREACHABLE": "Server or destination IPv6 is unreachable; firewall status is unknown.",
     "CONNECTION_REFUSED": "IPv6 TCP connection was refused; a rejecting firewall or listener failure is possible.",
     "CONNECT_FAILED": "IPv6 TCP connection failed; client firewall status is unknown.",

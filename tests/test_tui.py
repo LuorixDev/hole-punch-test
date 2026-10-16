@@ -114,6 +114,93 @@ async def test_activity_history_survives_hidden_writes_resize_and_repeated_tab_c
         save_preview(app, "activity-history-restored")
 
 
+async def test_activity_rollover_renders_only_new_entries_and_keeps_wrapped_history(monkeypatch):
+    from rich.text import Text
+    from textual.app import App
+    from textual.widgets import RichLog
+
+    from p2plab.tui import HistoryLog
+
+    class LogApp(App):
+        def compose(self):
+            yield HistoryLog(id="history", wrap=True, min_width=1, history_limit=20)
+
+    writes = []
+    original = RichLog.write
+
+    def write(widget, content, **kwargs):
+        writes.append(content.plain)
+        return original(widget, content, **kwargs)
+
+    monkeypatch.setattr(RichLog, "write", write)
+    app = LogApp()
+    async with app.run_test(size=(60, 12)) as pilot:
+        log = app.query_one(HistoryLog)
+        for index in range(20):
+            log.append_entry(Text(f"entry-{index:03d}\n" + "中文测试" * 30))
+        log.flush_history()
+        await pilot.pause()
+        assert "entry-000" in log._render_line(0, 0, 60).text
+        log.scroll_to(y=10, animate=False, immediate=True)
+        await pilot.pause()
+        removed_lines = log.rendered_entries[0][1] if log.rendered_entries else 0
+        writes.clear()
+        log.append_entry(Text("entry-020\nnew-tail"))
+        log.flush_history()
+        await pilot.pause()
+        assert len(writes) == 1, "Rollover must not rerender the retained history"
+        rendered = "\n".join(strip.text for strip in log.lines)
+        assert "entry-000" not in rendered
+        assert "entry-001" in rendered and "entry-020" in rendered
+        assert "entry-001" in log._render_line(0, 0, 60).text
+        assert log.scroll_y == max(0, 10 - removed_lines)
+        await pilot.resize_terminal(45, 12)
+        await pilot.pause()
+        rendered = "\n".join(strip.text for strip in log.lines)
+        assert "entry-000" not in rendered and "entry-001" in rendered and "new-tail" in rendered
+        log.display = False
+        await pilot.pause()
+        for index in range(21, 66):
+            log.append_entry(Text(f"entry-{index:03d}\nhidden-tail"))
+        log.flush_history()
+        log.display = True
+        await pilot.pause()
+        rendered = "\n".join(strip.text for strip in log.lines)
+        assert "entry-020" not in rendered and "entry-045" not in rendered
+        assert "entry-046" in rendered and "entry-065" in rendered
+        assert len(log.rendered_entries) == 20
+        assert sum(count for _, count in log.rendered_entries) == len(log.lines)
+
+
+@pytest.mark.parametrize("size", [(80, 24), (140, 40)])
+async def test_matrix_distinguishes_bind_addresses_and_missing_public_candidates(peers, size):
+    client, _ = peers
+    spec = {"attempt": "missing-mapping", "method": "quic", "a_host": "192.168.67.1",
+            "b_host": "192.168.1.233", "leader_initiator": True, "phase": "baseline", "profile": "fast"}
+    evidence = {"local_candidates": [["192.168.67.1", 56422]],
+                "remote_candidates": [["125.111.10.112", 47629]],
+                "diagnosis": "LOCAL_PUBLIC_UDP_MAPPING_MISSING"}
+    result = {"attempt": spec["attempt"], "state": "failed", "data_path": False,
+              "reason": "TimeoutError:UDP_AUTHENTICATED_PUNCH_TIMEOUT", "candidate_evidence": evidence}
+    client.manager = SimpleNamespace(plan=[spec], results=[result], remote_done={})
+    app = P2PApp(client=client, start_backend=False)
+    async with app.run_test(size=size) as pilot:
+        app.action_tab("matrix")
+        await pilot.pause()
+        table = app.query_one("#attempts", DataTable)
+        assert "本端未获取公网 UDP 映射" in table.get_row(spec["attempt"])[-1].plain
+        table.focus()
+        table.move_cursor(row=0)
+        await pilot.pause()
+        selection = app.query_one("#matrix-selection", Static)
+        text = str(selection.content)
+        assert "绑定：协调端 192.168.67.1" in text
+        assert "对端候选：[125.111.10.112]:47629" in text
+        assert selection.content.no_wrap
+        assert selection.region.bottom <= size[1]
+        save_preview(app, f"matrix-candidate-evidence-{size[0]}")
+
+
 async def test_banner_displays_both_peers_addresses_and_honest_http_inbound_state(peers):
     from datetime import datetime, timedelta, timezone
 

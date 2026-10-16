@@ -14,6 +14,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Size
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -90,6 +91,9 @@ REASONS = {
     "FILE_CHECKSUM_MISMATCH": "文件完整性校验失败，未保留文件",
     "FILE_NOT_ENOUGH_SPACE": "接收目录磁盘空间不足",
     "FILE_CHANGED_DURING_SEND": "发送期间源文件发生变化",
+    "FILE_READY_TIMEOUT": "等待对端接受文件超时",
+    "FILE_ACK_TIMEOUT": "等待对端确认文件进度超时",
+    "FILE_RECEIPT_TIMEOUT": "等待文件校验回执超时",
     "FILE_NOT_REGULAR": "仅能发送普通文件，不能发送目录或管道",
     "FILE_SIZE_LIMIT": "文件超过单文件大小限制",
     "IMAGE_FORMAT_UNSUPPORTED": "图片格式不支持或图片标识无效",
@@ -99,9 +103,15 @@ REASONS = {
     "TIMEOUT_INCONCLUSIVE": "超时，原因未确定",
     "CONNECTION_REFUSED_INCONCLUSIVE": "连接被拒绝，原因未确定",
     "NO_IPV6_ROUTE": "观察端无 IPv6 路由",
+    "OBSERVER_NO_ROUTE": "服务端无可用路由，无法判断入站",
+    "OBSERVER_SOURCE_UNAVAILABLE": "服务端源地址不可用，无法判断入站",
     "NOT_TESTED": "未测试",
     "AUTHENTICATED_PROBE_ONLY_NO_CHAT_CHANNEL": "认证探测成功，未建立聊天通道",
     "UDP_AUTHENTICATED_PUNCH_TIMEOUT": "UDP 打洞认证超时",
+    "LOCAL_PUBLIC_UDP_MAPPING_MISSING": "本端未获取公网 UDP 映射",
+    "PEER_PUBLIC_UDP_CANDIDATE_MISSING": "对端未提供公网 UDP 候选",
+    "PUBLIC_UDP_CANDIDATES_PRESENT": "双方已有公网 UDP 候选",
+    "DIRECT_ADDRESS_CANDIDATES": "直接地址候选",
     "TCP_CONNECT_FAILED": "TCP 连接失败",
     "TCP_CANDIDATES_TIMEOUT": "等待对端 TCP 候选地址超时",
     "TCP_LISTEN_ACCEPT_TIMEOUT": "监听端未在期限内接受 TCP 连接；不能单独确定是防火墙拦截",
@@ -184,6 +194,9 @@ EVENTS = {
     "ipv6.inbound_not_tested": "IPv6 回连未测试",
     "stun.observed": "STUN 映射观察",
     "stun.failed": "STUN 观察失败",
+    "stun.target_failed": "STUN 目标失败",
+    "stun.health": "STUN 出口可达性",
+    "stun.selected": "ICE 选用的 STUN",
     "nat.mapping": "NAT 映射证据",
     "mtu.directional": "方向性 MTU 证据",
     "quic.mtu_avoidance": "QUIC 报文降级",
@@ -236,8 +249,18 @@ FIELDS = {
     "profile": "重试档位",
     "trial": "新套接字重试轮次",
     "phase": "实验阶段",
-    "a_host": "协调端候选地址",
-    "b_host": "参与端候选地址",
+    "a_host": "协调端网卡绑定地址（非公网映射）",
+    "b_host": "参与端网卡绑定地址（非公网映射）",
+    "candidate_evidence": "实际候选与网络证据",
+    "local_candidates": "本端套接字候选 IP 与端口",
+    "remote_candidates": "对端提供的候选 IP 与端口",
+    "stun_observations": "本套接字 STUN 映射记录",
+    "stun_failures": "STUN 失败记录",
+    "diagnosis": "候选诊断（非 NAT 等级）",
+    "socket_error": "套接字错误",
+    "probe_sends": "探测发包调用数（不代表已送达）",
+    "received_probes": "收到的探测包数",
+    "rejected_probes": "拒绝的探测包数",
     "host": "本端绑定地址",
     "leader_initiator": "协调端主动发起",
     "initiator": "本端主动发起",
@@ -411,7 +434,7 @@ class HistoryLog(RichLog):
         self.serial = 0
         self.rendered_serial = 0
         self.rendered_width = None
-        self.first_serial = None
+        self.rendered_entries = deque()
 
     def append_entry(self, content):
         self.serial += 1
@@ -429,19 +452,36 @@ class HistoryLog(RichLog):
         if not self.is_on_screen or width < 2 or not self._size_known:
             return
         first = self.history[0][0] if self.history else None
-        rebuild = width != self.rendered_width or first != self.first_serial
+        rebuild = width != self.rendered_width
         follow = not self.lines or self.is_vertical_scroll_end
         position = self.scroll_y
         if rebuild:
             self.clear()
             self.rendered_serial = 0
-        for serial, content in self.history:
-            if serial > self.rendered_serial:
-                self.write(content, width=width, scroll_end=follow)
-                self.rendered_serial = serial
-        self.first_serial, self.rendered_width = first, width
-        if rebuild and not follow:
-            self.scroll_to(y=position, animate=False, immediate=True)
+            self.rendered_entries.clear()
+        removed_lines = 0
+        while self.rendered_entries and (first is None or self.rendered_entries[0][0] < first):
+            _, count = self.rendered_entries.popleft()
+            removed_lines += count
+        if removed_lines:
+            # Match RichLog's line eviction without rendering retained entries again.
+            del self.lines[:removed_lines]
+            self._start_line += removed_lines
+            self.virtual_size = Size(self.virtual_size.width, len(self.lines))
+            self.refresh()
+        new_entries = []
+        for serial, content in reversed(self.history):
+            if serial <= self.rendered_serial:
+                break
+            new_entries.append((serial, content))
+        for serial, content in reversed(new_entries):
+            previous_lines = len(self.lines)
+            self.write(content, width=width, scroll_end=follow)
+            self.rendered_entries.append((serial, len(self.lines) - previous_lines))
+            self.rendered_serial = serial
+        self.rendered_width = width
+        if not follow and (rebuild or removed_lines):
+            self.scroll_to(y=max(0, position - removed_lines), animate=False, immediate=True)
 
 
 class LogReader:
@@ -713,7 +753,8 @@ class P2PApp(App):
     Button.-error { background: #703b42; }
     DataTable { height: 1fr; background: #101416; }
     DataTable > .datatable--header { background: #273335; color: #d8e5e4; }
-    #matrix-selection, #path-selection { height: 3; padding: 0 1; background: #192123; }
+    #matrix-selection { height: 5; padding: 0 1; background: #192123; }
+    #path-selection { height: 3; padding: 0 1; background: #192123; }
     .section-title { height: 1; margin-top: 1; color: #7dd7bc; }
     #addresses { height: 12; } #callbacks { height: 7; }
     #public-ips, #gateways { height: 7; }
@@ -1394,6 +1435,8 @@ class P2PApp(App):
                     return "探测过期"
                 if any(r["code"] == "REACHABLE" and r["listener_received"] for r in fresh):
                     return "HTTP可达"
+                if all(r["code"] in ("OBSERVER_NO_ROUTE", "OBSERVER_SOURCE_UNAVAILABLE") for r in fresh):
+                    return "服务端网络不可用"
                 if any(r["code"] != "NOT_TESTED" for r in fresh):
                     return "已探测·未确认"
                 return "未测"
@@ -1469,6 +1512,10 @@ class P2PApp(App):
                 remote = manager.remote_done.get(attempt, {})
                 state = result.get("state", "running" if running == attempt else "pending")
                 explanation = scheme_explanation(spec)
+                reason = translated(result.get("reason", ""))
+                diagnosis = result.get("candidate_evidence", {}).get("diagnosis")
+                if state == "failed" and diagnosis in ("LOCAL_PUBLIC_UDP_MAPPING_MISSING", "PEER_PUBLIC_UDP_CANDIDATE_MISSING"):
+                    reason = translated(diagnosis) + "；" + reason
                 family = (
                     "6↔4"
                     if spec.get("method") == "nat64"
@@ -1493,7 +1540,7 @@ class P2PApp(App):
                             "是" if result.get("data_path") else "否" if "data_path" in result else "—",
                             number(result.get("elapsed_ms")),
                             explanation,
-                            translated(result.get("reason", "")),
+                            reason,
                         ],
                     )
                 )
@@ -1863,12 +1910,25 @@ class P2PApp(App):
         document = self.details.get(name, {}).get(key)
         if name == "attempts" and document:
             spec = document["尝试参数"]
+            evidence = document["本端结果"].get("candidate_evidence", {})
+
+            def candidates(key):
+                if key not in evidence:
+                    return "尚未记录"
+                endpoints = evidence[key]
+                return "、".join(f"[{ip}]:{port}" for ip, port in endpoints[:2]) + (
+                    f" 等 {len(endpoints)} 个" if len(endpoints) > 2 else ""
+                ) if endpoints else "无候选"
+
             self.query_ui("#matrix-selection", Static).update(
                 Text(
-                    f"{spec['attempt']}\n{spec.get('a_host') or 'ICE 自动选址'} ↔ {spec.get('b_host') or 'ICE 自动选址'}\n"
-                    f"阶段 {translated(spec['phase'])} · 协调端{'主动' if spec['leader_initiator'] else '被动'} · 偏移 {spec.get('offset', 0)}s"
+                    f"{spec['attempt']}\n绑定：协调端 {spec.get('a_host') or 'ICE 自动选址'} / 参与端 {spec.get('b_host') or 'ICE 自动选址'}\n"
+                    f"本端候选：{candidates('local_candidates')}\n对端候选：{candidates('remote_candidates')}\n"
+                    f"阶段 {translated(spec['phase'])} · 协调端{'主动' if spec['leader_initiator'] else '被动'} · 偏移 {spec.get('offset', 0)}s",
+                    no_wrap=True, overflow="ellipsis",
                 )
             )
+            self.query_ui("#matrix-selection", Static).tooltip = self.query_ui("#matrix-selection", Static).content
         elif name == "path-table" and document:
             self.query_ui("#path-selection", Static).update(
                 Text(

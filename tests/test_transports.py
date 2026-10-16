@@ -18,6 +18,42 @@ def specs(method, host, **params):
     )
 
 
+async def test_experiment_ping_failure_never_reports_a_verified_data_path(peers, monkeypatch):
+    from p2plab.experiments import Experiments
+    from p2plab.session import Path
+
+    a, b = peers
+    ma, mb = Experiments(a), Experiments(b)
+    sa, sb = specs("tcp", "127.0.0.1", phase="baseline")
+    ma.plan, mb.plan = [sa], [sb]
+    sent = []
+
+    async def from_a(data):
+        sent.append(data)
+        await mb.handle(data)
+
+    async def from_b(data):
+        await ma.handle(data)
+
+    a.signal, b.signal = from_a, from_b
+    original = Path.ping
+
+    async def fail_verify(path, *args, **kwargs):
+        if path.owner is a:
+            raise TimeoutError("TEST_VERIFICATION_PONG_TIMEOUT")
+        return await original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "ping", fail_verify)
+    try:
+        left, _ = await asyncio.wait_for(asyncio.gather(ma.execute(sa, 0), mb.execute(sb, 0)), 8)
+        assert left["data_path"] is False and left["state"] == "failed"
+        assert next(d for d in sent if d["kind"] == "done")["result"]["data_path"] is False
+        assert all(path.closed for path in a.paths)
+        assert not any(row["event"] == "path.verified" for row in a.log.query())
+    finally:
+        await asyncio.gather(ma.close(), mb.close())
+
+
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
 async def test_udp_mutual_auth_and_directional_mtu(peers, host):
     a, b = peers

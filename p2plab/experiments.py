@@ -768,8 +768,8 @@ class Experiments:
                     if spec["method"] in ("prediction", "prediction-wide") and not result.get("local_prediction_available"):
                         result["reason"] = "CONNECTED_WITHOUT_LOCAL_PORT_PREDICTION"
                 if path:
-                    result["state"], result["data_path"] = "success", True
                     result["rtt_ms"] = await path.ping()
+                    result["state"], result["data_path"] = "success", True
                     if spec["phase"] == "gateway" and lease is None:
                         result["state"] = "connected-without-local-gateway-lease"
                     if spec["method"] == "pwnat":
@@ -796,6 +796,14 @@ class Experiments:
                 result["state"] = "not-applicable"
             self.owner.log.exception("experiment.attempt_failed", exc, attempt=spec["attempt"])
         finally:
+            backend = getattr(obj, "backend", obj)
+            if backend and hasattr(backend, "candidate_evidence"):
+                result["candidate_evidence"] = backend.candidate_evidence()
+            elif backend and hasattr(backend, "candidates"):
+                result["candidate_evidence"] = {
+                    "local_candidates": [list(ep) for ep in backend.candidates],
+                    "remote_candidates": [list(ep) for ep in backend.remote_candidates],
+                }
             result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
             if obj and not result["data_path"]:
                 path = getattr(obj, "path", None) or (

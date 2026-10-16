@@ -4,6 +4,48 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
+## v0.1.8: Network Selection and Sustained Chat Reliability
+
+Upgrade both the client and server. This release addresses the real-network log
+findings and a reproduced TUI slowdown after the activity sidebar fills up.
+
+- Prefer interfaces carrying the default route, including Windows interface
+  metrics, while retaining alternative candidates within the configured budget.
+  Refresh route evidence and invalidate STUN health checks after network changes.
+- Try multiple DNS addresses and source-bound STUN health checks before choosing
+  an ICE observer. Defaults include MiWiFi, Cloudflare and Google; service health
+  is never substituted for a mapping measured on the actual punch socket.
+- Log actual local/peer endpoints, mapping failures and socket errors, and make
+  the distinction between interface bind addresses and mapped endpoints explicit
+  in the Chinese TUI.
+- Acknowledge file progress by elapsed time as well as byte count, so slow links
+  do not hit the old 256 KiB confirmation gap. Fix sparse-arrival speed displays
+  and include named timeout stages and transport evidence in failure logs.
+- Adapt MTU probe waits to authenticated RTT and back off after timeouts. Require
+  three consecutive primary-path liveness failures before rebuilding; received
+  authenticated traffic also proves the path is alive.
+- Report unavailable server source addresses/routes distinctly from a client
+  inbound firewall result, and mark data-path success only after verification.
+- Render sidebar log rollover incrementally instead of repeatedly redrawing all
+  1,000 retained entries. Keep complete durable logs and preserve wrapped text,
+  cached rendering, scroll position and history across hidden tabs and resizing.
+- Bundle native libnice/libutp backends in Windows single-file builds, compile
+  them from pinned sources in Actions and verify the packaged native transports.
+
+Local Linux reproduction with two real clients and approximately 50 ms RTT
+reduced chat-ACK P95 under synthetic log pressure from 313-323 ms to 127-149 ms.
+A separate QUIC research run confirmed all 457 bidirectional messages without
+retries and uploaded every generated client log record. These are isolated
+Linux/headless-TUI results, not Windows or cross-ISP performance guarantees.
+See `CHAT-LATENCY-REPRO-2026-10-17.md` and `LOG-AUDIT-2026-10-16-33.md`.
+
+Both platforms must pass source tests and frozen-binary checks before Actions
+publishes their client/server executables together. The complete local Linux
+suite passed with required native backends: 576 passed, 4 skipped. Windows CI
+also covers the route/STUN selection and slow-transfer ACK regressions.
+Real-router compatibility,
+WAN throughput and real-world connectivity rates remain experimental.
+
 ## v0.1.7: Parallel Connectivity Matrix
 
 Upgrade both the client and server. Independent hole-punch experiments now run

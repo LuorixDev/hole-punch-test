@@ -23,7 +23,7 @@ from cryptography.exceptions import InvalidSignature
 from .common import ALPN, Identity, encode_frame, endpoint, extract_frames, new_socket, packed, sockaddr
 from .quic_timer import QuicTimer
 from .session import Path
-from .stun import FilteringObserver, StunMixin, resolve_observer
+from .stun import FilteringObserver, StunMixin, resolve_observers
 
 MAGIC = b"P2L1"
 PROFILES = {
@@ -64,6 +64,8 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
         self.remote = None
         self.nonce = secrets.token_hex(16)
         self.local_nonces = {}
+        self.challenge_started = {}
+        self.probe_rtt = 0.0
         self.auth = {}
         self.direct = asyncio.Event()
         self.candidates_ready = asyncio.Event()
@@ -73,6 +75,8 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
         self.quic = None
         self.closed = False
         self.sends, self.rejected = 0, 0
+        self.received_probes = 0
+        self.stun_observations, self.stun_failures = [], []
         self.last_error = None
         self.init_stun()
 
@@ -101,6 +105,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
             "WARNING",
             attempt=self.attempt,
             errno=getattr(exc, "errno", None),
+            winerror=getattr(exc, "winerror", None),
             mtu_evidence=getattr(exc, "errno", None) == errno.EMSGSIZE,
         )
 
@@ -127,6 +132,8 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
     def send(self, target, body):
         if not self.closed:
             self.transport.sendto(probe_packet(body, body["size"]), sockaddr(target))
+            if body["kind"] == "hello":
+                self.challenge_started.setdefault(target, time.monotonic())
             self.sends += 1
 
     def datagram_received(self, data, addr):
@@ -137,6 +144,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
             if self.quic and source == self.remote:
                 self.quic.receive(data, addr)
             return
+        self.received_probes += 1
         try:
             own = parse_probe(data)
             if own.get("kind") == "hairpin" and own.get("from") == self.local_id:
@@ -192,6 +200,8 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
             elif kind == "hello_ack":
                 if body.get("echo") != self.nonce_for(source):
                     raise ValueError("PROBE_CHALLENGE_MISMATCH")
+                if not auth["ack"] and source in self.challenge_started:
+                    auth["challenge_rtt"] = now - self.challenge_started[source]
                 auth["ack"] = True
             elif kind == "mtu":
                 if body.get("echo") != self.nonce_for(source):
@@ -231,11 +241,26 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
 
     async def observe(self, observers):
         samples, endpoint_samples = [], []
+        self.stun_observations = samples
         filtering = None
         for observer in observers[:4]:
             try:
                 version = socket.AF_INET6 if ":" in self.host else socket.AF_INET
-                target = await asyncio.wait_for(resolve_observer(observer, family=version), 3)
+                targets = await asyncio.wait_for(resolve_observers(observer, family=version), 3)
+                result, last_failure = None, None
+                for target in targets[:2]:
+                    try:
+                        result = await self.binding(target, timeout=1.5)
+                        break
+                    except (OSError, TimeoutError, ValueError) as exc:
+                        last_failure = exc
+                        failure = {"observer": observer, "target": list(target),
+                                   "reason": type(exc).__name__ + ":" + str(exc)}
+                        self.stun_failures.append(failure)
+                        self.owner.log.event("stun.target_failed", attempt=self.attempt,
+                                             level="WARNING", **failure)
+                if result is None:
+                    raise last_failure
                 if not samples:
                     try:
                         filtering = await FilteringObserver().test(self.host, target)
@@ -245,7 +270,8 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
                         self.owner.log.event("nat.filtering", attempt=self.attempt, behavior="undetermined",
                                              fresh_socket=True, reason=type(exc).__name__ + ":" + str(exc))
                 for repeat in range(2):
-                    result = await self.binding(target, timeout=1.5)
+                    if repeat:
+                        result = await self.binding(target, timeout=1.5)
                     mapped = list(result["mapped"])
                     if mapped not in self.candidates:
                         self.candidates.append(mapped)
@@ -266,6 +292,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
                             extra = await self.binding(dest, timeout=1)
                             endpoint_samples.append((dest, extra["mapped"]))
             except Exception as exc:
+                self.stun_failures.append({"observer": observer, "reason": type(exc).__name__ + ":" + str(exc)})
                 self.owner.log.event(
                     "stun.failed", type(exc).__name__ + ":" + str(exc), "WARNING",
                     attempt=self.attempt, observer=observer, exception=type(exc).__name__,
@@ -291,6 +318,31 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
                 samples=samples,
             )
         return samples
+
+    def candidate_evidence(self):
+        def public(candidates):
+            return any(ipaddress.ip_address(ep[0]).is_global for ep in candidates)
+
+        if self.owner.loopback or ":" in self.host:
+            diagnosis = "DIRECT_ADDRESS_CANDIDATES"
+        elif not public(self.candidates):
+            diagnosis = "LOCAL_PUBLIC_UDP_MAPPING_MISSING"
+        elif not public(self.remote_candidates):
+            diagnosis = "PEER_PUBLIC_UDP_CANDIDATE_MISSING"
+        else:
+            diagnosis = "PUBLIC_UDP_CANDIDATES_PRESENT"
+        return {
+            "local_candidates": [list(ep) for ep in self.candidates],
+            "remote_candidates": [list(ep) for ep in self.remote_candidates],
+            "stun_observations": self.stun_observations,
+            "stun_failures": self.stun_failures,
+            "diagnosis": diagnosis,
+            "socket_error": self.last_error,
+            "probe_sends": self.sends,
+            "received_probes": self.received_probes,
+            "rejected_probes": self.rejected,
+            "scope": "missing-public-candidates-does-not-rule-out-LAN-or-routed-private-connectivity",
+        }
 
     def set_candidates(self, candidates):
         if not isinstance(candidates, list) or len(candidates) > 256:
@@ -326,7 +378,8 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
                 sock.setsockopt(level, option, original)
             self.owner.log.event("udp.ttl_warmup", attempt=self.attempt, ttl=ttl, restored=original,
                                  evidence="low-TTL-state-warmup;final-authentication-at-normal-TTL")
-        self.owner.log.event("udp.punch_started", attempt=self.attempt, local_monotonic=time.monotonic(), offset=offset)
+        self.owner.log.event("udp.punch_started", attempt=self.attempt, local_monotonic=time.monotonic(),
+                             offset=offset, **self.candidate_evidence())
         started, wait = time.monotonic(), profile["initial"]
         while not self.direct.is_set() and time.monotonic() - started < timeout:
             for target in self.remote_candidates:
@@ -345,6 +398,7 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
             rejected=self.rejected,
             parameters=profile,
             socket_error=self.last_error,
+            candidate_evidence=self.candidate_evidence(),
         )
         if not self.direct.is_set():
             raise TimeoutError("UDP_AUTHENTICATED_PUNCH_TIMEOUT")
@@ -368,26 +422,39 @@ class UdpAttempt(asyncio.DatagramProtocol, StunMixin):
             results=result,
             conclusion="size-specific-evidence-not-certified-pmtu",
             kernel_error=self.last_error,
+            probe_timeout_seconds=self.mtu_timeout(),
         )
         return result
 
+    def mtu_timeout(self):
+        # A valid challenge can include retransmission time; err on the side of waiting.
+        rtt = max(self.probe_rtt, self.auth.get(self.remote, {}).get("challenge_rtt", 0))
+        return min(4.0, max(0.6, rtt * 2 + 0.2))
+
     async def mtu_trials(self, size):
         hits, errors = 0, []
+        timeout = self.mtu_timeout()
         for _ in range(2):
             pid = secrets.token_hex(8)
             future = asyncio.get_running_loop().create_future()
             self.probes[pid] = future
             try:
+                started = time.monotonic()
                 self.send(
                     self.remote,
                     self.frame(
                         "mtu", target=self.remote, size=size, probe=pid, echo=self.auth[self.remote]["nonce"]
                     ),
                 )
-                returned = await asyncio.wait_for(future, 0.6)
+                returned = await asyncio.wait_for(future, timeout)
                 hits += returned == size
+                if returned == size:
+                    self.probe_rtt = time.monotonic() - started
+                    timeout = self.mtu_timeout()
             except (TimeoutError, OSError) as exc:
                 errors.append(type(exc).__name__)
+                if isinstance(exc, TimeoutError):
+                    timeout = min(4.0, timeout * 2)
             finally:
                 self.probes.pop(pid, None)
             await asyncio.sleep(0.05)

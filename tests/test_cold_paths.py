@@ -214,6 +214,36 @@ async def test_benchmark_suppresses_opt_in_periodic_rtt(peers, monkeypatch):
         await cleanup(peers)
 
 
+@pytest.mark.parametrize("recover", [True, False])
+async def test_primary_keepalive_requires_repeated_failure_before_closing(peers, monkeypatch, recover):
+    a, _ = await cold_pair(peers, monkeypatch)
+    path = a.active_path
+    original = path.ping
+    calls = []
+
+    async def flaky(*args, **kwargs):
+        calls.append(True)
+        if not recover or len(calls) == 1:
+            raise TimeoutError("TEST_DELAYED_PONG")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(path, "ping", flaky)
+    path.last_rx = path.last_tx = time.monotonic() - 13
+    try:
+        await wait_for(lambda: len(calls) >= (2 if recover else 3), timeout=9)
+        if recover:
+            await wait_for(lambda: path.liveness_failures == 0)
+            assert not path.closed and a.active_path is path
+        else:
+            await wait_for(lambda: path.closed)
+        rows = [r for r in a.log.query() if r["event"] == "path.liveness_failed"]
+        assert len(rows) == (1 if recover else 3)
+        assert rows[-1]["fields"]["consecutive_failures"] == (1 if recover else 3)
+        assert a.paths[1].closed
+    finally:
+        await cleanup(peers)
+
+
 async def test_busy_transfer_path_is_not_parked_on_switch_and_releases_when_done(peers, monkeypatch):
     a, b = await cold_pair(peers, monkeypatch)
     primary = a.active_path

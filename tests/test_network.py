@@ -19,6 +19,123 @@ from p2plab.network import (
 )
 
 
+def test_route_priority_preserves_wlan_ipv4_from_real_log_inventory():
+    records = [
+        address(1, address="2409:8a3c::1", interface="WLAN"),
+        address(2, address="2409:8a3c::2", interface="WLAN", type="unverified"),
+        address(3, address="192.168.67.1", family=4, interface="以太网 7", preferred_lifetime=None),
+        address(4, address="192.168.121.1", family=4, interface="以太网 6", preferred_lifetime=None),
+        address(5, address="192.168.1.22", family=4, interface="WLAN"),
+    ]
+    result = {"system_commands": [{}, {"output": [
+        {"dst": "default", "gateway": "192.168.1.1", "dev": "WLAN", "metric": 25},
+    ]}, {"output": [
+        {"dst": "default", "gateway": "fe80::1", "dev": "WLAN", "metric": 25},
+    ]}]}
+    network.apply_address_inventory(result, records, maximum=4)
+    selected = result["addresses"]
+    assert len(selected) == 4
+    assert next(r["address"] for r in selected if r["family"] == 4) == "192.168.1.22"
+    assert {r["address"] for r in selected if r["family"] == 6} == {"2409:8a3c::1", "2409:8a3c::2"}
+    assert result["gateways"] == [{"gateway": "192.168.1.1", "local": "192.168.1.22", "interface": "WLAN"}]
+    assert any(r["interface"] != "WLAN" for r in selected)
+    assert len(result["address_inventory"]) == 5
+    from p2plab.experiments import build_plan
+
+    plan = build_plan([r["address"] for r in selected], ["192.168.1.233", "240e::2"],
+                      ["fast"], gateway=False, max_pairs=2)
+    assert any(spec["a_host"] == "192.168.1.22" for spec in plan)
+
+
+def test_route_priority_uses_metric_and_allows_real_virtual_default_exit():
+    records = [address(i, address=f"10.0.{i}.2", family=4, interface=interface)
+               for i, interface in enumerate(("WLAN", "tunnel", "host-only"), 1)]
+    routes = [(4, {"dst": "default", "dev": "WLAN", "metric": 50}),
+              (4, {"dst": "default", "dev": "tunnel", "metric": 5})]
+    assert select_addresses(records, maximum=1, routes=routes)[0]["interface"] == "tunnel"
+    records[1]["interface_up"] = False
+    assert select_addresses(records, maximum=1, routes=routes)[0]["interface"] == "WLAN"
+
+
+async def test_refresh_routes_reselects_exit_without_address_membership_change(peers, monkeypatch):
+    client, _ = peers
+    records = [address(i, address=f"192.168.{i}.2", family=4, interface=f"nic{i}") for i in (1, 2)]
+    client.max_addresses = 1
+    client.network = {"address_inventory": records, "system_commands": [{}, {"output": [
+        {"dst": "default", "dev": "nic1", "gateway": "192.168.1.1"},
+    ]}, {"output": []}]}
+
+    async def inventory(**kwargs):
+        return records, {"state": "completed"}
+
+    async def routes():
+        return [{"state": "completed", "output": [{"dst": "default", "dev": "nic2", "gateway": "192.168.2.1"}]},
+                {"state": "completed", "output": []}]
+
+    monkeypatch.setattr("p2plab.client.read_address_inventory", inventory)
+    monkeypatch.setattr("p2plab.client.read_default_routes", routes)
+    await client.refresh_address_inventory(refresh_routes=True)
+    assert client.network["addresses"][0]["address"] == "192.168.2.2"
+    assert client.network["gateways"][0]["gateway"] == "192.168.2.1"
+
+
+def test_route_fingerprint_ignores_order_and_nondefault_routes_and_failed_reads():
+    rows = [{"dst": "default", "gateway": "192.168.1.1", "dev": "WLAN", "metric": 25},
+            {"dst": "default", "gateway": "10.0.0.1", "dev": "tun", "metric": 50}]
+    result = {"system_commands": [{}, {"state": "completed", "output": rows}, {"state": "completed", "output": []}]}
+    original = network.route_fingerprint(result)
+    rows.reverse()
+    rows.append({"dst": "192.168.1.0/24", "dev": "WLAN"})
+    assert network.route_fingerprint(result) == original
+    result["system_commands"][1]["state"] = "failed"
+    assert network.route_fingerprint(result) is None
+
+
+async def test_temporary_route_read_failure_does_not_replace_known_exit(peers, monkeypatch):
+    client, _ = peers
+    records = [address(1, address="192.168.1.22", family=4, interface="WLAN")]
+    routes = [{"state": "completed", "output": [{"dst": "default", "dev": "WLAN", "gateway": "192.168.1.1"}]},
+              {"state": "completed", "output": []}]
+    client.network = {"system_commands": [{}, *routes]}
+
+    async def inventory(**kwargs):
+        return records, {"state": "completed"}
+
+    async def failed():
+        return [{"state": "failed", "reason": "TimeoutError"} for _ in range(2)]
+
+    monkeypatch.setattr("p2plab.client.read_address_inventory", inventory)
+    monkeypatch.setattr("p2plab.client.read_default_routes", failed)
+    await client.refresh_address_inventory(refresh_routes=True)
+    assert client.network["system_commands"][1:] == routes
+    assert client.network["gateways"][0]["local"] == "192.168.1.22"
+
+
+async def test_ipv4_callback_uses_default_exit_even_with_unlimited_inventory(peers, monkeypatch):
+    client, _ = peers
+    records = [address(1, address="192.168.67.1", family=4, interface="host-only", preferred_lifetime=None),
+               address(2, address="192.168.1.22", family=4, interface="WLAN")]
+    client.network = {"system_commands": [{}, {"output": [
+        {"dst": "default", "dev": "WLAN", "gateway": "192.168.1.1"},
+    ]}, {"output": []}]}
+    client.inbound_supported = client.inbound_ipv4_supported = True
+    client.server_observed_ipv4 = "125.111.10.112"
+    client.network_ready.set()
+    tested = []
+
+    async def inventory(**kwargs):
+        return records, {"state": "completed"}
+
+    async def probe(host, *args, **kwargs):
+        tested.append(host)
+        return False
+
+    monkeypatch.setattr("p2plab.client.read_address_inventory", inventory)
+    monkeypatch.setattr(client, "inbound_http_probe", probe)
+    await client.inbound_check()
+    assert tested == ["192.168.1.22"]
+
+
 def address(number, *, temporary=False, **fields):
     return {
         "address": f"2606:4700::{number}",

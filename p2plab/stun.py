@@ -11,6 +11,7 @@ from .common import endpoint, new_socket, sockaddr
 COOKIE = 0x2112A442
 HEADER = struct.Struct("!HHI12s")
 XOR_MAPPED, OTHER, CHANGE, ORIGIN = 0x0020, 0x802C, 0x0003, 0x802B
+DEFAULT_OBSERVERS = ("stun.miwifi.com:3478", "stun.cloudflare.com:3478", "stun.l.google.com:19302")
 
 
 def attribute(kind: int, data: bytes) -> bytes:
@@ -71,13 +72,111 @@ def parse_response(data: bytes, tid: bytes) -> dict:
     return result
 
 
-async def resolve_observer(value: str, family=socket.AF_INET) -> tuple[str, int]:
+async def resolve_observers(value: str, family=socket.AF_INET) -> list[tuple[str, int]]:
     host, port = value.rsplit(":", 1)
     host = host.strip("[]")
     rows = await asyncio.get_running_loop().getaddrinfo(
         host, int(port), family=family, type=socket.SOCK_DGRAM
     )
-    return endpoint(rows[0][4][0], int(port))
+    targets = list(dict.fromkeys(endpoint(row[4][0], int(port)) for row in rows))
+    if not targets:
+        raise OSError("STUN_DNS_NO_ADDRESS")
+    return targets[:8]
+
+
+async def resolve_observer(value: str, family=socket.AF_INET) -> tuple[str, int]:
+    return (await resolve_observers(value, family))[0]
+
+
+class ObserverSelector:
+    """Short-lived, source-specific health checks; these are never punch mappings."""
+
+    def __init__(self, journal):
+        self.journal = journal
+        self.cache = {}
+        self.generation = 0
+        self.lock = asyncio.Lock()
+        self.probe_slots = asyncio.Semaphore(8)
+
+    def invalidate(self):
+        self.generation += 1
+        self.cache.clear()
+
+    async def probe(self, observer, source):
+        transport = None
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        evidence = {"observer": observer, "source": source, "state": "failed", "failures": []}
+        try:
+            async with asyncio.timeout(5):
+                family = socket.AF_INET6 if ":" in source else socket.AF_INET
+                targets = await asyncio.wait_for(resolve_observers(observer, family), 2)
+                sock = new_socket(source, socket.SOCK_DGRAM)
+                try:
+                    transport, protocol = await loop.create_datagram_endpoint(FilteringObserver, sock=sock)
+                except BaseException:
+                    sock.close()
+                    raise
+                for target in targets[:2]:
+                    try:
+                        await protocol.binding(target, timeout=1)
+                        evidence.pop("reason", None)
+                        return {**evidence, "state": "reachable", "target": list(target),
+                                "elapsed_ms": round((loop.time() - started) * 1000, 2)}
+                    except (OSError, TimeoutError, ValueError) as exc:
+                        evidence["reason"] = type(exc).__name__ + ":" + str(exc)
+                        evidence["failures"].append({"target": list(target), "reason": evidence["reason"]})
+        except (OSError, TimeoutError, ValueError) as exc:
+            evidence["reason"] = type(exc).__name__ + ":" + str(exc)
+        finally:
+            if transport:
+                transport.abort()
+        return evidence
+
+    async def available(self, observers, sources, *, attempt):
+        observers, sources = tuple(observers[:4]), tuple(sources)
+        key = (self.generation, observers, sources)
+        async with self.lock:
+            loop = asyncio.get_running_loop()
+            cached = self.cache.get(key)
+            if cached and cached[0] > loop.time():
+                reachable = cached[1]
+            else:
+                async def probe(observer, source):
+                    async with self.probe_slots:
+                        return await self.probe(observer, source)
+
+                results = await asyncio.gather(*(probe(observer, source)
+                    for observer in observers for source in sources))
+                for result in results:
+                    self.journal.event("stun.health", attempt=attempt,
+                                       evidence="service-health-only;not-punch-socket-mapping", **result)
+                reachable = [r for r in results if r["state"] == "reachable"]
+                # Bound stale source addresses across long-running interface changes.
+                self.cache = {k: v for k, v in self.cache.items() if v[0] > loop.time()}
+                if key[0] == self.generation:
+                    self.cache[key] = (loop.time() + (120 if reachable else 15), reachable)
+            return reachable
+
+    async def select(self, observers, sources, *, attempt):
+        reachable = await self.available(observers, sources, attempt=attempt)
+        selected = next(iter(reachable), None)
+        self.journal.event("stun.selected", attempt=attempt, selection=selected,
+                           state="reachable" if selected else "no-reachable-observer",
+                           host_candidates_retained=True)
+        return selected
+
+
+async def select_ice_observer(owner, profile, attempt, *, ipv4_only=False):
+    if owner.loopback or not owner.observers:
+        return None
+    sources = []
+    for row in owner.network.get("addresses", []):
+        family = row["family"]
+        if (profile == "dual" or family == int(profile)) and (not ipv4_only or family == 4):
+            if row["address"] not in sources:
+                sources.append(row["address"])
+    return await owner.stun_selector.select(owner.observers, sources[:8], attempt=attempt)
 
 
 class StunMixin:

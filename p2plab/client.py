@@ -37,7 +37,10 @@ from .network import (
     address_fingerprint,
     address_rejection,
     apply_address_inventory,
+    default_routes,
     read_address_inventory,
+    read_default_routes,
+    route_fingerprint,
     select_addresses,
     snapshot,
 )
@@ -45,6 +48,7 @@ from .performance import bottleneck_assessment
 from .runtime import application_directory, configure_console_encoding, default_client_data
 from .session import PATH_LIFECYCLE_CAPABILITY, Dedup
 from .status import direction_reference, public_ip_evidence, speed_assessment, utcnow, validate_status
+from .stun import DEFAULT_OBSERVERS, ObserverSelector
 from .transfers import RECEIPT_CAPABILITY, TransferManager, disk_call, open_source, validate_receipt
 from .udp import PROFILES
 from .wan import configured_families
@@ -131,9 +135,15 @@ class Client:
         self.max_pairs = min(max(int(options.get("max_pairs", 4)), 1), 8)
         self.expanded = bool(options.get("expanded", False))
         self.research_enabled = bool(options.get("comprehensive", not self.loopback))
-        self.extra_observers = options.get("stun", ["stun.l.google.com:19302", "stun.cloudflare.com:3478"])
+        self.extra_observers = options.get("stun", list(DEFAULT_OBSERVERS))
         if not isinstance(self.extra_observers, list) or len(self.extra_observers) > 3:
             raise ValueError("STUN_OBSERVER_LIMIT")
+        for observer in self.extra_observers:
+            if not isinstance(observer, str) or len(observer) > 255 or ":" not in observer:
+                raise ValueError("STUN_OBSERVER_INVALID")
+            host, port = observer.rsplit(":", 1)
+            if not host.strip("[]") or not port.isascii() or not port.isdigit() or not 1 <= int(port) <= 65535:
+                raise ValueError("STUN_OBSERVER_INVALID")
         log_options = config.get("logs", {})
         if not isinstance(log_options, dict):
             raise ValueError("LOG_CONFIGURATION_INVALID")
@@ -150,6 +160,7 @@ class Client:
         self.transfers = TransferManager(self)
         self.identity = Identity(self.data)
         self.log = Journal(self.data / "client.sqlite3", role="client", room=room, console=console)
+        self.stun_selector = ObserverSelector(self.log)
         self.observers = []
         self.tcp_observer = None
         self.tcp_observer_protocol = "raw"
@@ -335,16 +346,27 @@ class Client:
                 if path and not path.closed and not self.path_busy(path):
                     now = time.monotonic()
                     measure = self.rtt_monitor_enabled and self.link_monitor_active and not bench_busy
-                    due = now - path.last_liveness >= 2 if measure else now - max(path.last_rx, path.last_tx) >= 12
+                    due = (now - path.last_liveness >= 2 if measure or path.liveness_failures
+                           else now - max(path.last_rx, path.last_tx) >= 12)
                     if due:
+                        probe_started = time.monotonic()
                         try:
                             rtt = await path.ping(timeout=4, measure=measure)
+                            path.liveness_failures = 0
                             if measure:
                                 self.log.event("path.rtt_sample", attempt=path.attempt, rtt_ms=rtt,
                                                interval_seconds=2, scope="opt-in-current-path-only")
                         except (TimeoutError, ConnectionError, OSError) as exc:
-                            self.log.event("path.liveness_failed", str(exc), "WARNING", attempt=path.attempt)
-                            await path.close("KEEPALIVE_FAILED")
+                            # Authenticated traffic received during the probe also proves liveness.
+                            if path.last_rx > probe_started:
+                                path.liveness_failures = 0
+                            else:
+                                path.liveness_failures += 1
+                            self.log.event("path.liveness_failed", str(exc) or type(exc).__name__, "WARNING",
+                                           attempt=path.attempt, consecutive_failures=path.liveness_failures,
+                                           close_threshold=3, authenticated_rx_during_probe=path.last_rx > probe_started)
+                            if path.liveness_failures >= 3:
+                                await path.close("KEEPALIVE_FAILED")
                         finally:
                             path.last_liveness = time.monotonic()
                 try:
@@ -653,6 +675,7 @@ class Client:
             if previous and previous != address_fingerprint(self.network.get("address_inventory", [])):
                 self.wan_result = {"state": "not-tested", "families": {}, "reason": "NETWORK_CHANGED"}
                 self.inbound_results.clear()
+            self.stun_selector.invalidate()
             self.network_ready.set()
         await self.publish_status()
 
@@ -660,13 +683,17 @@ class Client:
         while not self.stop.is_set():
             await asyncio.sleep(60)
             previous = address_fingerprint(self.network.get("address_inventory", []))
-            current = address_fingerprint(await self.refresh_address_inventory())
-            if current != previous:
+            previous_routes = route_fingerprint(self.network)
+            current = address_fingerprint(await self.refresh_address_inventory(refresh_routes=True))
+            current_routes = route_fingerprint(self.network)
+            route_changed = previous_routes is not None and current_routes is not None and previous_routes != current_routes
+            if current != previous or route_changed:
                 self.wan_result = {"state": "not-tested", "families": {}, "reason": "NETWORK_CHANGED"}
                 self.inbound_results.clear()
-                self.log.event("network.changed", old=previous, new=current)
+                self.stun_selector.invalidate()
+                self.log.event("network.changed", old=previous, new=current, route_changed=route_changed)
                 await self.collect_network()
-                self.request_auto_retry("LOCAL_ADDRESS_OR_INTERFACE_CHANGED")
+                self.request_auto_retry("DEFAULT_ROUTE_CHANGED" if route_changed else "LOCAL_ADDRESS_OR_INTERFACE_CHANGED")
             await self.publish_status()
 
     def network_status(self):
@@ -868,7 +895,7 @@ class Client:
                     return None
         return reference
 
-    async def refresh_address_inventory(self):
+    async def refresh_address_inventory(self, *, refresh_routes=False):
         async with self.diagnostic_lock:
             previous = self.network.get("address_inventory", self.network.get("addresses", []))
             records, evidence = await read_address_inventory(loopback=self.loopback)
@@ -877,6 +904,15 @@ class Client:
                 commands[0] = evidence
             else:
                 commands.append(evidence)
+            if refresh_routes:
+                for index, route in enumerate(await read_default_routes(), 1):
+                    if len(commands) <= index:
+                        commands.append(route)
+                    elif route.get("state") == "completed" and isinstance(route.get("output"), list):
+                        commands[index] = route
+                    else:
+                        self.log.event("network.route_refresh_failed", level="WARNING", family=4 if index == 1 else 6,
+                                       evidence=route, previous_route_evidence_retained=True)
             changed = address_fingerprint(previous) != address_fingerprint(records)
             apply_address_inventory(self.network, records, maximum=self.max_addresses)
             if changed:
@@ -1021,6 +1057,7 @@ class Client:
             forwarded = body.get("observation_mode") == "forwarded" or non_global_source
             self.observers = [*([f"{ipv4}:{body['stun_port']}"] if not forwarded else []),
                               *self.extra_observers]
+            self.stun_selector.invalidate()
             self.tcp_observer = None if forwarded else (ipv4, body["tcp_port"])
             protocol = body.get("tcp_observer_protocol", "raw")
             if protocol not in ("raw", "http"):
@@ -1287,13 +1324,15 @@ class Client:
         await self.network_ready.wait()
         inventory = await self.refresh_address_inventory()
         if self.inbound_ipv4_supported and self.server_observed_ipv4:
-            local_v4 = [r for r in select_addresses(inventory, maximum=None) if r["family"] == 4]
+            local_v4 = [r for r in select_addresses(inventory, maximum=None, routes=default_routes(self.network))
+                        if r["family"] == 4]
             if local_v4:
                 record = next((r for r in local_v4 if r["address"] == self.server_observed_ipv4), local_v4[0])
                 await self.inbound_http_probe(
                     record["address"], self.peer_id, expected=record, destination=self.server_observed_ipv4
                 )
-        candidates = select_addresses(inventory, maximum=None, inbound=True, loopback=self.loopback)
+        candidates = select_addresses(inventory, maximum=None, inbound=True, loopback=self.loopback,
+                                      routes=default_routes(self.network))
         if not candidates:
             self.log.event(
                 "ipv6.inbound_not_tested",
@@ -1322,7 +1361,8 @@ class Client:
                 return
             if index:
                 inventory = await self.refresh_address_inventory()
-                candidates = select_addresses(inventory, maximum=None, inbound=True, loopback=self.loopback)
+                candidates = select_addresses(inventory, maximum=None, inbound=True, loopback=self.loopback,
+                                              routes=default_routes(self.network))
             pending = [r for r in candidates if r["address"] not in attempted]
             if not pending:
                 return

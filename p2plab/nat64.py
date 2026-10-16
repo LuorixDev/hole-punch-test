@@ -5,7 +5,7 @@ import ipaddress
 import socket
 
 from .common import endpoint
-from .stun import resolve_observer
+from .stun import resolve_observers
 from .udp import UdpAttempt
 
 LENGTHS = (32, 40, 48, 56, 64, 96)
@@ -68,18 +68,32 @@ class Nat64Attempt(UdpAttempt):
         if self.pending_candidates is not None:
             self.set_candidates(self.pending_candidates)
         samples = []
+        self.stun_observations = samples
         for observer in observers[:4]:
             try:
-                ip, port = await asyncio.wait_for(resolve_observer(observer), 3)
-                for prefix in self.prefixes:
-                    target = (synthesize(prefix, ip), port)
-                    result = await self.binding(target, timeout=1.5)
-                    mapped = list(result["mapped"])
-                    if mapped not in self.candidates:
-                        self.candidates.append(mapped)
-                    samples.append({"observer": target, "mapped": mapped, "prefix": prefix})
-                    self.owner.log.event("nat64.mapping", attempt=self.attempt, **samples[-1])
+                targets = await asyncio.wait_for(resolve_observers(observer), 3)
+                for ip, port in targets[:2]:
+                    succeeded = False
+                    for prefix in self.prefixes:
+                        target = (synthesize(prefix, ip), port)
+                        try:
+                            result = await self.binding(target, timeout=1.5)
+                        except (OSError, ValueError, TimeoutError) as exc:
+                            failure = {"observer": observer, "target": list(target),
+                                       "reason": type(exc).__name__ + ":" + str(exc)}
+                            self.stun_failures.append(failure)
+                            self.owner.log.event("nat64.target_failed", attempt=self.attempt, level="WARNING", **failure)
+                            continue
+                        mapped = list(result["mapped"])
+                        if mapped not in self.candidates:
+                            self.candidates.append(mapped)
+                        samples.append({"observer": target, "mapped": mapped, "prefix": prefix})
+                        self.owner.log.event("nat64.mapping", attempt=self.attempt, **samples[-1])
+                        succeeded = True
+                    if succeeded:
+                        break
             except (OSError, ValueError, TimeoutError) as exc:
+                self.stun_failures.append({"observer": observer, "reason": type(exc).__name__ + ":" + str(exc)})
                 self.owner.log.event("nat64.observer_failed", str(exc), "WARNING", attempt=self.attempt)
         if not any(ipaddress.ip_address(item[0]).version == 4 for item in self.candidates):
             raise ValueError("NAT64_IPV4_MAPPING_UNAVAILABLE")

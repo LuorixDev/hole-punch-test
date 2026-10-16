@@ -45,6 +45,7 @@ class Path:
         self.last_rx = time.monotonic()
         self.last_tx = self.last_rx
         self.last_liveness = self.last_rx
+        self.liveness_failures = 0
         self.last_rtt = None
         self.rtt_measured_at = None
         self.rtt_state = "not-measured"

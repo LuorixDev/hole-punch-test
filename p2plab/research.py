@@ -142,14 +142,9 @@ class SocketPoolAttempt:
                 self.sockets.append(udp)
                 await udp.open()
                 self.candidates.extend(udp.candidates)
-            targets = []
-            from .stun import resolve_observer
-
-            for observer in self.owner.observers[:2]:
-                try:
-                    targets.append(await asyncio.wait_for(resolve_observer(observer), 2))
-                except (OSError, TimeoutError, ValueError):
-                    continue
+            available = await self.owner.stun_selector.available(self.owner.observers, [self.host],
+                                                               attempt=self.attempt)
+            targets = list(dict.fromkeys(tuple(item["target"]) for item in available))[:2]
             semaphore = asyncio.Semaphore(16)
 
             async def observe(udp):
@@ -214,7 +209,8 @@ class SocketPoolAttempt:
                 ]
                 targets = list(dict.fromkeys(targets))[:512]
                 self.owner.log.event("pool.round", attempt=self.attempt, round=progress + 1,
-                                     target_ips=observed_ips, port_range=[low, high - 1], targets=len(targets))
+                                     target_ips=observed_ips, port_range=[low, high - 1], targets=len(targets),
+                                     target_endpoints=[list(ep) for ep in targets])
             if self.owner.leader:
                 winners = [udp for udp in self.sockets if udp.direct.is_set()]
                 if winners:

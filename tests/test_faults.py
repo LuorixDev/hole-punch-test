@@ -76,6 +76,31 @@ async def test_sub_1200_path_is_not_reported_as_quic_capable(peers):
         await asyncio.gather(ua.close(), ub.close())
 
 
+async def test_mtu_uses_authenticated_round_trip_budget_on_high_latency_path(peers):
+    class DelayedDatagrams(DatagramFilter):
+        def __init__(self, transport):
+            super().__init__(transport)
+            self.pending = []
+
+        def sendto(self, data, target):
+            self.pending.append(asyncio.get_running_loop().call_later(0.35, self.transport.sendto, data, target))
+
+        def close(self):
+            for handle in self.pending:
+                handle.cancel()
+            super().close()
+
+    ua, ub = await udp_pair(peers)
+    try:
+        ua.transport = DelayedDatagrams(ua.transport)
+        ub.transport = DelayedDatagrams(ub.transport)
+        await asyncio.gather(ua.punch(5), ub.punch(5))
+        hits, errors = await ua.mtu_trials(1200)
+        assert hits == 2 and errors == []
+    finally:
+        await asyncio.gather(ua.close(), ub.close())
+
+
 async def test_one_way_block_never_passes_mutual_auth(peers):
     ua, ub = await udp_pair(peers)
     try:

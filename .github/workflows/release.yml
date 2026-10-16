@@ -80,7 +80,17 @@ jobs:
         run: python -m pytest -q --junitxml=build/source-tests.xml
       - name: Windows startup, native network and UI regression suite
         if: runner.os == 'Windows'
-        run: python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_public_ip.py tests/test_tui.py tests/test_speed.py tests/test_transports.py tests/test_server.py tests/test_server_ports.py tests/test_reconnect.py tests/test_status_wan.py tests/test_inbound.py tests/test_release.py tests/test_cold_paths.py tests/test_native.py tests/test_research.py --junitxml=build/source-tests.xml
+        run: >-
+          python -m pytest -q tests/test_windows.py tests/test_startup.py
+          tests/test_public_ip.py tests/test_network.py tests/test_stun_selection.py
+          tests/test_tui.py tests/test_speed.py tests/test_transports.py
+          tests/test_server.py tests/test_server_ports.py tests/test_reconnect.py
+          tests/test_status_wan.py tests/test_inbound.py tests/test_release.py
+          tests/test_cold_paths.py tests/test_native.py tests/test_research.py
+          tests/test_transfers.py::test_sparse_transfer_arrivals_show_a_rate_instead_of_zero
+          tests/test_transfers.py::test_slow_progress_below_byte_ack_threshold_keeps_transfer_alive
+          tests/test_transfers.py::test_file_ack_timeout_has_progress_and_transport_evidence
+          --junitxml=build/source-tests.xml
       - name: Build and verify real single-file programs
         run: python tools/build_release.py
       - name: Upload release assets

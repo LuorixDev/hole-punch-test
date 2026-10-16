@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import ctypes as C
 import ipaddress
-import socket
 from collections import deque
 
 from .encrypted_stream import EncryptedStream
 from .native_loader import load_library
 from .rtc import filter_sdp
-from .stun import resolve_observer
+from .stun import select_ice_observer
 
 PTR, UINT, INT = C.c_void_p, C.c_uint, C.c_int
 RECV = C.CFUNCTYPE(None, PTR, UINT, UINT, UINT, PTR, PTR)
@@ -198,15 +197,11 @@ class NativeIceAttempt:
                     await self.writable.wait()
 
     async def connect(self):
-        for observer in self.owner.observers[:1]:
-            try:
-                host, port = await asyncio.wait_for(resolve_observer(observer,
-                    family=socket.AF_INET6 if self.spec["profile"] == "6" else socket.AF_INET), 2)
-                self.property("stun-server", host)
-                self.property("stun-server-port", port)
-            except (OSError, ValueError, TimeoutError) as exc:
-                self.owner.log.event("native.ice_stun_unavailable", str(exc), "WARNING", attempt=self.attempt,
-                                     observer=observer)
+        selection = await select_ice_observer(self.owner, self.spec["profile"], self.attempt)
+        if selection:
+            host, port = selection["target"]
+            self.property("stun-server", host)
+            self.property("stun-server-port", port)
         if not self.libs.nice.nice_agent_gather_candidates(self.agent, self.stream):
             raise ValueError("LIBNICE_GATHER_UNAVAILABLE")
         await asyncio.wait_for(self.gathered.wait(), self.owner.timeout + 10)

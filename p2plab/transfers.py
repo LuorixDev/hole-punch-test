@@ -19,6 +19,7 @@ FILE_CAPABILITY = "file-binary-v1"
 RECEIPT_CAPABILITY = "chat-receipt-v1"
 FILE_WINDOW = 4 * 1024 * 1024
 FILE_ACK_BYTES = 256 * 1024
+FILE_ACK_SECONDS = 1.0
 IO_BLOCK = 1024 * 1024
 IDLE_SECONDS = 30
 
@@ -169,12 +170,13 @@ class TransferManager:
         elapsed = max(0, now - started)
         done = item.get("completed", 0)
         samples = item.get("rate_samples", [])
-        recent = [s for s in samples if now - s[0] <= 2]
-        anchor = recent[0] if recent else (max(started, now - 2), done)
+        before = [s for s in samples if s[0] <= now - 2]
+        anchor = before[-1] if before else samples[0] if samples else (started, 0)
+        active = bool(samples and now - samples[-1][0] <= 2)
         return {
             "elapsed_seconds": elapsed,
             "average_mbps": done * 8 / max(elapsed, 1e-6) / 1e6,
-            "current_mbps": max(0, done - anchor[1]) * 8 / max(now - anchor[0], 1e-6) / 1e6,
+            "current_mbps": max(0, done - anchor[1]) * 8 / max(now - anchor[0], 1e-6) / 1e6 if active else 0.0,
         }
 
     def progress(self, tid, size):
@@ -184,7 +186,10 @@ class TransferManager:
         samples = item.get("rate_samples", [])
         if not samples or tick - samples[-1][0] >= 0.1:
             samples.append((tick, size))
-            item["rate_samples"] = [s for s in samples if tick - s[0] <= 3][-40:]
+            # Retain an anchor before the window, including for sparse, slow arrivals.
+            before = [s for s in samples if s[0] <= tick - 2]
+            recent = [s for s in samples if s[0] > tick - 2]
+            item["rate_samples"] = before[-1:] + recent[-39:]
         item.update(self.metrics(tid))
         now = time.monotonic()
         if now - item.get("last_log", 0) >= 1 or size == item["bytes"]:
@@ -235,6 +240,15 @@ class TransferManager:
             attempt=path.attempt,
         )
         completed = False
+        sent = acknowledged = 0
+        phase = "offer"
+
+        async def reply(timeout, reason):
+            try:
+                return await asyncio.wait_for(queue.get(), timeout)
+            except TimeoutError as exc:
+                raise TimeoutError(reason) from exc
+
         try:
             if original.st_size > self.max_bytes:
                 raise ValueError("FILE_SIZE_LIMIT")
@@ -247,7 +261,8 @@ class TransferManager:
                     "media": "image" if image else "file",
                 }
             )
-            ready = await asyncio.wait_for(queue.get(), 120)
+            phase = "ready"
+            ready = await reply(120, "FILE_READY_TIMEOUT")
             self.check_error(ready)
             if ready["kind"] != "file_ready":
                 raise ValueError("FILE_READY_REQUIRED")
@@ -256,11 +271,11 @@ class TransferManager:
 
             async def wait_ack():
                 nonlocal acknowledged
-                reply = await asyncio.wait_for(queue.get(), IDLE_SECONDS)
-                self.check_error(reply)
-                size = reply.get("bytes")
+                response = await reply(IDLE_SECONDS, "FILE_ACK_TIMEOUT")
+                self.check_error(response)
+                size = response.get("bytes")
                 if (
-                    reply.get("kind") != "file_ack"
+                    response.get("kind") != "file_ack"
                     or isinstance(size, bool)
                     or not isinstance(size, int)
                     or not acknowledged <= size <= sent
@@ -269,6 +284,7 @@ class TransferManager:
                 acknowledged = size
                 self.progress(tid, size)
 
+            phase = "data"
             while sent < original.st_size:
                 block = await disk_call(stream.read, min(IO_BLOCK, original.st_size - sent))
                 if not block:
@@ -284,6 +300,7 @@ class TransferManager:
                     sent += len(data)
                     seq += 1
             # Bulk and control streams may be independently ordered (QUIC/WebRTC).
+            phase = "ack"
             while acknowledged < sent:
                 await wait_ack()
             current = await disk_call(os.fstat, stream.fileno())
@@ -294,8 +311,9 @@ class TransferManager:
             ):
                 raise ValueError("FILE_CHANGED_DURING_SEND")
             await path.send({"kind": "file_end", "id": tid, "sha256": digest.hexdigest()})
+            phase = "receipt"
             while True:
-                result = await asyncio.wait_for(queue.get(), IDLE_SECONDS)
+                result = await reply(IDLE_SECONDS, "FILE_RECEIPT_TIMEOUT")
                 self.check_error(result)
                 if result["kind"] != "file_ack":
                     break
@@ -310,9 +328,11 @@ class TransferManager:
             completed = True
             return {**metrics, "id": tid, "sha256": digest.hexdigest()}
         except BaseException as exc:
-            reason = "FILE_CANCELLED" if isinstance(exc, asyncio.CancelledError) else str(exc)
+            reason = "FILE_CANCELLED" if isinstance(exc, asyncio.CancelledError) else str(exc) or type(exc).__name__
             self.record(tid, state="cancelled" if "CANCEL" in reason else "failed", reason=reason)
-            self.owner.log.event("file.failed", reason, "WARNING", transfer_id=tid, attempt=path.attempt)
+            self.owner.log.event("file.failed", reason, "WARNING", transfer_id=tid, attempt=path.attempt,
+                                 exception=type(exc).__name__, phase=phase, bytes_queued=sent,
+                                 bytes_confirmed=acknowledged, **self.failure_evidence(tid, path))
             raise
         finally:
             self.outgoing.pop(tid, None)
@@ -325,6 +345,15 @@ class TransferManager:
     def check_error(reply):
         if reply.get("kind") == "file_error":
             raise ConnectionError(reply.get("reason", "FILE_TRANSFER_FAILED"))
+
+    def failure_evidence(self, tid, path):
+        diagnostics = getattr(path, "transport_diagnostics", None)
+        try:
+            transport = diagnostics() if diagnostics else {"backend": path.mechanism}
+        except Exception as exc:
+            transport = {"diagnostic_error": type(exc).__name__ + ":" + str(exc)}
+        return {"direction": self.records[tid]["direction"], "transport": transport,
+                "total_bytes": self.records[tid]["bytes"], **self.metrics(tid)}
 
     def description(self, tid):
         item = self.records[tid]
@@ -419,6 +448,7 @@ class TransferManager:
             "started": None,
             "progress": time.monotonic(),
             "next_ack": FILE_ACK_BYTES,
+            "last_ack_at": time.monotonic(),
             "prefix": bytearray(),
             "lock": asyncio.Lock(),
         }
@@ -457,6 +487,7 @@ class TransferManager:
                 )
                 item["partial_owned"] = True
                 item["progress"] = time.monotonic()
+                item["last_ack_at"] = item["progress"]
                 self.record(tid, state="receiving")
                 item["started"] = self.records[tid]["started_monotonic"]
                 await item["path"].send({"kind": "file_ready", "id": tid})
@@ -486,9 +517,11 @@ class TransferManager:
             await disk_call(item["stream"].write, bytes(item["buffer"]))
             item["buffer"].clear()
         self.progress(tid, item["bytes"])
-        if item["bytes"] >= item["next_ack"] or item["bytes"] == item["expected"]:
+        if (item["bytes"] >= item["next_ack"] or item["bytes"] == item["expected"]
+                or time.monotonic() - item["last_ack_at"] >= FILE_ACK_SECONDS):
             await item["path"].send({"kind": "file_ack", "id": tid, "bytes": item["bytes"]})
             item["next_ack"] = item["bytes"] + FILE_ACK_BYTES
+            item["last_ack_at"] = time.monotonic()
 
     async def finish(self, tid, body):
         item = self.incoming[tid]
@@ -551,7 +584,8 @@ class TransferManager:
                     "file.cleanup_failed", str(exc), "WARNING", transfer_id=tid, operation="unlink"
                 )
         self.record(tid, state="cancelled" if "CANCEL" in reason else "failed", reason=reason)
-        self.owner.log.event("file.failed", reason, "WARNING", transfer_id=tid, attempt=item["path"].attempt)
+        self.owner.log.event("file.failed", reason, "WARNING", transfer_id=tid, attempt=item["path"].attempt,
+                             bytes_confirmed=item["bytes"], **self.failure_evidence(tid, item["path"]))
         if notify and not item["path"].closed:
             with contextlib.suppress(ConnectionError, TimeoutError, OSError):
                 await item["path"].send({"kind": "file_error", "id": tid, "reason": reason[:160]})

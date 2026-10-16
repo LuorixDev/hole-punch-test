@@ -554,6 +554,8 @@ class Hub:
             result["os_errno"] = exc.os_error.errno
             if exc.os_error.errno == errno.ENETUNREACH:
                 result["code"] = "OBSERVER_NO_ROUTE"
+            elif exc.os_error.errno == errno.EADDRNOTAVAIL:
+                result["code"] = "OBSERVER_SOURCE_UNAVAILABLE"
             elif exc.os_error.errno == errno.EHOSTUNREACH:
                 result["code"] = "OBSERVER_OR_DESTINATION_UNREACHABLE"
             elif exc.os_error.errno == errno.ECONNREFUSED:

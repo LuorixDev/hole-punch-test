@@ -5,11 +5,12 @@ import inspect
 import ipaddress
 import sys
 
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
 from .common import encode_frame, extract_frames, sockaddr
 from .ice_compat import install_retry_guard
 from .session import Path
+from .stun import select_ice_observer
 
 install_retry_guard()
 
@@ -65,8 +66,8 @@ class RtcAttempt:
     def __init__(self, owner, spec):
         self.owner, self.spec = owner, spec
         self.attempt = spec["attempt"]
-        servers = [] if owner.loopback else [RTCIceServer(urls="stun:" + value) for value in owner.observers[:2]]
-        self.pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
+        self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        self.stun_configured = False
         self.channels = {}
         self.buffers = {}
         self.path = Path(
@@ -169,6 +170,15 @@ class RtcAttempt:
         connection.get_component_candidates = gather_loopback
         self.gatherer_configured = True
 
+    async def configure_stun(self):
+        if self.stun_configured:
+            return
+        # aioice supports one IPv4 STUN server. IPv6 host candidates need no NAT mapping.
+        selection = await select_ice_observer(self.owner, self.spec["profile"], self.attempt, ipv4_only=True)
+        connection = self.pc.sctp.transport.transport.iceGatherer._connection
+        connection.stun_server = tuple(selection["target"]) if selection else None
+        self.stun_configured = True
+
     async def offer(self):
         async with self.signaling_lock:
             if self.closed:
@@ -176,6 +186,7 @@ class RtcAttempt:
             try:
                 self.attach(self.pc.createDataChannel("chat", ordered=True))
                 self.attach(self.pc.createDataChannel("benchmark", ordered=True))
+                await self.configure_stun()
                 self.configure_gatherer()
                 await self.pc.setLocalDescription(await self.pc.createOffer())
                 sdp = self.local_sdp()
@@ -206,6 +217,7 @@ class RtcAttempt:
                         )
                     )
                     if not self.closed:
+                        await self.configure_stun()
                         self.configure_gatherer()
                         await self.pc.setLocalDescription(await self.pc.createAnswer())
                         response = {"kind": "answer", "attempt": self.attempt, "sdp": self.local_sdp()}

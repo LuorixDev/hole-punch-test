@@ -50,6 +50,7 @@ def callback(tmp_path, monkeypatch):
     [
         (None, "TIMEOUT_INCONCLUSIVE"),
         (errno.ENETUNREACH, "OBSERVER_NO_ROUTE"),
+        (errno.EADDRNOTAVAIL, "OBSERVER_SOURCE_UNAVAILABLE"),
         (errno.EHOSTUNREACH, "OBSERVER_OR_DESTINATION_UNREACHABLE"),
         (errno.ECONNREFUSED, "CONNECTION_REFUSED"),
         (errno.EACCES, "CONNECT_FAILED"),

@@ -124,6 +124,70 @@ def test_transfer_rolling_speed_uses_confirmed_bytes_and_decays_when_stalled(pee
     assert a.transfers.metrics(tid)["elapsed_seconds"] == 4
 
 
+def test_sparse_transfer_arrivals_show_a_rate_instead_of_zero(peers, monkeypatch):
+    a, _ = peers
+    clock = [10.0]
+    monkeypatch.setattr("p2plab.transfers.time.perf_counter", lambda: clock[0])
+    tid = "0123456789abcdef"
+    a.transfers.record(tid, state="receiving", direction="receive", attempt="slow", bytes=1_000_000, completed=0)
+    for tick, size in ((18.0, 61440), (33.0, 122880), (43.0, 184320)):
+        clock[0] = tick
+        a.transfers.progress(tid, size)
+        assert a.transfers.metrics(tid)["current_mbps"] > 0
+    clock[0] += 3
+    assert a.transfers.metrics(tid)["current_mbps"] == 0
+
+
+@pytest.mark.parametrize("method", ["tcp", "quic"])
+async def test_slow_progress_below_byte_ack_threshold_keeps_transfer_alive(peers, tmp_path, monkeypatch, method):
+    from p2plab.common import BENCH_CHUNK
+
+    a, b = peers
+    source = tmp_path / "slow.bin"
+    source.write_bytes(os.urandom(BENCH_CHUNK * 5))
+    monkeypatch.setattr("p2plab.transfers.FILE_WINDOW", BENCH_CHUNK * 2)
+    monkeypatch.setattr("p2plab.transfers.IDLE_SECONDS", 0.15)
+    monkeypatch.setattr("p2plab.transfers.FILE_ACK_SECONDS", 0.03, raising=False)
+    async with connected(peers, method) as (pa, _):
+        original = pa._send
+
+        async def slow(body):
+            if body["kind"] == "file_chunk":
+                await asyncio.sleep(0.04)
+            await original(body)
+
+        monkeypatch.setattr(pa, "_send", slow)
+        result = await asyncio.wait_for(a.transfers.send(pa, source), 3)
+        assert result["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+        assert b.transfers.records[result["id"]]["state"] == "completed"
+
+
+async def test_file_ack_timeout_has_progress_and_transport_evidence(peers, tmp_path, monkeypatch):
+    from p2plab.common import BENCH_CHUNK
+
+    a, _ = peers
+    source = tmp_path / "stalled.bin"
+    source.write_bytes(bytes(BENCH_CHUNK * 5))
+    monkeypatch.setattr("p2plab.transfers.FILE_WINDOW", BENCH_CHUNK * 2)
+    monkeypatch.setattr("p2plab.transfers.IDLE_SECONDS", 0.1)
+    async with connected(peers) as (pa, pb):
+        original = pb._send
+
+        async def no_ack(body):
+            if body["kind"] != "file_ack":
+                await original(body)
+
+        monkeypatch.setattr(pb, "_send", no_ack)
+        pa.transport_diagnostics = lambda: {"backend": "test", "cwnd_bytes": 12000}
+        with pytest.raises(TimeoutError, match="FILE_ACK_TIMEOUT"):
+            await a.transfers.send(pa, source)
+        row = next(e for e in a.log.query() if e["event"] == "file.failed")
+        assert row["fields"]["bytes_queued"] == BENCH_CHUNK * 2
+        assert row["fields"]["bytes_confirmed"] == 0
+        assert row["fields"]["transport"]["cwnd_bytes"] == 12000
+        assert row["fields"]["exception"] == "TimeoutError"
+
+
 @pytest.mark.parametrize("method", ["tcp", "quic", "webrtc"])
 async def test_binary_duplex_file_and_chat_real_transports(peers, tmp_path, method, task_scheduling):
     a, b = peers

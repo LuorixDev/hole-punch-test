@@ -48,7 +48,8 @@ $rows = @(Get-NetRoute -PolicyStore ActiveStore | Where-Object {
 } | ForEach-Object {
     [PSCustomObject]@{
         prefix = $_.DestinationPrefix; gateway = $_.NextHop
-        dev = $_.InterfaceAlias; metric = $_.RouteMetric
+        dev = $_.InterfaceAlias
+        metric = $_.RouteMetric + (Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily $_.AddressFamily).InterfaceMetric
     }
 })
 ConvertTo-Json -InputObject $rows -Depth 4 -Compress
@@ -189,13 +190,21 @@ def address_fingerprint(records):
     )
 
 
-def select_addresses(records, *, maximum=4, inbound=False, loopback=False):
+def select_addresses(records, *, maximum=4, inbound=False, loopback=False, routes=()):
     now = time.monotonic()
+    defaults = {}
+    for family, route in routes:
+        if route.get("dst") == "default" and route.get("dev"):
+            metric = route.get("metric", 0)
+            metric = metric if type(metric) in (int, float) else 0
+            key = (family, route["dev"])
+            defaults[key] = min(defaults.get(key, float("inf")), metric)
 
     def rank(record):
         preferred = remaining_lifetime(record, "preferred_lifetime", now=now)
         valid = remaining_lifetime(record, "valid_lifetime", now=now)
         return (
+            defaults.get((record["family"], record.get("interface")), float("inf")),
             not ipaddress.ip_address(record["address"]).is_global,
             record.get("type") == "temporary",
             -(preferred if preferred is not None else float("inf")),
@@ -233,7 +242,9 @@ def select_addresses(records, *, maximum=4, inbound=False, loopback=False):
     remaining = [r for r in ordered if r not in chosen]
     while remaining:
         interfaces = {r.get("interface") for r in chosen}
-        next_record = next((r for r in remaining if r.get("interface") not in interfaces), remaining[0])
+        next_record = next((r for r in remaining if (r["family"], r.get("interface")) in defaults), None)
+        if next_record is None:
+            next_record = next((r for r in remaining if r.get("interface") not in interfaces), remaining[0])
         chosen.append(next_record)
         remaining.remove(next_record)
     return chosen if maximum is None else chosen[:maximum]
@@ -383,16 +394,55 @@ async def windows_routes():
     return [{**evidence, "output": outputs[version]} for version in (4, 6)]
 
 
+async def read_default_routes():
+    if platform.system() == "Windows":
+        return await windows_routes()
+    if platform.system() == "Linux":
+        return await asyncio.gather(command("ip", "-j", "-4", "route", "show"),
+                                    command("ip", "-j", "-6", "route", "show"))
+    return [{"state": "unsupported", "output": []} for _ in range(2)]
+
+
+def route_fingerprint(result):
+    commands = result.get("system_commands", [])
+    routes = []
+    for family, index in ((4, 1), (6, 2)):
+        if len(commands) <= index or commands[index].get("state") != "completed":
+            return None
+        output = commands[index].get("output")
+        if not isinstance(output, list):
+            return None
+        routes.extend((family, str(row.get("dev", "")), str(row.get("gateway", "")), str(row.get("metric", 0)))
+                      for row in output if isinstance(row, dict) and row.get("dst") == "default")
+    return tuple(sorted(routes))
+
+
+def default_routes(result):
+    commands = result.get("system_commands", [])
+    routes = []
+    for version, index in ((4, 1), (6, 2)):
+        output = commands[index].get("output", []) if len(commands) > index else []
+        if isinstance(output, list):
+            routes.extend((version, route) for route in output
+                          if isinstance(route, dict) and route.get("dst") == "default")
+    return routes
+
+
 def apply_address_inventory(result, records, *, maximum=4):
     result["address_inventory"] = records
-    result["addresses"] = select_addresses(records, maximum=maximum)
+    commands = result.get("system_commands", [])
+    routes = default_routes(result)
+    result["addresses"] = select_addresses(records, maximum=maximum, routes=routes)
+    result["address_selection"] = {
+        "basis": "default-route-and-metric-before-lifetimes;retain-other-interfaces-within-budget",
+        "default_routes": [{"family": family, **route} for family, route in routes if route.get("dst") == "default"],
+    }
     selected = {(r["interface"], r["address"]) for r in result["addresses"]}
     result["excluded_addresses"] = [
         {**r, "reason": address_rejection(r) or "ADDRESS_CANDIDATE_BUDGET"}
         for r in records
         if (r["interface"], r["address"]) not in selected
     ]
-    commands = result.get("system_commands", [])
     for version, index in ((4, 1), (6, 2)):
         gateways = []
         routes = commands[index].get("output", []) if len(commands) > index else []
