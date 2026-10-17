@@ -16,13 +16,13 @@ from aioquic import __version__ as aioquic_version
 from aioquic.buffer import Buffer
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
-from aioquic.quic.events import ConnectionTerminated, HandshakeCompleted, StreamDataReceived
+from aioquic.quic.events import ConnectionTerminated, HandshakeCompleted, StreamDataReceived, StreamReset
 from aioquic.quic.packet import QuicPacketType, pull_quic_header
 from cryptography.exceptions import InvalidSignature
 
 from .common import ALPN, Identity, encode_frame, endpoint, extract_frames, new_socket, packed, sockaddr
 from .quic_timer import QuicTimer
-from .session import Path
+from .session import BENCH_STREAM_CAPABILITY, Path
 from .stun import FilteringObserver, StunMixin, resolve_observers
 
 MAGIC = b"P2L1"
@@ -543,7 +543,10 @@ class QuicDriver:
             self.owner, udp.attempt, "quic", ipaddress.ip_address(udp.host).version, self.send, self.close
         )
         self.buffers = {}
-        self.queue = asyncio.Queue(maxsize=128)
+        self.bench_streams = {}
+        self.receiving_bench_streams = {}
+        self.queue = asyncio.PriorityQueue(maxsize=160)
+        self.queue_serial = 0
         self.flush_handle = None
         self.timer = QuicTimer(self.tick, precise=udp.spec.get("quic_precise_timer", True))
         self.counters = {k: 0 for k in (
@@ -554,6 +557,8 @@ class QuicDriver:
         self.timer_requested = 0.0
         self.timer_overdue = 0.0
         self.path.transport_diagnostics = self.diagnostics
+        self.path.abort_benchmark = self.abort_benchmark
+        self.path.finish_benchmark = lambda bid: self.bench_streams.pop(bid, None)
         self.owner.log.event("quic.runtime", attempt=udp.attempt, timer_backend=self.timer.backend,
                              backend_version=aioquic_version, socket_buffers=self.socket_buffers,
                              requested_socket_buffer_bytes=4 * 1024 * 1024,
@@ -604,16 +609,40 @@ class QuicDriver:
                 )
                 asyncio.create_task(self.path.start())
             elif isinstance(event, StreamDataReceived):
-                if event.stream_id not in (0, 1, 4, 5):
+                dedicated = event.stream_id % 4 == (3 if self.client else 2)
+                if dedicated and BENCH_STREAM_CAPABILITY not in self.path.remote_capabilities:
+                    raise ValueError("QUIC_BENCH_STREAM_NOT_NEGOTIATED")
+                if not dedicated and event.stream_id not in (0, 1, 4, 5):
                     raise ValueError("QUIC_UNEXPECTED_STREAM")
                 buf = self.buffers.get(event.stream_id)
                 if buf is None:
                     buf = self.buffers[event.stream_id] = bytearray()
                 buf.extend(event.data)
                 for frame in extract_frames(buf):
-                    self.queue.put_nowait(frame)
+                    if dedicated:
+                        bid = self.receiving_bench_streams.get(event.stream_id)
+                        if bid is None:
+                            if frame.get("kind") != "bench_start" or len(self.receiving_bench_streams) >= 4:
+                                raise ValueError("QUIC_BENCH_STREAM_START_REQUIRED")
+                            bid = self.receiving_bench_streams[event.stream_id] = frame.get("id")
+                        if frame.get("id") != bid or frame.get("kind") not in ("bench_start", "bench_chunk", "bench_end"):
+                            raise ValueError("QUIC_BENCH_STREAM_CONTEXT")
+                    self.enqueue(frame)
                 if event.end_stream:
-                    asyncio.create_task(self.path.close("QUIC_STREAM_ENDED"))
+                    if dedicated:
+                        if buf:
+                            raise ValueError("QUIC_BENCH_STREAM_TRUNCATED")
+                        self.buffers.pop(event.stream_id, None)
+                        self.receiving_bench_streams.pop(event.stream_id, None)
+                    else:
+                        asyncio.create_task(self.path.close("QUIC_STREAM_ENDED"))
+            elif isinstance(event, StreamReset):
+                self.buffers.pop(event.stream_id, None)
+                bid = self.receiving_bench_streams.pop(event.stream_id, None)
+                if bid is not None:
+                    self.enqueue({"kind": "bench_cancel", "id": bid})
+                elif event.stream_id in (0, 1, 4, 5):
+                    asyncio.create_task(self.path.close("QUIC_STREAM_RESET"))
             elif isinstance(event, ConnectionTerminated):
                 self.owner.log.event(
                     "quic.terminated",
@@ -626,6 +655,24 @@ class QuicDriver:
     def request_transmit(self):
         if not self.closed and self.flush_handle is None:
             self.flush_handle = asyncio.get_running_loop().call_soon(self.flush)
+
+    def enqueue(self, frame):
+        kind = frame.get("kind", "")
+        control = (kind in ("hello", "hello_ack", "ping", "pong", "bench_ready", "bench_ack",
+                            "bench_result", "bench_error", "bench_cancel")
+                   or kind.startswith(("chat", "reverse_speed")))
+        if not control and self.queue.qsize() >= 128:
+            raise asyncio.QueueFull
+        self.queue_serial += 1
+        self.queue.put_nowait((0 if control else 1, self.queue_serial, frame))
+
+    def abort_benchmark(self, bid):
+        stream = self.bench_streams.pop(bid, None)
+        if stream is not None and self.connection and not self.closed:
+            self.connection.reset_stream(stream, error_code=0x100)
+            self.request_transmit()
+            self.owner.log.event("quic.benchmark_stream_reset", attempt=self.udp.attempt,
+                                 benchmark=bid, stream=stream, reason="BENCH_ABORTED")
 
     def flush(self):
         try:
@@ -640,6 +687,7 @@ class QuicDriver:
                   "socket_buffers": self.socket_buffers,
                   "datagram_bytes": self.configuration.max_datagram_size,
                   "congestion_control": self.configuration.congestion_control_algorithm}
+        result.update(benchmark_streams=len(self.bench_streams), receive_queue_frames=self.queue.qsize())
         # Read-only, version-guarded adapter. No private congestion/pacing state is modified.
         loss = getattr(self.connection, "_loss", None)
         cc = getattr(loss, "_cc", None)
@@ -657,7 +705,7 @@ class QuicDriver:
             stream_credits = [
                 stream.max_stream_data_remote - stream.sender.highest_offset
                 for stream_id, stream in self.connection._streams.items()
-                if stream_id in (4, 5)
+                if stream_id in (4, 5, *self.bench_streams.values())
             ]
             if stream_credits:
                 result["send_flow_control_remaining_bytes"] = max(
@@ -666,7 +714,7 @@ class QuicDriver:
                 result["send_flow_control_blocked_streams"] = sum(
                     bool(stream.is_blocked)
                     for stream_id, stream in self.connection._streams.items()
-                    if stream_id in (4, 5)
+                    if stream_id in (4, 5, *self.bench_streams.values())
                 )
         except (AttributeError, TypeError):
             pass
@@ -715,7 +763,8 @@ class QuicDriver:
     async def consume(self):
         try:
             while not self.closed:
-                await self.path.receive(await self.queue.get())
+                _, _, frame = await self.queue.get()
+                await self.path.receive(frame)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -725,11 +774,23 @@ class QuicDriver:
     async def send(self, body):
         if self.closed or not self.connection:
             raise ConnectionError("QUIC_CLOSED")
-        # Benchmark streams are ACK-windowed by Path; public API needs no private buffer inspection.
         data = encode_frame(body)
-        bulk = body["kind"].startswith("bench_") or body["kind"] == "file_chunk"
-        stream = (4 if bulk else 0) + (0 if self.client else 1)
-        self.connection.send_stream_data(stream, data)
+        kind = body["kind"]
+        dedicated = kind in ("bench_start", "bench_chunk", "bench_end") and \
+            BENCH_STREAM_CAPABILITY in self.path.remote_capabilities
+        if dedicated:
+            bid = body["id"]
+            stream = self.bench_streams.get(bid)
+            if stream is None:
+                if kind != "bench_start":
+                    raise ValueError("QUIC_BENCH_STREAM_START_REQUIRED")
+                stream = self.connection.get_next_available_stream_id(is_unidirectional=True)
+                self.bench_streams[bid] = stream
+            self.connection.send_stream_data(stream, data, end_stream=kind == "bench_end")
+        else:
+            bulk = kind in ("bench_start", "bench_chunk", "bench_end", "file_chunk")
+            stream = (4 if bulk else 0) + (0 if self.client else 1)
+            self.connection.send_stream_data(stream, data)
         self.request_transmit()
         # Yield once per bounded batch, not once per UDP-sized packet or control frame.
         self.sent_app += len(data)

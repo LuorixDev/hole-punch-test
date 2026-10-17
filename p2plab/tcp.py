@@ -174,10 +174,18 @@ class TcpAttempt:
                                                  restored=original_ttl, target=target)
                         await asyncio.wait_for(connecting, max(1, self.owner.timeout / max(1, len(self.remote_candidates))))
                     finally:
-                        if self.sock:
-                            self.sock.setsockopt(level, option, original_ttl)
                         connecting.cancel()
                         await asyncio.gather(connecting, return_exceptions=True)
+                        if self.sock:
+                            try:
+                                self.sock.setsockopt(level, option, original_ttl)
+                            except OSError as exc:
+                                self.owner.log.event("tcp.ttl_restore_failed", str(exc), "WARNING",
+                                                     attempt=self.attempt, target=target)
+                                self.sock.close()
+                                self.sock = None
+                    if self.sock is None:
+                        raise ConnectionError("TCP_SOCKET_UNAVAILABLE_AFTER_CONNECT")
                     is_server = self.spec["method"] in ("tcp-simopen", "tcp-sync", "tcp-ttl") and not self.spec["tls_client"]
                     if is_server:
                         reader, writer = await self.accept_connected_socket(self.sock)

@@ -420,6 +420,38 @@ async def test_stunt_rebind_then_reverse_tls_channel(peers, host):
         await close_pair(peers, (left, right))
 
 
+async def test_ipv6_lan_uses_numeric_windows_interface_index(peers, monkeypatch):
+    from types import SimpleNamespace
+
+    import p2plab.lan as module
+
+    a, _ = peers
+    a.network = {"address_inventory": [{"address": "::1", "interface": "以太网", "interface_index": 17}]}
+    options, sent = [], []
+    sock = SimpleNamespace(setsockopt=lambda *args: options.append(args), close=lambda: None)
+    transport = SimpleNamespace(sendto=lambda data, target: sent.append(target), close=lambda: None)
+    monkeypatch.setattr(module, "new_socket", lambda *args, **kw: sock)
+
+    def no_name_lookup(name):
+        raise AssertionError("Must use OS index, not Windows InterfaceAlias")
+
+    monkeypatch.setattr(socket, "if_nametoindex", no_name_lookup)
+
+    async def create(factory, *, sock):
+        return transport, factory()
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "create_datagram_endpoint", create)
+    left = module.LanAttempt(a, specs("lan", "::1")[0], "::1")
+    left.candidates = [("::1", 12345)]
+    left.candidates_ready.set()
+    try:
+        await left.discover(1)
+        assert sent == [("ff02::114", 45555, 0, 17)]
+        assert (socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, 17) in options
+    finally:
+        await left.close()
+
+
 async def test_signed_lan_broadcast_discovers_only_paired_peer_and_upgrades_quic(peers):
     from p2plab.lan import LanAttempt
 

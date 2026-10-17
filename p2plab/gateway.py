@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from defusedxml import ElementTree as SafeET
 
-from .common import endpoint, new_socket, sockaddr
+from .common import endpoint, interface_index, new_socket, sockaddr
 
 PCP_PORT = 5351
 LEASE_SECONDS = 120
@@ -107,12 +107,12 @@ def parse_natpmp(data, internal, *, deleting=False, protocol=17):
 
 
 async def gateway_datagram(gateway, local, request, *, timeout=2):
-    sock = new_socket(local, socket.SOCK_DGRAM)
-    loop = asyncio.get_running_loop()
     host, _, interface = gateway.partition("%")
     target = (
-        (host, PCP_PORT, 0, socket.if_nametoindex(interface)) if interface else sockaddr((host, PCP_PORT))
+        (host, PCP_PORT, 0, interface_index(interface)) if interface else sockaddr((host, PCP_PORT))
     )
+    sock = new_socket(local, socket.SOCK_DGRAM)
+    loop = asyncio.get_running_loop()
     try:
         deadline = loop.time() + timeout
         for wait in (0.25, 0.5, 1.0):
@@ -170,7 +170,7 @@ class Upnp:
             if ipv6:
                 if not interface:
                     raise ValueError("UPNP_IPV6_DISCOVERY_INTERFACE_UNAVAILABLE")
-                index = socket.if_nametoindex(interface)
+                index = interface_index(interface)
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 1)
                 destination, header_host = ("ff02::c", 1900, 0, index), "[FF02::C]:1900"
@@ -425,7 +425,7 @@ async def create_lease(owner, method, udp, remote=None):
     address = ipaddress.ip_address(gateway)
     if address.version == 6:
         local = udp.host
-        gateway += "%" + route["interface"]
+        gateway += "%" + str(route.get("interface_index") or route["interface"])
     port = udp.candidates[0][1]
     if method.startswith("pcp"):
         nonce = secrets.token_bytes(12)

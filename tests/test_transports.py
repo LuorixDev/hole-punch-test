@@ -18,6 +18,58 @@ def specs(method, host, **params):
     )
 
 
+@pytest.mark.parametrize("restore_fails", [False, True])
+async def test_tcp_cancel_drains_connect_error_even_if_ttl_restore_fails(peers, monkeypatch, restore_fails):
+    owner, _ = peers
+    started = asyncio.Event()
+    children = []
+
+    class Socket:
+        closed = False
+
+        def getsockopt(self, *args):
+            return 64
+
+        def setsockopt(self, level, option, value):
+            if value == 64 and restore_fails:
+                raise OSError(995, "socket closed during cancellation")
+
+        def close(self):
+            self.closed = True
+
+    async def connect(sock, target):
+        children.append(asyncio.current_task())
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise OSError(995, "simulated Proactor completion after cancellation") from None
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "sock_connect", connect)
+    spec, _ = specs("tcp-ttl", "127.0.0.1", ttl=1)
+    attempt = TcpAttempt(owner, spec, "127.0.0.1")
+    sock = attempt.sock = Socket()
+    attempt.candidates = [["127.0.0.1", 12345]]
+    attempt.set_candidates([["127.0.0.1", 12346]])
+    task = asyncio.create_task(attempt.connect())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert children and all(child.done() for child in children)
+        assert all(isinstance(child.exception(), OSError) for child in children)
+        if restore_fails:
+            assert sock.closed
+            assert any(r["event"] == "tcp.ttl_restore_failed" for r in owner.log.query())
+    finally:
+        task.cancel()
+        for child in children:
+            child.cancel()
+        await asyncio.gather(task, *children, return_exceptions=True)
+        await attempt.close()
+
+
 async def test_experiment_ping_failure_never_reports_a_verified_data_path(peers, monkeypatch):
     from p2plab.experiments import Experiments
     from p2plab.session import Path

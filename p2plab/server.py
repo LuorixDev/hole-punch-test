@@ -473,6 +473,10 @@ class Hub:
             ip = ipaddress.ip_address(host)
             family = ip.version
             counter = "checks4" if ip.version == 4 else "checks"
+            now = time.monotonic()
+            if now - peer.setdefault("check_window_started", now) >= 60:
+                peer["checks"], peer["checks4"] = 0, 0
+                peer["check_window_started"] = now
             if not self.allow_inbound or peer.get(counter, 0) >= (1 if ip.version == 4 else 2):
                 raise ValueError("INBOUND_DISABLED_OR_LIMIT")
             allowed_prefix = not self.inbound_prefixes or any(ip in prefix for prefix in self.inbound_prefixes)
@@ -490,7 +494,6 @@ class Hub:
             )
             if port < 1024 or not allowed:
                 raise ValueError("INBOUND_TARGET_POLICY")
-            now = time.monotonic()
             rates = self.reach_rates[peer["source"]]
             while rates and rates[0] < now - 60:
                 rates.popleft()

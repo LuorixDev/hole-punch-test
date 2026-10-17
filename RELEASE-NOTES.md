@@ -4,6 +4,54 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
+## v0.1.11: Slow-Link Benchmarks and Windows Interface Recovery
+
+Upgrade both clients and the server. Slow links now sample each benchmark
+direction for approximately ten seconds or until the selected byte cap, then
+drain acknowledged traffic and report actual transferred bytes and elapsed time.
+The selected MiB value is a traffic ceiling, not a mandatory transfer size.
+
+- Adapt the application send window to delivery rate. Send timely progress
+  acknowledgements, including on small windows, to avoid slow-link deadlocks.
+- Negotiate a dedicated QUIC stream per benchmark. Reset canceled streams and
+  prioritize control traffic so queued benchmark bytes do not continue blocking
+  chat, cancellation or the next direction. Legacy peers retain their supported
+  protocol; upgrade both peers to obtain the complete fix.
+- Retain a bounded history of canceled benchmark IDs for the connection lifetime
+  so late data arriving after the old 130-second cutoff cannot close a healthy
+  chat channel. Log timeout phases and confirmed byte counts explicitly.
+- Use OS interface indices for Windows IPv6 PCP, SSDP and LAN multicast instead
+  of resolving localized adapter aliases. Close gateway sockets on failures and
+  drain canceled TCP connection tasks before restoring socket options.
+- Defer automatic matrix retries during local/remote benchmarks, WAN tests and
+  file transfers. Refresh RTT once after a completed bidirectional speed test;
+  standby paths do not regain periodic network probes.
+- Renew inbound HTTP callback quotas every 60 seconds within a signaling session.
+  Distinguish server policy rejection from an actual inbound firewall test.
+- Keep NAT grade in its own log field. Record application version and platform
+  at startup, and local CPU, event-loop, UI and active-transport health every
+  30 seconds without adding network probes.
+
+Linux isolated two-process tests reproduced the old timeout and residual queue
+at 1 Mbps / approximately 50 ms RTT. The fixed direction tests completed in
+approximately 10.4 seconds at 0.851 Mbps, with post-test RTT near 52 ms and chat
+ACK near 108 ms. The latest source regression run passed 604 tests with four
+skips. A separate real server/two-client headless TUI run delivered all 231
+messages and uploaded all current-session logs. See
+`BENCH-RECOVERY-2026-10-17.md` and `LOG-AUDIT-2026-10-17-CENTRAL.md`.
+
+These are controlled measurements, not cross-ISP guarantees. QUIC cold-start
+throughput asymmetry remains, and the pre-benchmark second-scale latency seen
+in older field logs has not been uniquely explained. The new runtime records
+help distinguish scheduling/UI load from transport queues. A server reporting
+`OBSERVER_SOURCE_UNAVAILABLE` still needs working IPv6 addressing/routing in its
+actual runtime environment; this release cannot repair that deployment remotely.
+Public WAN samples against overseas test nodes are not ISP bandwidth limits.
+
+Both platforms must pass Actions source regressions, single-file chat/ping/speed/
+file/log checks and packaged native-backend tests before their client/server
+executables are published together.
+
 ## v0.1.10: Network Selection and Sustained Chat Reliability
 
 Upgrade both the client and server. This release addresses the real-network log

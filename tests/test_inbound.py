@@ -79,6 +79,43 @@ async def test_callback_network_failures_are_not_firewall_verdicts(callback, mon
     assert body["token"] not in str(records)
 
 
+async def test_callback_budget_recovers_without_reconnect_and_preserves_replay_protection(
+    callback, monkeypatch, tmp_path
+):
+    hub, peer, template, results = callback
+    identity = Identity(tmp_path / "renewable-callback")
+    peer["public"] = identity.public
+    clock, calls = [100.0], []
+    monkeypatch.setattr("p2plab.server.time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def failed_get(*args, **kwargs):
+        calls.append(kwargs)
+        key = SimpleNamespace(host=template["address"], port=template["port"], ssl=False)
+        raise aiohttp.ClientConnectorError(key, OSError(errno.EADDRNOTAVAIL, "no server IPv6 source"))
+
+    def request():
+        body = {k: v for k, v in template.items() if k != "proof"}
+        body["request"] = secrets.token_hex(12)
+        body["proof"] = identity.sign({"session": peer["id"], **body})
+        return body
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", failed_get)
+    try:
+        first = request()
+        await hub.inbound(peer, first)
+        await hub.inbound(peer, request())
+        assert len(calls) == 2 and results[-1]["code"] == "OBSERVER_SOURCE_UNAVAILABLE"
+        await hub.inbound(peer, request())
+        assert results[-1]["code"] == "REJECTED_BY_POLICY" and len(calls) == 2
+        clock[0] += 61
+        await hub.inbound(peer, request())
+        assert results[-1]["code"] == "OBSERVER_SOURCE_UNAVAILABLE" and len(calls) == 3
+        await hub.inbound(peer, first)
+        assert "REPLAYED_REQUEST" in results[-1]["detail"] and len(calls) == 3
+    finally:
+        identity.close()
+
+
 @pytest.mark.parametrize("bad_target", ["127.0.0.1", "::1", "2001:db8::1", "2607:f8b0::1"])
 async def test_callback_policy_rejection_never_connects(callback, monkeypatch, bad_target):
     hub, peer, body, results = callback

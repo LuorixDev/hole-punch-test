@@ -134,12 +134,64 @@ async def worker(args):
         cpu_started, wall_started = time.process_time(), time.monotonic()
         measurements = []
         if role == "a":
+            async def recovery_ping():
+                try:
+                    return {"rtt_ms": await path.ping(timeout=5, measure=False)}
+                except Exception as exc:
+                    return {"error": type(exc).__name__ + ":" + str(exc)}
+
+            async def diagnose(direction):
+                before = await recovery_ping()
+                during = []
+
+                async def monitor_latency():
+                    while True:
+                        during.append(await recovery_ping())
+                        await asyncio.sleep(0.25)
+
+                monitor = asyncio.create_task(monitor_latency())
+                benchmark = asyncio.create_task(path.speed(args.size * 1024 * 1024)
+                                                if direction == "local-to-peer"
+                                                else path.reverse_speed(args.size * 1024 * 1024))
+                started = time.monotonic()
+                result = {}
+                try:
+                    if args.cancel_after:
+                        await asyncio.sleep(args.cancel_after)
+                        benchmark.cancel()
+                    try:
+                        result = await benchmark
+                    except asyncio.CancelledError:
+                        result = {"error": "CancelledError"}
+                    except Exception as exc:
+                        result = {"error": type(exc).__name__ + ":" + str(exc)}
+                finally:
+                    benchmark.cancel()
+                    monitor.cancel()
+                    await asyncio.gather(benchmark, monitor, return_exceptions=True)
+                elapsed = time.monotonic() - started
+                after = []
+                for _ in range(5):
+                    after.append(await recovery_ping())
+                    await asyncio.sleep(0.2)
+                try:
+                    chat_started = time.monotonic()
+                    await asyncio.wait_for(client.chat("benchmark recovery probe"), 10)
+                    chat = {"seconds": time.monotonic() - chat_started}
+                except Exception as exc:
+                    chat = {"error": type(exc).__name__ + ":" + str(exc)}
+                return {**result, "recovery": {"before": before, "during": during, "after": after,
+                                               "chat": chat, "operation_seconds": elapsed,
+                                               "path_closed": path.closed,
+                                               "transport": path.transport_diagnostics()
+                                               if hasattr(path, "transport_diagnostics") else {}}}
+
             directions = ("local-to-peer", "peer-to-local")
             if args.direction_order == "reverse-first":
                 directions = tuple(reversed(directions))
             for _ in range(args.runs):
                 for direction in directions:
-                    result = await (
+                    result = await diagnose(direction) if args.probe_recovery else await (
                         path.speed(args.size * 1024 * 1024)
                         if direction == "local-to-peer"
                         else path.reverse_speed(args.size * 1024 * 1024)
@@ -218,6 +270,8 @@ async def run(args):
                     "--quic-cc", args.quic_cc,
                     "--direction-order", args.direction_order,
                     "--reference-mbps", str(args.reference_mbps),
+                    "--cancel-after", str(args.cancel_after),
+                    *(["--probe-recovery"] if args.probe_recovery else []),
                 ] + (["--legacy"] if args.legacy else [])
                 if args.namespace_pids:
                     pid = args.namespace_pids[0 if role == "a" else 1]
@@ -257,11 +311,17 @@ def main():
     parser.add_argument("--quic-cc", choices=("reno", "cubic"), default="reno")
     parser.add_argument("--direction-order", choices=("forward-first", "reverse-first"),
                         default="forward-first")
-    parser.add_argument("--reference-mbps", type=int, choices=range(0, 10001), default=0)
+    parser.add_argument("--reference-mbps", type=float, default=0)
+    parser.add_argument("--probe-recovery", action="store_true")
+    parser.add_argument("--cancel-after", type=float, default=0)
     parser.add_argument("--hosts", nargs=2, default=["127.0.0.1", "127.0.0.1"])
     parser.add_argument("--namespace-pids", type=int, nargs=2, help=argparse.SUPPRESS)
     parser.add_argument("--role", choices=("a", "b"), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if not 0 <= args.reference_mbps <= 10000 or not 0 <= args.cancel_after <= 120:
+        parser.error("invalid reference rate or cancellation delay")
+    if args.cancel_after and not args.probe_recovery:
+        parser.error("--cancel-after requires --probe-recovery")
     asyncio.run(worker(args) if args.role else run(args))
 
 

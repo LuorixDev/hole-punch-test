@@ -23,7 +23,7 @@ try {
     & $MsysBash -lc "python tools/install_libutp.py && python tools/install_libnice.py"
     if ($LASTEXITCODE -ne 0) { throw "Windows native library build failed" }
     $env:P2PLAB_REQUIRE_NATIVE = "1"
-    & $Python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_native.py tests/test_cold_paths.py
+    & $Python -m pytest -q tests/test_windows.py tests/test_startup.py tests/test_native.py tests/test_cold_paths.py tests/test_gateway.py
     if ($LASTEXITCODE -ne 0) { throw "Windows startup/network tests failed" }
     & $Python tools/build_release.py
     if ($LASTEXITCODE -ne 0) { throw "Single-file build or frozen P2P smoke test failed" }

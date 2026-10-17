@@ -48,7 +48,7 @@ def controller(args):
                     "root",
                     "netem",
                     "limit",
-                    "20000",
+                    str(args.queue_packets),
                     "delay",
                     f"{args.delay_ms}ms",
                     "rate",
@@ -70,6 +70,7 @@ def controller(args):
                     "one_way_delay_ms": args.delay_ms,
                     "mtu": 1500,
                     "loss_percent": args.loss_percent,
+                    "queue_packets": args.queue_packets,
                     "host_network_modified": False,
                     "tcp_buffers": command(
                         ["sysctl", "net.ipv4.tcp_rmem", "net.ipv4.tcp_wmem"], keepers[0].pid
@@ -94,6 +95,8 @@ def controller(args):
             "--quic-cc", args.quic_cc,
             "--direction-order", args.direction_order,
             "--reference-mbps", str(args.rate_mbps),
+            "--cancel-after", str(args.cancel_after),
+            *(["--probe-recovery"] if args.probe_recovery else []),
             "--hosts",
             "10.202.0.1",
             "10.202.0.2",
@@ -116,7 +119,10 @@ def main():
     parser.add_argument("--size", type=int, choices=range(1, 1025), default=256)
     parser.add_argument("--runs", type=int, choices=range(1, 11), default=3)
     parser.add_argument("--delay-ms", type=int, choices=range(0, 101), default=25)
-    parser.add_argument("--rate-mbps", type=int, choices=range(10, 10001), default=1000)
+    parser.add_argument("--rate-mbps", type=float, default=1000)
+    parser.add_argument("--queue-packets", type=int, default=20000)
+    parser.add_argument("--probe-recovery", action="store_true")
+    parser.add_argument("--cancel-after", type=float, default=0)
     parser.add_argument("--tcp-buffer-mib", type=int, choices=(0, 32), default=0)
     parser.add_argument("--quic-timer", choices=("precise", "asyncio"), default="precise")
     parser.add_argument("--quic-datagram-size", type=int, choices=(1200, 1400), default=1200)
@@ -128,6 +134,10 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.loss_percent <= 10:
         parser.error("loss-percent must be between 0 and 10")
+    if not 0.01 <= args.rate_mbps <= 10000 or not 16 <= args.queue_packets <= 20000:
+        parser.error("invalid rate or queue size")
+    if not 0 <= args.cancel_after <= 120 or (args.cancel_after and not args.probe_recovery):
+        parser.error("--cancel-after requires --probe-recovery and a delay in [0, 120]")
     if args.host_netns:
         controller(args)
     else:
@@ -150,6 +160,9 @@ def main():
             str(args.delay_ms),
             "--rate-mbps",
             str(args.rate_mbps),
+            "--queue-packets", str(args.queue_packets),
+            "--cancel-after", str(args.cancel_after),
+            *(["--probe-recovery"] if args.probe_recovery else []),
             "--tcp-buffer-mib",
             str(args.tcp_buffer_mib),
             "--quic-timer", args.quic_timer,

@@ -12,10 +12,14 @@ from .performance import BenchProbe
 from .transfers import FILE_CAPABILITY, RECEIPT_CAPABILITY, receipt
 
 BENCH_CAPABILITY = "bench-binary-v1"
+TIMED_BENCH_CAPABILITY = "bench-timed-v1"
+BENCH_STREAM_CAPABILITY = "bench-stream-v1"
 REVERSE_CANCEL_CAPABILITY = "bench-reverse-cancel-v1"
 PATH_LIFECYCLE_CAPABILITY = "cold-path-v1"
 BENCH_WINDOW = 16 * 1024 * 1024
-BENCH_ACK_BYTES = 256 * 1024
+BENCH_ACK_BYTES = BENCH_CHUNK
+BENCH_ACK_SECONDS = 1
+BENCH_SAMPLE_SECONDS = 10
 MAX_BENCH_BYTES = 1024 * 1024 * 1024
 BENCH_TIMEOUT = 120
 
@@ -83,7 +87,8 @@ class Path:
                 "from": self.local_id,
                 "to": self.peer["id"],
                 "nonce": self.nonce,
-                "capabilities": [BENCH_CAPABILITY, REVERSE_CANCEL_CAPABILITY, FILE_CAPABILITY, RECEIPT_CAPABILITY,
+                "capabilities": [BENCH_CAPABILITY, TIMED_BENCH_CAPABILITY, BENCH_STREAM_CAPABILITY,
+                                 REVERSE_CANCEL_CAPABILITY, FILE_CAPABILITY, RECEIPT_CAPABILITY,
                                  PATH_LIFECYCLE_CAPABILITY],
                 **extra,
             }
@@ -246,10 +251,11 @@ class Path:
             cancelled = self.receive_benches.pop(body.get("id"), None)
             if cancelled:
                 cancelled["probe"].cancel()
-                self.remember_cancelled_bench(body["id"])
+            bid = body.get("id")
+            if not isinstance(bid, str) or len(bid) != 16 or any(c not in "0123456789abcdef" for c in bid):
+                raise ValueError("BENCH_ID_FORMAT")
+            self.remember_cancelled_bench(bid)
         elif kind == "bench_start":
-            if len(self.receive_benches) >= 2:
-                raise ValueError("BENCH_CONCURRENCY_LIMIT")
             size = body["bytes"]
             binary = body.get("format") == "binary-v1"
             if body.get("format") not in (None, "binary-v1") or (
@@ -268,6 +274,13 @@ class Path:
                 raise ValueError("BENCH_ID_FORMAT") from exc
             if body["id"] in self.receive_benches:
                 raise ValueError("BENCH_DUPLICATE_ID")
+            if body["id"] in self.cancelled_benches:
+                return
+            if len(self.receive_benches) >= 2:
+                raise ValueError("BENCH_CONCURRENCY_LIMIT")
+            timed = body.get("timed", False)
+            if type(timed) is not bool or (timed and TIMED_BENCH_CAPABILITY not in self.remote_capabilities):
+                raise ValueError("TIMED_BENCH_NOT_NEGOTIATED")
             wan_lock = getattr(self.owner, "wan_lock", None)
             if wan_lock and wan_lock.locked():
                 await self.send({"kind": "bench_error", "id": body["id"], "reason": "PEER_WAN_TEST_RUNNING"})
@@ -281,6 +294,8 @@ class Path:
                 "progress": time.monotonic(),
                 "binary": binary,
                 "next_ack": BENCH_ACK_BYTES,
+                "last_ack": time.monotonic(),
+                "timed": timed,
                 "probe": BenchProbe(self),
             }
             await self.send({"kind": "bench_ready", "id": body["id"]})
@@ -319,8 +334,10 @@ class Path:
             bench["seq"] += 1
             bench["progress"] = time.monotonic()
             ack_due = bench["bytes"] >= bench["next_ack"] if bench["binary"] else bench["seq"] % 16 == 0
-            if ack_due or bench["bytes"] == bench["expected"]:
+            if (bench["timed"] or ack_due or bench["bytes"] == bench["expected"]
+                    or time.monotonic() - bench["last_ack"] >= BENCH_ACK_SECONDS):
                 await self.send({"kind": "bench_ack", "id": body["id"], "bytes": bench["bytes"]})
+                bench["last_ack"] = time.monotonic()
                 while bench["next_ack"] <= bench["bytes"]:
                     bench["next_ack"] += BENCH_ACK_BYTES
         elif kind == "bench_end":
@@ -329,7 +346,9 @@ class Path:
                 return
             if bench:
                 runtime = bench["probe"].finish()
-            if not bench or bench["bytes"] != bench["expected"]:
+            expected = body.get("bytes") if bench and bench["timed"] else bench["expected"] if bench else None
+            if (not bench or type(expected) is not int or not 0 < expected <= bench["expected"]
+                    or bench["bytes"] != expected):
                 raise ValueError("BENCH_INCOMPLETE")
             duration = max(time.perf_counter() - bench["start"], 1e-9)
             result = {
@@ -397,11 +416,15 @@ class Path:
             self.pings.pop(pid, None)
 
     async def speed(self, size):
-        async with asyncio.timeout(BENCH_TIMEOUT):
-            return await self._speed(size)
+        try:
+            async with asyncio.timeout(BENCH_TIMEOUT):
+                return await self._speed(size)
+        except TimeoutError as exc:
+            raise TimeoutError(str(exc) or "BENCH_TOTAL_TIMEOUT") from exc
 
     async def _speed(self, size):
         binary = BENCH_CAPABILITY in self.remote_capabilities
+        timed = binary and TIMED_BENCH_CAPABILITY in self.remote_capabilities
         maximum = MAX_BENCH_BYTES if binary else 64 * 1024 * 1024
         if isinstance(size, bool) or not isinstance(size, int) or not 1024 <= size <= maximum:
             raise ValueError("BENCH_SIZE_LIMIT_OR_LEGACY_PEER")
@@ -412,6 +435,10 @@ class Path:
         self.benches[bid] = queue
         chunk = BENCH_CHUNK if binary else 8192
         window = BENCH_WINDOW if binary else 16 * chunk
+        current_window = min(window, 2 * chunk) if timed else window
+        peak_window = current_window
+        sent, seq, acknowledged = 0, 0, 0
+        phase = "ready"
         # Encrypted transports do not compress. Prepare a random block before timing, then reuse it.
         payload = secrets.token_bytes(chunk * 16)
         started = time.monotonic()
@@ -424,6 +451,7 @@ class Path:
                     "id": bid,
                     "bytes": size,
                     **({"format": "binary-v1"} if binary else {}),
+                    **({"timed": True} if timed else {}),
                 }
             )
             ready = await asyncio.wait_for(queue.get(), 10)
@@ -431,10 +459,8 @@ class Path:
                 raise ConnectionError(ready.get("reason", "BENCH_PATH_CLOSED"))
             if ready.get("kind") != "bench_ready":
                 raise ValueError("BENCH_READY_REQUIRED")
-            sent, seq, acknowledged = 0, 0, 0
-
             def acknowledge(ack):
-                nonlocal acknowledged
+                nonlocal acknowledged, current_window, peak_window
                 if ack.get("kind") == "bench_error":
                     raise ConnectionError(ack.get("reason", "BENCH_PATH_CLOSED"))
                 count = ack.get("bytes")
@@ -446,18 +472,27 @@ class Path:
                 ):
                     raise ValueError("BENCH_ACK_MISMATCH")
                 acknowledged = count
+                if timed:
+                    rate = acknowledged / max(time.perf_counter() - started, 1e-6)
+                    target_seconds = max(0.25, min(1.0, (self.last_rtt or 50) / 1000 * 4))
+                    current_window = min(window, max(chunk, int(rate * target_seconds)))
+                    peak_window = max(peak_window, current_window)
 
             started, cpu_started = time.perf_counter(), time.process_time()
             probe = BenchProbe(self)
             while sent < size:
+                phase = "send"
+                if timed and sent and time.perf_counter() - started >= BENCH_SAMPLE_SECONDS:
+                    break
                 while not queue.empty():
                     acknowledge(queue.get_nowait())
-                if sent - acknowledged >= window:
+                if sent - acknowledged >= current_window:
+                    phase = "progress"
                     acknowledge(await asyncio.wait_for(queue.get(), 20))
                     continue
                 raw = payload[
                     (seq % 16) * chunk : (seq % 16) * chunk
-                    + min(chunk, size - sent, window - (sent - acknowledged))
+                    + min(chunk, size - sent, current_window - (sent - acknowledged))
                 ]
                 await self.send(
                     {
@@ -471,9 +506,11 @@ class Path:
                 seq += 1
                 if time.perf_counter() - started > 120:
                     raise TimeoutError("BENCH_HARD_DEADLINE")
-            while acknowledged < size:
+            phase = "drain"
+            while acknowledged < sent:
                 acknowledge(await asyncio.wait_for(queue.get(), 20))
-            await self.send({"kind": "bench_end", "id": bid})
+            await self.send({"kind": "bench_end", "id": bid, **({"bytes": sent} if timed else {})})
+            phase = "result"
             result = await asyncio.wait_for(queue.get(), 20)
             if result.get("kind") == "bench_error":
                 raise ConnectionError(result.get("reason", "BENCH_PATH_CLOSED"))
@@ -491,12 +528,27 @@ class Path:
                 "format": "binary-v1" if binary else "legacy-json-base64",
                 "chunk_bytes": chunk,
                 "window_bytes": window,
+                "window_peak_bytes": peak_window,
+                "window_mode": "delivery-rate" if timed else "fixed",
+                "requested_bytes": size,
+                "sample_limited": "duration" if acknowledged < size else "bytes",
+                "target_seconds": BENCH_SAMPLE_SECONDS if timed else None,
                 "sender_cpu_seconds": time.process_time() - cpu_started,
                 "sender_runtime": probe.finish(),
                 "receiver_runtime": result.get("receiver_runtime"),
                 "short_sample": duration < 1,
             }
-        except BaseException:
+        except BaseException as failure:
+            abort = getattr(self, "abort_benchmark", None)
+            if abort:
+                try:
+                    abort(bid)
+                except Exception as exc:
+                    self.owner.log.exception("speed.reset_cleanup_failed", exc, attempt=self.attempt)
+            self.owner.log.event("speed.failed", str(failure) or type(failure).__name__, "WARNING",
+                                 attempt=self.attempt, benchmark=bid, phase=phase, bytes_sent=sent,
+                                 bytes_confirmed=acknowledged, requested_bytes=size,
+                                 exception=type(failure).__name__)
             if binary and not self.closed:
                 try:
                     async with asyncio.timeout(1):
@@ -505,11 +557,16 @@ class Path:
                     self.owner.log.event(
                         "speed.cancel_cleanup_failed", str(exc), "WARNING", attempt=self.attempt
                     )
+            if isinstance(failure, TimeoutError):
+                raise TimeoutError("BENCH_" + phase.upper() + "_TIMEOUT") from failure
             raise
         finally:
             if probe:
                 probe.cancel()
             self.benches.pop(bid, None)
+            finish = getattr(self, "finish_benchmark", None)
+            if finish:
+                finish(bid)
 
     async def reverse_speed(self, size):
         rid = secrets.token_hex(8)
@@ -568,9 +625,8 @@ class Path:
                     await self.send({"kind": "bench_error", "id": bid, "reason": "BENCH_RECEIVE_TIMEOUT"})
                 except (ConnectionError, TimeoutError, OSError) as exc:
                     self.owner.log.event("speed.expiry_notify_failed", str(exc), "WARNING", attempt=self.attempt)
-        for bid, stamp in tuple(self.cancelled_benches.items()):
-            if now - stamp > BENCH_TIMEOUT + 10:
-                self.cancelled_benches.pop(bid, None)
+        # Slow legacy streams can deliver queued bytes minutes after cancellation.
+        # Keep the bounded ID history until replacement or connection close.
         for mid, (started, _) in tuple(self.chat_starts.items()):
             if now - started > 30:
                 self.chat_starts.pop(mid, None)

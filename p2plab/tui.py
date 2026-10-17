@@ -105,6 +105,7 @@ REASONS = {
     "NO_IPV6_ROUTE": "观察端无 IPv6 路由",
     "OBSERVER_NO_ROUTE": "服务端无可用路由，无法判断入站",
     "OBSERVER_SOURCE_UNAVAILABLE": "服务端源地址不可用，无法判断入站",
+    "REJECTED_BY_POLICY": "服务端策略或探测额度拒绝，未测试入站",
     "NOT_TESTED": "未测试",
     "AUTHENTICATED_PROBE_ONLY_NO_CHAT_CHANNEL": "认证探测成功，未建立聊天通道",
     "UDP_AUTHENTICATED_PUNCH_TIMEOUT": "UDP 打洞认证超时",
@@ -131,6 +132,12 @@ REASONS = {
     "P2P_BENCH_SENDER_BUSY": "已有链路测速正在运行，请等待完成",
     "FILE_TRANSFER_BUSY": "文件传输正在进行，请等待完成后再测公网带宽",
     "BENCH_RECEIVE_TIMEOUT": "测速接收超时，本次测量已清理",
+    "BENCH_READY_TIMEOUT": "等待对端准备测速超时",
+    "BENCH_SEND_TIMEOUT": "发送测速数据超时，已请求终止本次测速",
+    "BENCH_PROGRESS_TIMEOUT": "等待测速进度确认超时，已请求终止本次测速",
+    "BENCH_DRAIN_TIMEOUT": "等待已发测速数据确认超时，已请求终止本次测速",
+    "BENCH_RESULT_TIMEOUT": "等待最终测速结果超时",
+    "BENCH_TOTAL_TIMEOUT": "测速超过总时限，已请求终止本次测速",
     "PEER_BENCH_BUSY": "对端已有测速正在运行",
     "LIBRESPEED_CLI_MISSING": "缺少 LibreSpeed 可执行文件",
     "NO_REACHABLE_WAN_TARGET": "未找到可用测速节点，请检查网络或配置区域节点列表",
@@ -205,6 +212,10 @@ EVENTS = {
     "webrtc.signal_ignored": "忽略已关闭尝试的迟到信令",
     "ping.result": "延迟测试结果",
     "speed.result": "测速结果",
+    "speed.failed": "测速阶段失败",
+    "speed.post_rtt": "测后延迟",
+    "speed.post_rtt_failed": "测后延迟未取得",
+    "network.auto_retry_deferred": "网络重测等待当前测速或传输结束",
     "quic.runtime": "QUIC运行后端与缓冲区",
     "quic.buffer_tuning_failed": "QUIC缓冲区调整失败",
     "quic.transmit_failed": "QUIC批量发送失败",
@@ -302,6 +313,13 @@ FIELDS = {
     "format": "测速数据格式",
     "chunk_bytes": "测速分块（字节）",
     "window_bytes": "最大未确认测速载荷（字节）",
+    "window_peak_bytes": "本轮发送窗口峰值（字节）",
+    "window_mode": "发送窗口模式",
+    "requested_bytes": "本轮流量上限（字节）",
+    "sample_limited": "本轮结束条件",
+    "target_seconds": "目标采样时长（秒）",
+    "bytes_sent": "已发送字节",
+    "bytes_confirmed": "对端确认字节",
     "sender_cpu_seconds": "发送端进程 CPU 耗时（秒）",
     "short_sample": "样本时长不足一秒",
     "mtu_evidence": "方向性 MTU 证据",
@@ -819,7 +837,7 @@ class P2PApp(App):
                 with Horizontal(id="toolbar"):
                     yield Button("测延迟", id="ping")
                     yield Select(
-                        [(f"{n} MiB", n) for n in (1, 4, 16, 64, 128, 256, 1024)],
+                        [(f"≤{n}MiB", n) for n in (1, 4, 16, 64, 128, 256, 1024)],
                         value=128,
                         allow_blank=False,
                         id="speed-size",
@@ -866,7 +884,7 @@ class P2PApp(App):
                 with Horizontal(id="path-tools"):
                     yield Button("切换链路", id="use-path")
                     yield Select(
-                        [(f"{n} MiB", n) for n in (1, 16, 64, 128, 256, 1024)],
+                        [(f"≤{n}MiB", n) for n in (1, 16, 64, 128, 256, 1024)],
                         value=128,
                         allow_blank=False,
                         id="path-speed-size",
@@ -1224,6 +1242,7 @@ class P2PApp(App):
                 or not self.main_screen or not self.main_screen.is_running or not self.main_screen.is_attached):
             return
         client = self.client
+        refresh_started = time.perf_counter()
         for record in self.reader.browse(after=self.cursor, run=client.log.run, limit=1000):
             self.cursor = record["cursor"]
             if record.get("run") != client.log.run:
@@ -1337,6 +1356,7 @@ class P2PApp(App):
         if self.page_before is None or not self.log_rows:
             self.refresh_logs()
         self.call_after_refresh(self.flush_chat_logs)
+        client.ui_refresh_max_ms = max(client.ui_refresh_max_ms, (time.perf_counter() - refresh_started) * 1000)
 
     def refresh_transfers(self):
         manager = self.client.transfers

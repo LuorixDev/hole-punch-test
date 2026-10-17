@@ -51,7 +51,8 @@ def test_windows_redirected_console_handles_chinese_independent_of_environment(t
 @pytest.fixture
 def windows_network(monkeypatch):
     rows = [{
-        "address": address, "interface": "Ethernet", "prefixlen": 64 if ":" in address else 24,
+        "address": address, "interface": "Ethernet", "interface_index": 17,
+        "prefixlen": 64 if ":" in address else 24,
         "state": state, "suffix_origin": origin, "valid_lifetime": 7200,
         "preferred_lifetime": 3600, "skip_as_source": skip,
     } for address, state, origin, skip in (
@@ -70,8 +71,10 @@ def windows_network(monkeypatch):
 
     async def powershell(script):
         output = rows if "Get-NetIPAddress" in script else [
-            {"prefix": "0.0.0.0/0", "gateway": "192.168.1.1", "dev": "Ethernet", "metric": 10},
-            {"prefix": "::/0", "gateway": "fe80::1", "dev": "Ethernet", "metric": 10},
+            {"prefix": "0.0.0.0/0", "gateway": "192.168.1.1", "dev": "Ethernet", "metric": 10,
+             "interface_index": 17},
+            {"prefix": "::/0", "gateway": "fe80::1", "dev": "Ethernet", "metric": 10,
+             "interface_index": 17},
         ]
         return {"state": "completed", "output": deepcopy(output)}
 
@@ -93,6 +96,18 @@ async def test_windows_state_filtering_routes_and_unknown_privacy_type(windows_n
     assert result["gateways"][0]["gateway"] == "192.168.1.1"
     assert len(result["gateways6"]) == 2
     assert all(r["gateway"] == "fe80::1" for r in result["gateways6"])
+    assert all(r["interface_index"] == 17 for r in result["addresses"])
+    assert all(r["interface_index"] == 17 for r in result["gateways6"])
+
+
+async def test_windows_localized_interface_keeps_os_scope_index(windows_network, monkeypatch):
+    for record in windows_network:
+        record["interface"] = "以太网"
+    monkeypatch.setattr("p2plab.network.psutil.net_if_stats",
+                        lambda: {"以太网": SimpleNamespace(isup=True, mtu=1500)})
+    inventory, _ = await read_address_inventory()
+    assert all(r["interface_index"] == 17 for r in inventory)
+    assert len(select_addresses(inventory)) == 3
 
 
 async def test_windows_lifetime_and_down_nic_fail_closed(windows_network, monkeypatch):

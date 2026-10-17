@@ -87,7 +87,7 @@ jobs:
           tests/test_public_ip.py tests/test_network.py tests/test_stun_selection.py
           tests/test_tui.py tests/test_speed.py tests/test_transports.py
           tests/test_server.py tests/test_server_ports.py tests/test_reconnect.py
-          tests/test_status_wan.py tests/test_inbound.py tests/test_release.py
+          tests/test_status_wan.py tests/test_inbound.py tests/test_gateway.py tests/test_release.py
           tests/test_cold_paths.py tests/test_native.py tests/test_research.py
           tests/test_transfers.py::test_sparse_transfer_arrivals_show_a_rate_instead_of_zero
           tests/test_transfers.py::test_slow_progress_below_byte_ack_threshold_keeps_transfer_alive

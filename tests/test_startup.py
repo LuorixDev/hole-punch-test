@@ -1,6 +1,8 @@
 import asyncio
 import subprocess
 import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 from textual.widgets import Input, Static
@@ -8,6 +10,34 @@ from textual.widgets import Input, Static
 from p2plab.client import main, normalize_server_address
 from p2plab.tui import JoinScreen, P2PApp
 from tests.test_server import cleanup_hub, start_hub
+
+
+async def test_runtime_monitor_records_blocking_and_ui_cost_without_network_probe(peers):
+    client, _ = peers
+    client.ui_refresh_max_ms = 17.5
+    client.active_path = SimpleNamespace(attempt="idle", transport_diagnostics=lambda: {"rtt_ms": 50})
+    task = asyncio.create_task(client.monitor_runtime(sample_seconds=0.005, report_seconds=0.04))
+    try:
+        await asyncio.sleep(0.01)
+        time.sleep(0.03)
+        async with asyncio.timeout(2):
+            while not any(r["event"] == "runtime.health" for r in client.log.query()):
+                await asyncio.sleep(0.005)
+        record = next(r for r in client.log.query() if r["event"] == "runtime.health")
+        fields = record["fields"]
+        assert fields["event_loop_lag_max_ms"] >= 20
+        assert fields["ui_refresh_max_ms"] == 17.5
+        assert fields["transport"] == {"rtt_ms": 50}
+        assert fields["scope"] == "local-runtime-only-no-network-probes"
+        assert fields["benchmark_senders"] == fields["benchmark_receivers"] == 0
+        assert not fields["matrix_running"] and not fields["wan_running"]
+        client.stop.set()
+        await asyncio.wait_for(task, 1)
+        assert client.ui_refresh_max_ms == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        client.active_path = None
 
 
 @pytest.mark.parametrize(("address", "expected"), [

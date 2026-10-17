@@ -32,7 +32,7 @@ WINDOWS_ADDRESSES = """
 $ErrorActionPreference = 'Stop'
 $rows = @(Get-NetIPAddress -Type Unicast | ForEach-Object {
     [PSCustomObject]@{
-        address = $_.IPAddress; interface = $_.InterfaceAlias
+        address = $_.IPAddress; interface = $_.InterfaceAlias; interface_index = $_.InterfaceIndex
         prefixlen = $_.PrefixLength; state = [string]$_.AddressState
         suffix_origin = [string]$_.SuffixOrigin; skip_as_source = $_.SkipAsSource
         valid_lifetime = $_.ValidLifetime.TotalSeconds
@@ -48,7 +48,7 @@ $rows = @(Get-NetRoute -PolicyStore ActiveStore | Where-Object {
 } | ForEach-Object {
     [PSCustomObject]@{
         prefix = $_.DestinationPrefix; gateway = $_.NextHop
-        dev = $_.InterfaceAlias
+        dev = $_.InterfaceAlias; interface_index = $_.InterfaceIndex
         metric = $_.RouteMetric + (Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily $_.AddressFamily).InterfaceMetric
     }
 })
@@ -296,6 +296,7 @@ async def read_address_inventory(*, loopback=False):
                 "address": str(ip),
                 "family": ip.version,
                 "interface": name,
+                "interface_index": interface.get("ifindex"),
                 "interface_up": up,
                 "mtu": interface.get("mtu", stat.mtu if stat else None),
                 "prefixlen": info.get("prefixlen"),
@@ -365,6 +366,7 @@ async def windows_address_inventory(fallback, *, loopback=False):
             kind = "stable" if ip.version == 4 or origin in ("Manual", "Link", "Dhcp", "WellKnown") else "unverified"
             records.append({
                 "address": str(ip), "family": ip.version, "interface": name,
+                "interface_index": row.get("interface_index"),
                 "interface_up": bool(stat and stat.isup), "mtu": stat.mtu if stat else None,
                 "prefixlen": prefix, "prefix": str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False)),
                 "state": state, "type": kind, "suffix_origin": origin,
@@ -388,7 +390,8 @@ async def windows_routes():
                 if row["prefix"] != ("0.0.0.0/0" if ip.version == 4 else "::/0") or ip.is_unspecified:
                     continue
                 outputs[ip.version].append({"dst": "default", "gateway": str(ip), "dev": row["dev"],
-                                            "metric": row.get("metric")})
+                                            "metric": row.get("metric"),
+                                            "interface_index": row.get("interface_index")})
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
     return [{**evidence, "output": outputs[version]} for version in (4, 6)]
@@ -458,6 +461,9 @@ def apply_address_inventory(result, records, *, maximum=4):
                                     "interface": route["dev"],
                                 }
                             )
+                            interface_id = route.get("interface_index") or address.get("interface_index")
+                            if interface_id:
+                                gateways[-1]["interface_index"] = interface_id
         result["gateways" if version == 4 else "gateways6"] = gateways
     result["ipv6_status"] = (
         "GLOBAL_ADDRESS_PRESENT"

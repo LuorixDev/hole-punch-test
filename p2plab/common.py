@@ -60,6 +60,17 @@ def family(host: str) -> int:
     return socket.AF_INET6 if ":" in host else socket.AF_INET
 
 
+def interface_index(interface: str | int) -> int:
+    # Windows InterfaceAlias is not necessarily a Winsock interface name.
+    if type(interface) is int or isinstance(interface, str) and interface.isascii() and interface.isdecimal():
+        index = int(interface)
+    else:
+        index = socket.if_nametoindex(interface)
+    if not 1 <= index <= 0xFFFFFFFF:
+        raise ValueError("INVALID_INTERFACE_INDEX")
+    return index
+
+
 def new_socket(host: str, kind: int, port: int = 0, *, reuse_port=False, reuse_address=False) -> socket.socket:
     sock = socket.socket(family(host), kind)
     try:

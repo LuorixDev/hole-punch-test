@@ -26,6 +26,7 @@ import psutil
 from rich.console import Console
 from rich.text import Text
 
+from . import __version__
 from .common import MAX_TEXT, Identity
 from .console import ConsoleReader
 from .experiments import Experiments
@@ -98,6 +99,7 @@ def normalize_server_address(address):
 class Client:
     def __init__(self, config, room, *, console=True):
         self.config, self.room = config, room
+        self.ui_refresh_max_ms = 0.0
         self.server_url = config.get("server", "ws://127.0.0.1:8443/ws")
         url = urlsplit(self.server_url)
         if url.scheme not in ("ws", "wss") or not url.hostname or url.username or url.password or url.query:
@@ -752,7 +754,7 @@ class Client:
             "network.nat_assessment",
             "IPv4 NAT 等级依据本次同 socket STUN 映射与独立过滤探测；过滤超时可能受丢包影响",
             state=assessment["state"],
-            level=assessment["level"],
+            nat_level=assessment["level"],
             label=assessment["label"],
             evidence=assessment["evidence"],
             tested_at=assessment.get("tested_at"),
@@ -1277,6 +1279,19 @@ class Client:
     async def automatic_retry(self, reason):
         pair = self.pair
         await asyncio.sleep(max(2, 120 - (time.monotonic() - self.last_auto_retry)))
+        deferred = False
+        while not self.closed and pair == self.pair and self.connected.is_set():
+            busy = (self.speed_lock.locked() or self.wan_lock.locked()
+                    or self.peer_network.get("wan", {}).get("state") == "running"
+                    or self.transfers.incoming or self.transfers.outgoing
+                    or any(p.benches or p.receive_benches for p in self.paths if not p.closed))
+            if not busy:
+                break
+            if not deferred:
+                self.log.event("network.auto_retry_deferred", reason,
+                               policy="wait-for-measurements-and-transfers;preserve-live-paths")
+                deferred = True
+            await asyncio.sleep(0.25)
         if self.closed or pair != self.pair or not self.connected.is_set():
             return
         self.last_auto_retry = time.monotonic()
@@ -1755,6 +1770,12 @@ class Client:
                     matrix_in_progress=competing,
                 )
             path.speed_state = "success"
+            # Refresh once after draining both directions; do not monitor standby paths.
+            try:
+                rtt = await path.ping(timeout=2)
+                self.log.event("speed.post_rtt", attempt=path.attempt, rtt_ms=rtt)
+            except (ConnectionError, TimeoutError) as exc:
+                self.log.event("speed.post_rtt_failed", str(exc), "WARNING", attempt=path.attempt)
             return path
         except asyncio.CancelledError:
             path.speed_state = "cancelled"
@@ -1888,6 +1909,46 @@ class Client:
                     process.kill()
                 await process.wait()
 
+    async def monitor_runtime(self, *, sample_seconds=0.25, report_seconds=30):
+        started = time.perf_counter()
+        cpu, thread_cpu = time.process_time(), time.thread_time()
+        lag = collections.deque(maxlen=256)
+        while not self.stop.is_set():
+            before = time.perf_counter()
+            await asyncio.sleep(sample_seconds)
+            if self.stop.is_set():
+                return
+            now = time.perf_counter()
+            lag.append(max(0, now - before - sample_seconds) * 1000)
+            elapsed = now - started
+            if elapsed < report_seconds:
+                continue
+            active = self.active_path
+            transport = {}
+            getter = getattr(active, "transport_diagnostics", None)
+            if getter:
+                try:
+                    transport = getter()
+                except Exception as exc:
+                    transport = {"diagnostic_error": type(exc).__name__}
+            process_now, thread_now = time.process_time(), time.thread_time()
+            self.log.event(
+                "runtime.health", seconds=elapsed, samples=len(lag),
+                process_core_fraction=(process_now - cpu) / elapsed,
+                event_loop_core_fraction=(thread_now - thread_cpu) / elapsed,
+                event_loop_lag_p95_ms=sorted(lag)[min(len(lag) - 1, int(len(lag) * 0.95))],
+                event_loop_lag_max_ms=max(lag), ui_refresh_max_ms=self.ui_refresh_max_ms,
+                active_attempt=getattr(active, "attempt", None), transport=transport,
+                live_paths=sum(not p.closed for p in self.paths),
+                benchmark_senders=sum(len(getattr(p, "benches", {})) for p in self.paths),
+                benchmark_receivers=sum(len(getattr(p, "receive_benches", {})) for p in self.paths),
+                matrix_running=self.experiment_matrix_running(), wan_running=self.wan_lock.locked(),
+                scope="local-runtime-only-no-network-probes",
+            )
+            self.ui_refresh_max_ms = 0.0
+            started, cpu, thread_cpu = now, process_now, thread_now
+            lag.clear()
+
     async def run(self, *, interactive=True, signal_stop=None):
         self.log.install()
         loop = asyncio.get_running_loop()
@@ -1903,6 +1964,8 @@ class Client:
             room=self.room,
             server=self.server_url,
             name=self.name,
+            version=__version__, python=sys.version.split()[0], platform=sys.platform,
+            frozen=bool(getattr(sys, "frozen", False)),
             profiles=self.profiles,
             gateway=self.gateway_enabled,
             comprehensive=self.research_enabled,
@@ -1920,6 +1983,7 @@ class Client:
         self.spawn(self.uploader(), "log-uploader")
         self.spawn(self.collect_network(), "network-diagnostics")
         self.spawn(self.watch_network(), "network-watcher")
+        self.spawn(self.monitor_runtime(), "runtime-monitor")
         if interactive:
             self.spawn(self.terminal(), "terminal")
         try:

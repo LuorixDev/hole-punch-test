@@ -9,7 +9,7 @@ import sys
 
 from cryptography.exceptions import InvalidSignature
 
-from .common import Identity, endpoint, new_socket, packed
+from .common import Identity, endpoint, interface_index, new_socket, packed
 from .udp import UdpAttempt
 
 
@@ -51,7 +51,8 @@ class LanAttempt(UdpAttempt):
             records = self.owner.network.get("address_inventory", self.owner.network.get("addresses", []))
             record = next((r for r in records if r["address"] == self.host), {})
             if ipv6:
-                index = socket.if_nametoindex(record.get("interface", "lo" if self.owner.loopback else ""))
+                index = interface_index(record.get("interface_index") or record.get(
+                    "interface", "lo" if self.owner.loopback else ""))
                 group = socket.inet_pton(socket.AF_INET6, "ff02::114")
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, group + struct.pack("@I", index))
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)

@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import datetime as dt
+import time
 from types import SimpleNamespace
 
 import aiohttp
@@ -33,6 +34,57 @@ def status(*, upload=100, download=1000, family=6, basis="measured"):
             },
         },
     }
+
+
+def test_nat_level_is_payload_and_does_not_replace_log_severity(peers):
+    client, _ = peers
+    client.record_nat_probe(attempt="nat", local=("192.168.1.2", 5000),
+                            mapping="endpoint-independent-observed", filtering="undetermined", samples=[])
+    record = next(r for r in client.log.query() if r["event"] == "network.nat_assessment")
+    assert record["level"] == "INFO"
+    assert "nat_level" in record["fields"]
+    assert record["fields"]["nat_level"] == client.nat_assessment()["level"]
+
+
+@pytest.mark.parametrize("busy", ["local-speed", "remote-speed", "peer-wan", "file"])
+async def test_automatic_matrix_retry_waits_for_active_measurements_or_transfers(peers, monkeypatch, busy):
+    client, _ = peers
+    client.connected.set()
+    client.last_auto_retry = time.monotonic() - 150
+    restarted = asyncio.Event()
+
+    async def restart(*, automatic):
+        assert automatic
+        restarted.set()
+
+    monkeypatch.setattr(client, "restart_experiments", restart)
+    if busy == "local-speed":
+        await client.speed_lock.acquire()
+    elif busy == "remote-speed":
+        client.paths = [SimpleNamespace(closed=False, benches={}, receive_benches={"bench": {}})]
+    elif busy == "peer-wan":
+        client.peer_network = {"wan": {"state": "running"}}
+    else:
+        client.transfers.incoming["file"] = {}
+    task = asyncio.create_task(client.automatic_retry("ADDRESS_RENEWED"))
+    try:
+        async with asyncio.timeout(4):
+            while not any(r["event"] == "network.auto_retry_deferred" for r in client.log.query()):
+                await asyncio.sleep(0.01)
+        assert not restarted.is_set()
+        if client.speed_lock.locked():
+            client.speed_lock.release()
+        client.paths.clear()
+        client.peer_network.clear()
+        client.transfers.incoming.clear()
+        await asyncio.wait_for(task, 1)
+        assert restarted.is_set()
+        assert len([r for r in client.log.query() if r["event"] == "network.auto_retry_deferred"]) == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        client.paths.clear()
+        client.transfers.incoming.clear()
 
 
 def test_both_endpoints_and_direction_and_family_control_ninety_percent():
