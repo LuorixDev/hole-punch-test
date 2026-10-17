@@ -16,10 +16,11 @@ async def test_runtime_monitor_records_blocking_and_ui_cost_without_network_prob
     client, _ = peers
     client.ui_refresh_max_ms = 17.5
     client.active_path = SimpleNamespace(attempt="idle", transport_diagnostics=lambda: {"rtt_ms": 50})
-    task = asyncio.create_task(client.monitor_runtime(sample_seconds=0.005, report_seconds=0.04))
+    task = asyncio.create_task(client.monitor_runtime(sample_seconds=0.1, report_seconds=0.15))
     try:
-        await asyncio.sleep(0.01)
-        time.sleep(0.03)
+        # Arm the sampler before blocking; a timed sleep can let the first report run early on Windows.
+        await asyncio.sleep(0)
+        time.sleep(0.15)
         async with asyncio.timeout(2):
             while not any(r["event"] == "runtime.health" for r in client.log.query()):
                 await asyncio.sleep(0.005)

@@ -556,6 +556,7 @@ class Experiments:
 
                 while pending and len(active) < MAX_CONCURRENT_ATTEMPTS:
                     selected = None
+                    blocked_keys = set()
                     for position, (index, original) in enumerate(pending):
                         spec = dict(original)
                         spec["initiator"] = spec["leader_initiator"] == self.owner.leader
@@ -570,9 +571,11 @@ class Experiments:
                             break
                         if "exclusive" in active_keys:
                             break
-                        if keys.isdisjoint(active_keys):
+                        if keys.isdisjoint(active_keys | blocked_keys):
                             selected = (position, index, spec, keys)
                             break
+                        # Preserve shared-plan order on overlapping lanes even when peers finish at different times.
+                        blocked_keys.update(keys)
                     if selected is None:
                         break
                     position, index, spec, keys = selected

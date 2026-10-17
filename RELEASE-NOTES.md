@@ -4,7 +4,14 @@ Two-peer IPv4/IPv6 connectivity experiments, Chinese terminal UI, strict P2P cha
 image/file transfers, ping, directional throughput and compressed durable logs.
 The IPv4 exchange server never relays application data.
 
-## v0.1.11: Slow-Link Benchmarks and Windows Interface Recovery
+## v0.1.12: Slow-Link Benchmarks and Windows Interface Recovery
+
+The v0.1.11 candidate was withheld by the release gates. A Windows runtime-health
+test could collect a report before its injected loop stall; it now arms the
+sampler before blocking. A parallel Linux frozen run also exposed opposite
+dual-stack/single-family scheduling order between peers. Overlapping attempts
+now retain shared-plan order while independent transport lanes remain parallel;
+paired regressions reproduce the old deadlock with normal and eager tasks.
 
 Upgrade both clients and the server. Slow links now sample each benchmark
 direction for approximately ten seconds or until the selected byte cap, then
@@ -35,7 +42,7 @@ The selected MiB value is a traffic ceiling, not a mandatory transfer size.
 Linux isolated two-process tests reproduced the old timeout and residual queue
 at 1 Mbps / approximately 50 ms RTT. The fixed direction tests completed in
 approximately 10.4 seconds at 0.851 Mbps, with post-test RTT near 52 ms and chat
-ACK near 108 ms. The latest source regression run passed 604 tests with four
+ACK near 108 ms. The latest source regression run passed 606 tests with four
 skips. A separate real server/two-client headless TUI run delivered all 231
 messages and uploaded all current-session logs. See
 `BENCH-RECOVERY-2026-10-17.md` and `LOG-AUDIT-2026-10-17-CENTRAL.md`.

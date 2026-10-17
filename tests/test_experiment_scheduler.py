@@ -83,3 +83,50 @@ async def test_scheduler_bounds_parallel_lanes_and_places_exclusive_attempts_at_
     assert peak <= MAX_CONCURRENT_ATTEMPTS
     assert exclusive_overlap == [0]
     assert len(manager.results) == len(manager.plan)
+
+
+async def test_paired_schedulers_preserve_overlapping_order_after_asymmetric_completions(peers, task_scheduling):
+    plan = [
+        {"attempt": "pre4", "method": "udp", "profile": "fast", "a_host": "127.0.0.1"},
+        {"attempt": "pre6", "method": "udp", "profile": "fast", "a_host": "::1"},
+        {"attempt": "dual", "method": "webrtc", "profile": "dual", "a_host": None},
+        {"attempt": "single4", "method": "webrtc", "profile": "4", "a_host": None},
+        {"attempt": "single6", "method": "webrtc", "profile": "6", "a_host": None},
+        {"attempt": "tcp-independent", "method": "tcp", "profile": "fast", "a_host": "127.0.0.1"},
+    ]
+    plan = [{**spec, "b_host": spec["a_host"], "phase": "baseline", "leader_initiator": True}
+            for spec in plan]
+    started = {(side, spec["attempt"]): asyncio.Event() for side in (0, 1) for spec in plan}
+    launches = [[], []]
+    managers = []
+
+    async def park():
+        pass
+
+    for side, peer in enumerate(peers):
+        owner = SimpleNamespace(leader=side == 0, log=peer.log, paths=[], park_idle_paths=park)
+        manager = Experiments(owner)
+        manager.plan = plan
+
+        async def run_attempt(spec, index, side=side, manager=manager):
+            attempt = spec["attempt"]
+            launches[side].append(attempt)
+            started[side, attempt].set()
+            if attempt.startswith("pre"):
+                # One peer releases only IPv4 first; the other releases both lanes together.
+                await asyncio.sleep(0.04 if side == 0 and attempt == "pre6" else 0.01)
+            else:
+                await started[1 - side, attempt].wait()
+            result = {"attempt": attempt, "state": "failed", "data_path": False}
+            manager.results.append(result)
+            return result, result
+
+        manager.run_attempt = run_attempt
+        managers.append(manager)
+
+    await asyncio.wait_for(asyncio.gather(*(m.run_plan() for m in managers)), 2)
+    for order in launches:
+        assert order.index("tcp-independent") < order.index("dual")
+        assert order.index("dual") < order.index("single4")
+        assert order.index("dual") < order.index("single6")
+        assert len(order) == len(plan)
